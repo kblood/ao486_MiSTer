@@ -309,6 +309,21 @@ module execute_fpu (
                              (exe_cmdex == `CMDEX_FUCOM);
     wire is_fucomp         = (exe_cmd  == `CMD_fpu_cmp) &&
                              (exe_cmdex == `CMDEX_FUCOMP);
+    // PR-2b.4g (iter 58): mem-form FCOM/FCOMP — declared here (not in the
+    // mem-form arith block below) so is_cmp_now / is_cmp_pop_now / is_cmp_mem
+    // can reference them without forward-decl trouble (Gotcha #9).  Full
+    // semantics + cmp_b_v injection wired further down.  Lives in the
+    // CMD_fpu_arith_mem namespace (CMDEXes 12..15).
+    wire is_fcom_m32       = (exe_cmd  == `CMD_fpu_arith_mem) &&
+                             (exe_cmdex == `CMDEX_FCOM_M32);
+    wire is_fcom_m64       = (exe_cmd  == `CMD_fpu_arith_mem) &&
+                             (exe_cmdex == `CMDEX_FCOM_M64);
+    wire is_fcomp_m32      = (exe_cmd  == `CMD_fpu_arith_mem) &&
+                             (exe_cmdex == `CMDEX_FCOMP_M32);
+    wire is_fcomp_m64      = (exe_cmd  == `CMD_fpu_arith_mem) &&
+                             (exe_cmdex == `CMDEX_FCOMP_M64);
+    wire is_cmp_mem        = is_fcom_m32  | is_fcom_m64 |
+                             is_fcomp_m32 | is_fcomp_m64;
     // PR-2b.3p (iter 47): FTST = D9 E4.  Compare ST(0) to +0.0 — single
     // operand, but flows through the iter-46 cmp classifier with cmp_b_v
     // hard-coded to 80'h0 (driven by `is_ftst_lat` below).  Lives in the
@@ -344,11 +359,15 @@ module execute_fpu (
     wire is_cmpi_now       = is_fcomi | is_fucomi | is_fcomip | is_fucomip;
     wire is_cmp_now        = is_fcom | is_fcomp | is_fucom | is_fucomp | is_ftst |
                              is_fcompp | is_fucompp |
-                             is_cmpi_now;
+                             is_cmpi_now |
+                             is_cmp_mem;                            // PR-2b.4g
     wire is_cmp_unord_now  = is_fucom | is_fucomp | is_fucompp |
                              is_fucomi | is_fucomip;                // "unordered" = silent QNaN
+                                                                    // NOTE: mem-form FCOM/FCOMP are NOT here —
+                                                                    // they share FCOM's any-NaN IE policy.
     wire is_cmp_pop_now    = is_fcomp | is_fucomp | is_fcompp | is_fucompp |
-                             is_fcomip | is_fucomip;
+                             is_fcomip | is_fucomip |
+                             is_fcomp_m32 | is_fcomp_m64;           // PR-2b.4g
     // PR-2b.3q: pop-twice predicate.  Captured into pop_twice_lat at op
     // start; consumed by the S_POP→S_POP2 transition rule.  Mutually
     // exclusive with all non-FCOMPP/FUCOMPP ops (only these two set it).
@@ -453,16 +472,29 @@ module execute_fpu (
                             (exe_cmdex == `CMDEX_FDIVR_M32);
     wire is_fdivr_m64     = (exe_cmd  == `CMD_fpu_arith_mem) &&
                             (exe_cmdex == `CMDEX_FDIVR_M64);
+    // PR-2b.4g (iter 58) mem-form FCOM/FCOMP dispatch wires are declared
+    // earlier in the file (alongside is_fcom / is_fcomp etc.) so the cmp_now /
+    // cmp_pop_now aggregates can reference them without forward-decl trouble.
+    // See `is_fcom_m32` ~line 304 for the actual declarations.
     wire is_arith_mem     = is_fadd_m32 | is_fadd_m64 |
                             is_fsub_m32 | is_fsub_m64 |
                             is_fmul_m32 | is_fmul_m64 |
                             is_fdiv_m32 | is_fdiv_m64 |
                             is_fsubr_m32 | is_fsubr_m64 |
                             is_fdivr_m32 | is_fdivr_m64;
+    // Aggregate predicate for mem-form latch capture.  Wider than is_arith_mem
+    // because PR-2b.4g cmp mem-form ops also need is_mem_form_lat=1 so the
+    // converter wiring + cmp_b_v override + flags OR-lane all engage.  Kept
+    // separate from is_arith_mem so the kind_now / reverse_now / is_arith_d8
+    // OR-lists stay scoped to true arith ops only (cmp ops don't write the
+    // regfile data lane and don't engage the arith primitive bank).
+    wire is_mem_form_now  = is_arith_mem | is_cmp_mem;
     // mem_fmt: 00 = m32fp, 01 = m64fp.  All M64 CMDEXes are odd literals
-    // (4'd1/3/5/7/9/11); equivalently exe_cmdex[0] selects m64 when is_arith_mem.
-    wire [1:0] mem_fmt_now = (is_fadd_m64 | is_fsub_m64 | is_fmul_m64 | is_fdiv_m64 |
-                              is_fsubr_m64 | is_fdivr_m64)
+    // (4'd1/3/5/7/9/11/13/15); equivalently exe_cmdex[0] selects m64 when
+    // is_mem_form_now.
+    wire [1:0] mem_fmt_now = (is_fadd_m64  | is_fsub_m64  | is_fmul_m64 | is_fdiv_m64 |
+                              is_fsubr_m64 | is_fdivr_m64 |
+                              is_fcom_m64  | is_fcomp_m64)
                                 ? 2'b01 : 2'b00;
     // Condition selection.  Each pair (B/NB, E/NE, BE/NBE, U/NU) shares
     // the same EFLAGS expression; the invert bit (set for the N-prefixed
@@ -869,7 +901,7 @@ module execute_fpu (
                         is_fincstp_lat <= is_fincstp;
                         is_fcmov_lat    <= is_fcmov_now;
                         fcmov_taken_lat <= fcmov_taken_now;
-                        is_mem_form_lat <= is_arith_mem;
+                        is_mem_form_lat <= is_mem_form_now;
                         mem_fmt_lat     <= mem_fmt_now;
                         mem_data_lat    <= exe_mem_data;
                     end
@@ -919,6 +951,13 @@ module execute_fpu (
                                         is_ffree_lat | is_fnop_lat |
                                         is_fdecstp_lat | is_fincstp_lat |
                                         is_fcmov_lat) ? 6'd0 :
+                                       // PR-2b.4g (iter 58): mem-form cmp ops OR the
+                                       // converter's de/ie into the cmp_ie_now lane.
+                                       // Denormal mem -> DE (converter); SNaN mem ->
+                                       // IE (from BOTH the converter and cmp_ie_now —
+                                       // OR is idempotent so they merge harmlessly).
+                                       (is_cmp_lat & is_mem_form_lat) ?
+                                           {4'd0, mem_de_flag, cmp_ie_now | mem_ie_flag} :
                                        is_cmp_lat ? {5'd0, cmp_ie_now} :
                                        is_mem_form_lat ?
                                            (flags_pre | {4'd0, mem_de_flag, mem_ie_flag}) :
@@ -1302,8 +1341,14 @@ module execute_fpu (
     // emits FCOM-style {C3,C2,C1=0,C0} on a single-operand ST(0) classify.
     // The FETCH path still reads ST(rm) but the data is ignored once
     // is_ftst_lat is set at S_IDLE→S_FETCH_A.
-    wire [79:0] cmp_b_v = is_ftst_lat ? 80'h0 :
-                          (state == S_COMPUTE) ? rf_rd_data : b_lat;
+    // PR-2b.4g (iter 58): mem-form FCOM/FCOMP overrides cmp_b with the
+    // converted memory operand (mem_z during S_COMPUTE; b_lat thereafter
+    // since b_lat captures mem_z at end-of-S_COMPUTE per line ~907 below).
+    // Mirrors the arith_b mux structure exactly.
+    wire [79:0] cmp_b_v = is_ftst_lat                                       ? 80'h0  :
+                          is_mem_form_lat ? ((state == S_COMPUTE) ? mem_z : b_lat) :
+                          (state == S_COMPUTE)                              ? rf_rd_data :
+                                                                              b_lat;
 
     wire        cmp_a_sign = cmp_a_v[79];
     wire        cmp_b_sign = cmp_b_v[79];

@@ -752,3 +752,19 @@
 `define CMDEX_FSUBR_M64       4'd9
 `define CMDEX_FDIVR_M32       4'd10
 `define CMDEX_FDIVR_M64       4'd11
+
+// PR-2b.4g (iter 58) — mem-form FCOM / FCOMP.  Completes the D8/DC mem-form
+// arith+cmp decode space (all 8 modrm.reg slots wired: /0 FADD, /1 FMUL, /2
+// FCOM, /3 FCOMP, /4 FSUB, /5 FSUBR, /6 FDIV, /7 FDIVR).  Reuses the iter-46
+// cmp classifier via a `mem_z` injection into cmp_b_v under is_mem_form_lat
+// (analogous to FTST's is_ftst_lat → 80'h0 override at iter 47).  Lives in
+// the same CMD_fpu_arith_mem namespace (slots 4'd12..15 — fills the 4-bit
+// field completely).  IE policy matches FCOM (any-NaN raises IE), not FUCOM.
+//   CMDEX_FCOM_M32  (4'd12) — D8 /2 mod!=11
+//   CMDEX_FCOM_M64  (4'd13) — DC /2 mod!=11
+//   CMDEX_FCOMP_M32 (4'd14) — D8 /3 mod!=11 (FCOM then pop)
+//   CMDEX_FCOMP_M64 (4'd15) — DC /3 mod!=11
+`define CMDEX_FCOM_M32        4'd12
+`define CMDEX_FCOM_M64        4'd13
+`define CMDEX_FCOMP_M32       4'd14
+`define CMDEX_FCOMP_M64       4'd15
