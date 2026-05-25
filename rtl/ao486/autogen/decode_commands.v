@@ -143,6 +143,16 @@ wire cond_140 = dec_ready_one && decoder[7:0] == 8'h27;
 wire cond_141 = dec_ready_one && decoder[7:0] == 8'h2F;
 wire cond_142 = dec_ready_2byte_modregrm && decoder[7:0] == 8'hBC;
 wire cond_143 = dec_ready_2byte_modregrm && decoder[7:0] == 8'hBD;
+// --- PR-1a additions: 4 new FPU-stub decode predicates ---
+// cond_144: FNINIT       = 9B DB E3 (we match the DB E3 prefix on 2-byte-one;
+//                                    the 9B WAIT prefix is handled by cond_66)
+// cond_145: FNCLEX       = 9B DB E2 / DB E2
+// cond_146: FNSTSW AX    = 9B DF E0 / DF E0
+// cond_147: FNSTCW m16   = 9B D9 /7  / D9 /7  (mem form, mod != 11)
+wire cond_144 = dec_ready_2byte_one      && decoder[15:8] == 8'hDB && decoder[7:0] == 8'hE3;
+wire cond_145 = dec_ready_2byte_one      && decoder[15:8] == 8'hDB && decoder[7:0] == 8'hE2;
+wire cond_146 = dec_ready_2byte_one      && decoder[15:8] == 8'hDF && decoder[7:0] == 8'hE0;
+wire cond_147 = dec_ready_modregrm_one   && decoder[15:8] == 8'hD9 && decoder[5:3] == 3'b111 && decoder[7:6] != 2'b11;
 //======================================================== saves
 //======================================================== always
 //======================================================== sets
@@ -202,6 +212,10 @@ assign dec_cmd =
     (cond_65 && ~cond_4)? ( `CMD_PUSHA) :
     (cond_66 && ~cond_4)? ( `CMD_fpu) :
     (cond_67 && ~cond_4)? ( `CMD_fpu) :
+    (cond_144 && ~cond_4)? ( `CMD_fpu) :
+    (cond_145 && ~cond_4)? ( `CMD_fpu) :
+    (cond_146 && ~cond_4)? ( `CMD_fpu) :
+    (cond_147 && ~cond_4)? ( `CMD_fpu) :
     (cond_68 && ~cond_4)? ( `CMD_SETcc) :
     (cond_69 && ~cond_1)? ( `CMD_CMPXCHG) :
     (cond_70 && ~cond_4)? ( `CMD_ENTER) :
@@ -356,6 +370,9 @@ assign consume_one =
     (cond_58 && ~cond_4)? (`TRUE) :
     (cond_65 && ~cond_4)? (`TRUE) :
     (cond_66 && ~cond_4)? (`TRUE) :
+    (cond_144 && ~cond_4)? (`TRUE) :
+    (cond_145 && ~cond_4)? (`TRUE) :
+    (cond_146 && ~cond_4)? (`TRUE) :
     (cond_73 && ~cond_4)? (`TRUE) :
     (cond_77 && ~cond_4)? (`TRUE) :
     (cond_88 && ~cond_4)? (`TRUE) :
@@ -556,6 +573,7 @@ assign consume_modregrm_one =
     (cond_63 && ~cond_22)? (`TRUE) :
     (cond_64 && ~cond_22)? (`TRUE) :
     (cond_67 && ~cond_4)? (`TRUE) :
+    (cond_147 && ~cond_4)? (`TRUE) :
     (cond_68 && ~cond_4)? (`TRUE) :
     (cond_69 && ~cond_1)? (`TRUE) :
     (cond_71 && ~cond_4)? (`TRUE) :
@@ -680,6 +698,10 @@ assign dec_cmdex =
     (cond_65 && ~cond_4)? ( `CMDEX_PUSHA_STEP_0) :
     (cond_66 && ~cond_4)? ( `CMDEX_WAIT_STEP_0) :
     (cond_67 && ~cond_4)? ( `CMDEX_ESC_STEP_0) :
+    (cond_144 && ~cond_4)? ( `CMDEX_FN_INIT) :
+    (cond_145 && ~cond_4)? ( `CMDEX_FN_CLEX) :
+    (cond_146 && ~cond_4)? ( `CMDEX_FNSTSW_AX) :
+    (cond_147 && ~cond_4)? ( `CMDEX_FNSTCW_M16) :
     (cond_70 && ~cond_4)? ( `CMDEX_ENTER_FIRST) :
     (cond_71 && ~cond_4)? ( `CMDEX_IMUL_modregrm) :
     (cond_72 && ~cond_4)? ( `CMDEX_IMUL_modregrm_imm) :

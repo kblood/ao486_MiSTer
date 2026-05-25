@@ -141,7 +141,11 @@ module execute_commands(
     input       [31:0]  exe_enter_offset,
     
     input               exe_ready,
-    
+
+    //PR-1 FPU integration: fpu_core outputs piped from execute.v
+    input       [15:0]  fpu_sw,
+    input       [15:0]  fpu_cw,
+
     //mult
     input               mult_busy,
     input       [65:0]  mult_result,

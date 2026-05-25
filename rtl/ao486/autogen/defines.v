@@ -447,3 +447,10 @@
 `define CMDEX_CALL_Ap_STEP_0 4'd3
 `define CMD_INVD 7'd9
 `define CMDEX_PUSH_immediate_se 4'd1
+
+// --- PR-1a additions: FPU stub command-extension codes + CPUID FPU feature bit ---
+`define CMDEX_FN_INIT      4'd2
+`define CMDEX_FN_CLEX      4'd3
+`define CMDEX_FNSTSW_AX    4'd4
+`define CMDEX_FNSTCW_M16   4'd5
+`define CPUID_FEATURES_EDX 32'd1

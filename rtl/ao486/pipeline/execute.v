@@ -577,6 +577,32 @@ execute_divide execute_divide_inst(
 );
 
 //------------------------------------------------------------------------------
+// PR-1a FPU integration. fpu_core owns the CW/SW/tag-word/regfile state.
+// Macros CMD_fpu and CMDEX_FN_INIT/FN_CLEX/FNSTSW_AX/FNSTCW_M16 come from
+// autogen/defines.v (`include via defines.v) — autogen must be rebuilt
+// after applying the PR-1 patches before this file will elaborate.
+
+wire        fpu_op_retires =
+    exe_ready && exe_cmd == `CMD_fpu &&
+    (exe_cmdex == `CMDEX_FN_INIT    || exe_cmdex == `CMDEX_FN_CLEX ||
+     exe_cmdex == `CMDEX_FNSTSW_AX  || exe_cmdex == `CMDEX_FNSTCW_M16);
+
+wire [15:0] fpu_sw;
+wire [15:0] fpu_cw;
+
+fpu_core u_fpu_core (
+    .clk         (clk),
+    .reset       (~rst_n),
+    .cmdex       (exe_cmdex),
+    .cmd_valid   (fpu_op_retires),
+    .cmd_done    (),                 // not used in PR-1 — single-cycle retire
+    .sw          (fpu_sw),
+    .cw          (fpu_cw),
+    .mem_we_req  (),                 // FNSTCW writes via the standard
+    .mem_we_data ()                  // exe_result + dst_is_memory path
+);
+
+//------------------------------------------------------------------------------
 
 execute_commands execute_commands_inst(
     .clk                (clk),
@@ -691,7 +717,11 @@ execute_commands execute_commands_inst(
     .exe_enter_offset                   (exe_enter_offset),                 //input [31:0]
     
     .exe_ready                          (exe_ready),                        //input
-    
+
+    //PR-1a FPU outputs from fpu_core (declared just above)
+    .fpu_sw                             (fpu_sw),                           //input [15:0]
+    .fpu_cw                             (fpu_cw),                           //input [15:0]
+
     //mult
     .mult_busy                          (mult_busy),                        //input
     .mult_result                        (mult_result),                      //input [31:0]

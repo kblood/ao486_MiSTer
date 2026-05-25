@@ -1107,6 +1107,9 @@ assign exe_result =
     (cond_296)? ( (exe_cmd == `CMD_AAA)?  { 16'd0, e_aaa_result } : (exe_cmd == `CMD_AAS)?  { 16'd0, e_aas_result } : (exe_cmd == `CMD_DAA)?  { 16'd0, dst[15:8], e_daa_result } : { 16'd0, dst[15:8], e_das_result }) :
     (cond_297 && cond_298)? ( { 27'd0, e_bit_scan_forward }) :
     (cond_297 && cond_299)? ( { 27'd0, e_bit_scan_reverse }) :
+    // --- PR-1a additions: FNSTSW AX returns FPU status word; FNSTCW returns control word ---
+    (exe_cmd == `CMD_fpu && exe_cmdex == `CMDEX_FNSTSW_AX)?  ( { 16'd0, fpu_sw }) :
+    (exe_cmd == `CMD_fpu && exe_cmdex == `CMDEX_FNSTCW_M16)? ( { 16'd0, fpu_cw }) :
     32'd0;
 assign exe_trigger_ts_fault =
     (cond_34 && cond_35)? (`TRUE) :
