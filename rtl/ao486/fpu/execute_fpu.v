@@ -419,8 +419,31 @@ module execute_fpu (
                             (exe_cmdex == `CMDEX_FADD_M32);
     wire is_fadd_m64      = (exe_cmd  == `CMD_fpu_arith_mem) &&
                             (exe_cmdex == `CMDEX_FADD_M64);
-    wire is_arith_mem     = is_fadd_m32 | is_fadd_m64;
-    wire [1:0] mem_fmt_now = is_fadd_m64 ? 2'b01 : 2'b00;
+    // PR-2b.4e (iter 56): mem-form FSUB/FMUL/FDIV — non-reverse arms only.
+    // Each pair shares the converter + flags-OR-lane wiring from iter 55;
+    // the only new dispatch logic is the kind_now extension below (these
+    // CMDEXes participate in is_arith_mem, which lights is_arith_d8, which
+    // drives op_active + the existing primitive bank).
+    wire is_fsub_m32      = (exe_cmd  == `CMD_fpu_arith_mem) &&
+                            (exe_cmdex == `CMDEX_FSUB_M32);
+    wire is_fsub_m64      = (exe_cmd  == `CMD_fpu_arith_mem) &&
+                            (exe_cmdex == `CMDEX_FSUB_M64);
+    wire is_fmul_m32      = (exe_cmd  == `CMD_fpu_arith_mem) &&
+                            (exe_cmdex == `CMDEX_FMUL_M32);
+    wire is_fmul_m64      = (exe_cmd  == `CMD_fpu_arith_mem) &&
+                            (exe_cmdex == `CMDEX_FMUL_M64);
+    wire is_fdiv_m32      = (exe_cmd  == `CMD_fpu_arith_mem) &&
+                            (exe_cmdex == `CMDEX_FDIV_M32);
+    wire is_fdiv_m64      = (exe_cmd  == `CMD_fpu_arith_mem) &&
+                            (exe_cmdex == `CMDEX_FDIV_M64);
+    wire is_arith_mem     = is_fadd_m32 | is_fadd_m64 |
+                            is_fsub_m32 | is_fsub_m64 |
+                            is_fmul_m32 | is_fmul_m64 |
+                            is_fdiv_m32 | is_fdiv_m64;
+    // mem_fmt: 00 = m32fp, 01 = m64fp.  All M64 CMDEXes are odd literals
+    // (4'd1/3/5/7); equivalently exe_cmdex[0] selects m64 when is_arith_mem.
+    wire [1:0] mem_fmt_now = is_fadd_m64 | is_fsub_m64 | is_fmul_m64 | is_fdiv_m64
+                                ? 2'b01 : 2'b00;
     // Condition selection.  Each pair (B/NB, E/NE, BE/NBE, U/NU) shares
     // the same EFLAGS expression; the invert bit (set for the N-prefixed
     // mnemonics) flips the polarity.
@@ -482,10 +505,18 @@ module execute_fpu (
     // *D8-family operand order* and FSUBP keeps the natural ST(i),ST(0)
     // pairing.  The D8 family computes "ST(0) op ST(i)" by default;
     // the DE family computes "ST(i) op ST(0)" by default.
+    // PR-2b.4e (iter 56): mem-form FMUL/FDIV/FSUB join the kind_now mux so
+    // S_COMPUTE selects the right primitive at the existing
+    // mul_or_addsub_z / sum_pre cascade.  FADD mem-form falls through to
+    // KIND_ADD (default) — matches iter-55 behaviour.  Non-reverse only;
+    // FSUBR/FDIVR mem-form deferred to .4f because they need op_a/op_b
+    // routing changes when is_mem_form_lat=1 + reverse_lat=1.
     wire [1:0] kind_now =
-        (is_fmul_st0_sti  | is_fmulp_sti_st0)                                            ? KIND_MUL :
-        (is_fdiv_st0_sti  | is_fdivr_st0_sti  | is_fdivp_sti_st0  | is_fdivrp_sti_st0)  ? KIND_DIV :
-        (is_fsub_st0_sti  | is_fsubr_st0_sti  | is_fsubp_sti_st0  | is_fsubrp_sti_st0)  ? KIND_SUB :
+        (is_fmul_st0_sti  | is_fmulp_sti_st0  | is_fmul_m32 | is_fmul_m64)              ? KIND_MUL :
+        (is_fdiv_st0_sti  | is_fdivr_st0_sti  | is_fdivp_sti_st0  | is_fdivrp_sti_st0 |
+         is_fdiv_m32      | is_fdiv_m64)                                                ? KIND_DIV :
+        (is_fsub_st0_sti  | is_fsubr_st0_sti  | is_fsubp_sti_st0  | is_fsubrp_sti_st0 |
+         is_fsub_m32      | is_fsub_m64)                                                ? KIND_SUB :
                                                                                           KIND_ADD;
     wire reverse_now =
         // D8 family reverse forms (operand swap relative to ST(0) op ST(i)):

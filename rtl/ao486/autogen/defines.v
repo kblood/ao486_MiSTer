@@ -715,3 +715,22 @@
 `define CMD_fpu_arith_mem     7'd123
 `define CMDEX_FADD_M32        4'd0
 `define CMDEX_FADD_M64        4'd1
+
+// PR-2b.4e (iter 56) — mem-form FSUB/FMUL/FDIV (non-reverse arms).  Scale-out
+// of iter-55's CMD_fpu_arith_mem namespace covering D8/DC `/1, /4, /6` mem-
+// form encodings.  Reverse forms (FSUBR D8/DC /5, FDIVR D8/DC /7) deferred to
+// .4f because they need is_mem_form_lat to redirect operand routing into
+// op_a (not op_b) when reverse_lat=1.  All six new CMDEXes fit in the 4-bit
+// field with room to spare (4'd2..7 used, 4'd8..15 still free for .4f/.4g).
+//   CMDEX_FMUL_M32 (4'd2) — D8 /1 mod!=11
+//   CMDEX_FMUL_M64 (4'd3) — DC /1 mod!=11
+//   CMDEX_FSUB_M32 (4'd4) — D8 /4 mod!=11
+//   CMDEX_FSUB_M64 (4'd5) — DC /4 mod!=11
+//   CMDEX_FDIV_M32 (4'd6) — D8 /6 mod!=11
+//   CMDEX_FDIV_M64 (4'd7) — DC /6 mod!=11
+`define CMDEX_FMUL_M32        4'd2
+`define CMDEX_FMUL_M64        4'd3
+`define CMDEX_FSUB_M32        4'd4
+`define CMDEX_FSUB_M64        4'd5
+`define CMDEX_FDIV_M32        4'd6
+`define CMDEX_FDIV_M64        4'd7

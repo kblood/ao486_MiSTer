@@ -305,10 +305,23 @@ module softfloat_div_x80 (
     );
 
     wire [14:0] z_exp_normal = z_exp_norm[14:0];
-    wire [14:0] z_exp_out    = (ze_now | oe_now) ? 15'h7FFF : z_exp_normal;
-    wire [63:0] z_sig_out    = (ze_now | oe_now) ? 64'h8000000000000000 : mant_norm;
+    wire [14:0] z_exp_out    = (ze_now | oe_now | ie_now) ? 15'h7FFF : z_exp_normal;
+    // PR-2b.4e (iter 56): 0/0 IE branch now emits canonical x87
+    // QNaN_INDEFINITE (sign=1, exp=7FFF, frac=C000_...).  Closes the
+    // long-standing iter-23 TODO ("real hardware would emit QNaN_INDEFINITE;
+    // deferred to PR-2b.3e along with the NaN family") — the bug was latent
+    // because reg-form gen_div_vectors didn't include 0/0; iter-56's
+    // gen_fdiv_mem_vectors does.  Without this fix the normal-path mant_norm
+    // for 0/0 is X (long-divide of 0/0 produces X bits), which propagates
+    // to rf_wr_data and the regfile.  ze_now/oe_now keep their signed Inf
+    // encoding; ie_now's z_sig is the QNaN_INDEFINITE-specific J-bit + QNaN
+    // bit pattern.  z_sign is overridden to 1 in the final z mux below so
+    // the canonical form has the negative sign per SDM Vol 1 §4.8.3.7.
+    wire [63:0] z_sig_out    = ie_now              ? 64'hC000000000000000 :
+                               (ze_now | oe_now)   ? 64'h8000000000000000 :
+                                                     mant_norm;
 
-    wire [79:0] z_normal_pre = {z_sign, z_exp_out, z_sig_out};
+    wire [79:0] z_normal_pre = {ie_now ? 1'b1 : z_sign, z_exp_out, z_sig_out};
     // Pick canonical subnormal when ue_now fires (ze_now/ie_now already
     // exclude themselves from ue_now via the ~ze_now & ~ie_now qualifiers).
     wire [79:0] z_normal     = ue_now ? z_subn : z_normal_pre;
