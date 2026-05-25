@@ -399,6 +399,28 @@ module execute_fpu (
                             (exe_cmdex == `CMDEX_FCMOVNU);
     wire is_fcmov_now     = is_fcmovb | is_fcmove | is_fcmovbe | is_fcmovu |
                             is_fcmovnb | is_fcmovne | is_fcmovnbe | is_fcmovnu;
+
+    // PR-2b.4d (iter 55): mem-form FADD — first real consumer of the
+    // iter-53 exe_mem_data lane + the iter-54 float32/float64 -> floatx80
+    // converters.  Uses a NEW CMD code (CMD_fpu_arith_mem) so it gets a
+    // fresh 4-bit CMDEX namespace (the existing CMD_fpu_arith one is
+    // already full).  CMDEX width encodes the operand format:
+    //   CMDEX_FADD_M32 (4'd0) — float32 source (D8 /0 mod!=11)
+    //   CMDEX_FADD_M64 (4'd1) — float64 source (DC /0 mod!=11)
+    // Destination is ST(0) for both, matching D8/DC mem-form SDM canonical.
+    // No pop, no reverse — reuses the existing FADD primitive (add or sub
+    // depending on operand signs) through the same use_sub_primitive mux
+    // that reg-form FADD uses.  The only new logic is: (i) latch the
+    // mem operand + format at op-start, (ii) drive the converters from
+    // mem_data_lat, (iii) override the b operand in S_COMPUTE with the
+    // converter output instead of rf_rd_data, (iv) OR the converter's
+    // de/ie flags into flags_lat.
+    wire is_fadd_m32      = (exe_cmd  == `CMD_fpu_arith_mem) &&
+                            (exe_cmdex == `CMDEX_FADD_M32);
+    wire is_fadd_m64      = (exe_cmd  == `CMD_fpu_arith_mem) &&
+                            (exe_cmdex == `CMDEX_FADD_M64);
+    wire is_arith_mem     = is_fadd_m32 | is_fadd_m64;
+    wire [1:0] mem_fmt_now = is_fadd_m64 ? 2'b01 : 2'b00;
     // Condition selection.  Each pair (B/NB, E/NE, BE/NBE, U/NU) shares
     // the same EFLAGS expression; the invert bit (set for the N-prefixed
     // mnemonics) flips the polarity.
@@ -410,9 +432,16 @@ module execute_fpu (
     wire fcmov_invert_now = is_fcmovnb | is_fcmovne | is_fcmovnbe | is_fcmovnu;
     wire fcmov_taken_now  = fcmov_cond_base ^ fcmov_invert_now;
 
+    // PR-2b.4d (iter 55): is_arith_mem joins is_arith_d8 so kind_now (default
+    // KIND_ADD), reverse_now (default 0 — no reverse for FADD mem), and
+    // op_active (via is_arith_st0_sti) all engage on mem-form FADD without
+    // any further dispatch logic.  dst_is_sti_now stays 0 (D8/DC mem-form
+    // dst is ST(0), not ST(i)).  pop_after_now stays 0 (no pop variant
+    // wired yet for mem-form).
     wire is_arith_d8 = is_fadd_st0_sti  | is_fsub_st0_sti  |
                        is_fmul_st0_sti  | is_fdiv_st0_sti  |
-                       is_fsubr_st0_sti | is_fdivr_st0_sti;
+                       is_fsubr_st0_sti | is_fdivr_st0_sti |
+                       is_arith_mem;
     wire is_arith_de = is_faddp_sti_st0  | is_fmulp_sti_st0  |
                        is_fsubp_sti_st0  | is_fsubrp_sti_st0 |
                        is_fdivp_sti_st0  | is_fdivrp_sti_st0;
@@ -611,6 +640,18 @@ module execute_fpu (
     // change from the integer side can't reshape the move mid-flight.
     reg        is_fcmov_lat;
     reg        fcmov_taken_lat;
+    // PR-2b.4d (iter 55): mem-form latches.  is_mem_form_lat routes the
+    // S_COMPUTE b-operand source through the iter-54 converters instead of
+    // rf_rd_data, and OR's the converter's de/ie flags into flags_lat.
+    // mem_fmt_lat picks float32 (00) vs float64 (01).  mem_data_lat
+    // snapshots exe_mem_data at op-start so a same-pipeline e_load on a
+    // later cycle can't reshape the operand mid-flight (defence in depth;
+    // execute.v's exe_fpu_mem_data latch already holds it stable while
+    // fpu_busy is high, but a local copy decouples the FSM from any
+    // upstream-timing surprises).
+    reg        is_mem_form_lat;
+    reg [1:0]  mem_fmt_lat;
+    reg [63:0] mem_data_lat;
 
     // Latched tag-Empty observations (advisory — see header).
     reg        st0_empty_lat;
@@ -688,6 +729,18 @@ module execute_fpu (
     // as fpu_busy / sum_pre / fpu_exec_exc_flags_set forward-decls.
     wire       cmp_ie_now;
 
+    // PR-2b.4d (iter 55): forward-declare mem-form converter outputs.
+    // The S_COMPUTE arm above reads mem_z / mem_de_flag / mem_ie_flag to
+    // override the b operand + OR converter flags into flags_lat; the
+    // converter instances + the mux wires are declared lower in the
+    // primitives section.  Without these forward decls ModelSim auto-
+    // creates implicit nets at the always-block reference (vlog-2730)
+    // and then errors on the explicit `wire` decl later (vlog-2388) —
+    // same trap as cmp_ie_now / sum_pre / fpu_busy.
+    wire [79:0] mem_z;
+    wire        mem_de_flag;
+    wire        mem_ie_flag;
+
     //--------------------------------------------------------------------
     // FSM transitions
     //--------------------------------------------------------------------
@@ -721,6 +774,9 @@ module execute_fpu (
             is_fincstp_lat  <= 1'b0;
             is_fcmov_lat    <= 1'b0;
             fcmov_taken_lat <= 1'b0;
+            is_mem_form_lat <= 1'b0;
+            mem_fmt_lat     <= 2'b00;
+            mem_data_lat    <= 64'd0;
             st0_empty_lat   <= 1'b0;
             stsrc_empty_lat <= 1'b0;
             st0_tag_lat     <= 2'b00;
@@ -753,6 +809,9 @@ module execute_fpu (
                         is_fincstp_lat <= is_fincstp;
                         is_fcmov_lat    <= is_fcmov_now;
                         fcmov_taken_lat <= fcmov_taken_now;
+                        is_mem_form_lat <= is_arith_mem;
+                        mem_fmt_lat     <= mem_fmt_now;
+                        mem_data_lat    <= exe_mem_data;
                     end
                 end
 
@@ -780,16 +839,29 @@ module execute_fpu (
                 // 6'b0 so the writeback-gate / #MF / CSR OR-lane stay
                 // quiet through retirement.
                 S_COMPUTE: begin
-                    b_lat           <= rf_rd_data;
+                    // PR-2b.4d (iter 55): for mem-form the b operand is
+                    // mem_z (converted) not rf_rd_data — rf_rd_data still
+                    // reflects an unrelated ST(stnr) read since FETCH_B
+                    // drove abs_stsrc regardless, but mem-form discards it.
+                    b_lat           <= is_mem_form_lat ? mem_z : rf_rd_data;
                     stsrc_empty_lat <= (rf_rd_tag == 2'b11);
                     stsrc_tag_lat   <= rf_rd_tag;
                     z_lat           <= sum_pre;
+                    // PR-2b.4d (iter 55): mem-form OR's the converter's
+                    // de/ie flags into the arith primitive's flags_pre so
+                    // SNaN-input loads raise IE and denormal-input loads
+                    // raise DE.  Bit positions match cw[5:0] / sw[5:0]:
+                    //   flags_lat[0] = IE
+                    //   flags_lat[1] = DE
+                    // Higher bits (ZE/OE/UE/PE) come solely from flags_pre.
                     flags_lat       <= (is_fxch_lat | is_fld_lat | is_fst_lat |
                                         is_fchs_lat | is_fabs_lat | is_fxam_lat |
                                         is_ffree_lat | is_fnop_lat |
                                         is_fdecstp_lat | is_fincstp_lat |
                                         is_fcmov_lat) ? 6'd0 :
                                        is_cmp_lat ? {5'd0, cmp_ie_now} :
+                                       is_mem_form_lat ?
+                                           (flags_pre | {4'd0, mem_de_flag, mem_ie_flag}) :
                                                     flags_pre;
                     state           <= S_POST;
                 end
@@ -874,8 +946,47 @@ module execute_fpu (
     // no-op for them — but applying it uniformly keeps the dispatch
     // logic single-track.
     //--------------------------------------------------------------------
+    // PR-2b.4d (iter 55): converter instances feeding the mem-form arith
+    // lane.  Both run combinationally off mem_data_lat — only the one
+    // selected by mem_fmt_lat is consumed via the b_source mux below.
+    // mem_de_flag / mem_ie_flag fan into flags_lat at S_COMPUTE only when
+    // is_mem_form_lat is set, so reg-form ops see exactly the same
+    // flags_pre they did before this iter.
+    wire [79:0] f32_to_x80_z;
+    wire        f32_to_x80_de;
+    wire        f32_to_x80_ie;
+    float32_to_floatx80 u_f32_to_x80 (
+        .a  (mem_data_lat[31:0]),
+        .z  (f32_to_x80_z),
+        .de (f32_to_x80_de),
+        .ie (f32_to_x80_ie)
+    );
+    wire [79:0] f64_to_x80_z;
+    wire        f64_to_x80_de;
+    wire        f64_to_x80_ie;
+    float64_to_floatx80 u_f64_to_x80 (
+        .a  (mem_data_lat),
+        .z  (f64_to_x80_z),
+        .de (f64_to_x80_de),
+        .ie (f64_to_x80_ie)
+    );
+    // mem_z / mem_de_flag / mem_ie_flag are forward-declared near the FSM's
+    // forward-decl block (cmp_ie_now / sum_pre / etc) so the S_COMPUTE
+    // always-block can read them before this mux.  Same Gotcha #9 pattern.
+    assign mem_z       = mem_fmt_lat[0] ? f64_to_x80_z  : f32_to_x80_z;
+    assign mem_de_flag = mem_fmt_lat[0] ? f64_to_x80_de : f32_to_x80_de;
+    assign mem_ie_flag = mem_fmt_lat[0] ? f64_to_x80_ie : f32_to_x80_ie;
+
     wire [79:0] arith_a = a_lat;
-    wire [79:0] arith_b = (state == S_COMPUTE) ? rf_rd_data : b_lat;
+    // PR-2b.4d (iter 55): for mem-form, b is the converted mem operand
+    // (mem_z) instead of rf_rd_data / b_lat.  In S_COMPUTE b is sourced
+    // from the converter; in later states it's the registered b_lat copy
+    // (which we update in S_COMPUTE — see the b_lat write below).  For
+    // reg-form, this mux collapses to the original
+    // `(state == S_COMPUTE) ? rf_rd_data : b_lat` expression.
+    wire [79:0] arith_b = is_mem_form_lat
+                              ? ((state == S_COMPUTE) ? mem_z : b_lat)
+                              : ((state == S_COMPUTE) ? rf_rd_data : b_lat);
     wire [79:0] op_a = reverse_lat ? arith_b : arith_a;
     wire [79:0] op_b = reverse_lat ? arith_a : arith_b;
     // sum_pre / flags_pre are forward-declared above the FSM.
@@ -1239,11 +1350,18 @@ module execute_fpu (
     // PR-2b.6 (pop) progressively consume these.
     // cw[5:0] is read by the exception-masking logic above; cw[15:6]
     // (RC, PC, etc.) is not yet consumed by this narrow contract.
+    // PR-2b.4d (iter 55): exe_mem_data removed — now latched into
+    // mem_data_lat at S_IDLE->S_FETCH_A and consumed by the converters.
+    // exe_is_mem_form / exe_mem_fmt / exe_mem_data_valid stay suppressed
+    // because is_mem_form_lat and mem_fmt_lat are derived internally from
+    // the CMD code (CMD_fpu_arith_mem) + CMDEX width.  Later sub-iters
+    // expanding the mem-form set (FSUB / FMUL / FDIV mem) will keep this
+    // pattern; the external ports become relevant only if/when a decoder
+    // lane drives them (deferred to PR-2b.5+ if needed at all).
     wire _unused_ok = &{ 1'b0,
                          exe_modregrm_reg_3b,
                          exe_is_mem_form,
                          exe_pop_after,
-                         exe_mem_data,
                          exe_mem_fmt,
                          exe_mem_data_valid,
                          cw[15:6],

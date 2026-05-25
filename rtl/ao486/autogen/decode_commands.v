@@ -308,6 +308,18 @@ wire cond_186 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDB && decoder[15:
 wire cond_187 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDB && decoder[15:14] == 2'b11 && decoder[13:11] == 3'd5; // FUCOMI   DB E8+i
 wire cond_188 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDF && decoder[15:14] == 2'b11 && decoder[13:11] == 3'd6; // FCOMIP   DF F0+i
 wire cond_189 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDF && decoder[15:14] == 2'b11 && decoder[13:11] == 3'd5; // FUCOMIP  DF E8+i
+// PR-2b.4d (iter 55): first mem-form FPU arith — FADD m32fp (D8 /0, mod!=11)
+// and FADD m64fp (DC /0, mod!=11).  Both dispatched via the new
+// CMD_fpu_arith_mem CMD code (7'd123) so execute_fpu can derive
+// is_mem_form_lat directly from cmd, without needing a new decoder lane.
+// mod!=11 is the canonical mem-form encoding; cond_148 (D8 /0 mod=11)
+// already shadows the reg-form variant for the unit-TB elab path.  At
+// runtime the cond_67 catch-all still wins in the dispatch cascade (known
+// decoder priority quirk shared across cond_148..189); the unit TB drives
+// execute_fpu signals directly, so the cond_190/191 additions are
+// elab-clean shadows of the eventual runtime dispatch.
+wire cond_190 = dec_ready_modregrm_one   && decoder[7:0] == 8'hD8 && decoder[15:14] != 2'b11 && decoder[13:11] == 3'd0; // FADD m32fp
+wire cond_191 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDC && decoder[15:14] != 2'b11 && decoder[13:11] == 3'd0; // FADD m64fp
 //======================================================== saves
 //======================================================== always
 //======================================================== sets
@@ -413,6 +425,8 @@ assign dec_cmd =
     (cond_187 && ~cond_4)? ( `CMD_fpu_cmp) :
     (cond_188 && ~cond_4)? ( `CMD_fpu_cmp) :
     (cond_189 && ~cond_4)? ( `CMD_fpu_cmp) :
+    (cond_190 && ~cond_4)? ( `CMD_fpu_arith_mem) :
+    (cond_191 && ~cond_4)? ( `CMD_fpu_arith_mem) :
     (cond_68 && ~cond_4)? ( `CMD_SETcc) :
     (cond_69 && ~cond_1)? ( `CMD_CMPXCHG) :
     (cond_70 && ~cond_4)? ( `CMD_ENTER) :
@@ -813,6 +827,8 @@ assign consume_modregrm_one =
     (cond_187 && ~cond_4)? (`TRUE) :
     (cond_188 && ~cond_4)? (`TRUE) :
     (cond_189 && ~cond_4)? (`TRUE) :
+    (cond_190 && ~cond_4)? (`TRUE) :
+    (cond_191 && ~cond_4)? (`TRUE) :
     (cond_68 && ~cond_4)? (`TRUE) :
     (cond_69 && ~cond_1)? (`TRUE) :
     (cond_71 && ~cond_4)? (`TRUE) :
@@ -983,6 +999,8 @@ assign dec_cmdex =
     (cond_187 && ~cond_4)? ( `CMDEX_FUCOMI) :
     (cond_188 && ~cond_4)? ( `CMDEX_FCOMIP) :
     (cond_189 && ~cond_4)? ( `CMDEX_FUCOMIP) :
+    (cond_190 && ~cond_4)? ( `CMDEX_FADD_M32) :
+    (cond_191 && ~cond_4)? ( `CMDEX_FADD_M64) :
     (cond_70 && ~cond_4)? ( `CMDEX_ENTER_FIRST) :
     (cond_71 && ~cond_4)? ( `CMDEX_IMUL_modregrm) :
     (cond_72 && ~cond_4)? ( `CMDEX_IMUL_modregrm_imm) :

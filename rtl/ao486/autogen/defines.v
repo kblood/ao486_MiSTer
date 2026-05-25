@@ -696,3 +696,22 @@
 `define CMDEX_FCMOVNE         4'd5
 `define CMDEX_FCMOVNBE        4'd6
 `define CMDEX_FCMOVNU         4'd7
+
+// PR-2b.4d (iter 55) — first mem-form FPU op: FADD m32fp (D8 /0 mod!=11) and
+// FADD m64fp (DC /0 mod!=11).  The iter-53 plumbing wired exe_mem_data into
+// execute_fpu's port surface; iter-54 landed the float32/float64 -> floatx80
+// converters as standalone primitives.  This iter activates both end-to-end
+// by dispatching mem-form FADD through a NEW `CMD_fpu_arith_mem` (7'd123) so
+// it gets a fresh 4-bit CMDEX namespace — the existing CMD_fpu_arith one is
+// already FULL (iter-45 note: 4'd0..4'd15 all assigned across reg-form arith
+// + pop variants + FXCH/FLD/FST/FSTP).  CMDEX encodes the operand width:
+//   CMDEX_FADD_M32 (4'd0) — m32fp source (D8 /0 mod!=11)
+//   CMDEX_FADD_M64 (4'd1) — m64fp source (DC /0 mod!=11)
+// execute_fpu derives `is_mem_form_lat` and `mem_fmt_lat` from these CMDEX
+// values directly — so the external exe_is_mem_form / exe_mem_fmt ports stay
+// quiet for now (they'll be driven by the decoder lane the design doc plans
+// when later sub-iters expand the mem-form set to FSUB/FMUL/FDIV/etc.).
+// Destination is ST(0) for both (matches D8/DC mem-form SDM canonical).
+`define CMD_fpu_arith_mem     7'd123
+`define CMDEX_FADD_M32        4'd0
+`define CMDEX_FADD_M64        4'd1
