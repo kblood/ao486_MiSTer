@@ -329,6 +329,14 @@ wire cond_194 = dec_ready_modregrm_one   && decoder[7:0] == 8'hD8 && decoder[15:
 wire cond_195 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDC && decoder[15:14] != 2'b11 && decoder[13:11] == 3'd4; // FSUB m64fp
 wire cond_196 = dec_ready_modregrm_one   && decoder[7:0] == 8'hD8 && decoder[15:14] != 2'b11 && decoder[13:11] == 3'd6; // FDIV m32fp
 wire cond_197 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDC && decoder[15:14] != 2'b11 && decoder[13:11] == 3'd6; // FDIV m64fp
+// PR-2b.4f (iter 57): mem-form FSUBR/FDIVR reverse arms.  Same cond_67 runtime-
+// priority caveat as iter 55+56 — these are elab-clean shadows; reg-form unit
+// TBs bypass the decoder via tb_issue_arith_mem.  Completes the D8/DC mem-form
+// arith decode space: /0 FADD, /1 FMUL, /4 FSUB, /5 FSUBR, /6 FDIV, /7 FDIVR.
+wire cond_198 = dec_ready_modregrm_one   && decoder[7:0] == 8'hD8 && decoder[15:14] != 2'b11 && decoder[13:11] == 3'd5; // FSUBR m32fp
+wire cond_199 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDC && decoder[15:14] != 2'b11 && decoder[13:11] == 3'd5; // FSUBR m64fp
+wire cond_200 = dec_ready_modregrm_one   && decoder[7:0] == 8'hD8 && decoder[15:14] != 2'b11 && decoder[13:11] == 3'd7; // FDIVR m32fp
+wire cond_201 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDC && decoder[15:14] != 2'b11 && decoder[13:11] == 3'd7; // FDIVR m64fp
 //======================================================== saves
 //======================================================== always
 //======================================================== sets
@@ -442,6 +450,10 @@ assign dec_cmd =
     (cond_195 && ~cond_4)? ( `CMD_fpu_arith_mem) :
     (cond_196 && ~cond_4)? ( `CMD_fpu_arith_mem) :
     (cond_197 && ~cond_4)? ( `CMD_fpu_arith_mem) :
+    (cond_198 && ~cond_4)? ( `CMD_fpu_arith_mem) :
+    (cond_199 && ~cond_4)? ( `CMD_fpu_arith_mem) :
+    (cond_200 && ~cond_4)? ( `CMD_fpu_arith_mem) :
+    (cond_201 && ~cond_4)? ( `CMD_fpu_arith_mem) :
     (cond_68 && ~cond_4)? ( `CMD_SETcc) :
     (cond_69 && ~cond_1)? ( `CMD_CMPXCHG) :
     (cond_70 && ~cond_4)? ( `CMD_ENTER) :
@@ -850,6 +862,10 @@ assign consume_modregrm_one =
     (cond_195 && ~cond_4)? (`TRUE) :
     (cond_196 && ~cond_4)? (`TRUE) :
     (cond_197 && ~cond_4)? (`TRUE) :
+    (cond_198 && ~cond_4)? (`TRUE) :
+    (cond_199 && ~cond_4)? (`TRUE) :
+    (cond_200 && ~cond_4)? (`TRUE) :
+    (cond_201 && ~cond_4)? (`TRUE) :
     (cond_68 && ~cond_4)? (`TRUE) :
     (cond_69 && ~cond_1)? (`TRUE) :
     (cond_71 && ~cond_4)? (`TRUE) :
@@ -1028,6 +1044,10 @@ assign dec_cmdex =
     (cond_195 && ~cond_4)? ( `CMDEX_FSUB_M64) :
     (cond_196 && ~cond_4)? ( `CMDEX_FDIV_M32) :
     (cond_197 && ~cond_4)? ( `CMDEX_FDIV_M64) :
+    (cond_198 && ~cond_4)? ( `CMDEX_FSUBR_M32) :
+    (cond_199 && ~cond_4)? ( `CMDEX_FSUBR_M64) :
+    (cond_200 && ~cond_4)? ( `CMDEX_FDIVR_M32) :
+    (cond_201 && ~cond_4)? ( `CMDEX_FDIVR_M64) :
     (cond_70 && ~cond_4)? ( `CMDEX_ENTER_FIRST) :
     (cond_71 && ~cond_4)? ( `CMDEX_IMUL_modregrm) :
     (cond_72 && ~cond_4)? ( `CMDEX_IMUL_modregrm_imm) :

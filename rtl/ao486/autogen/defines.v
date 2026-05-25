@@ -734,3 +734,21 @@
 `define CMDEX_FSUB_M64        4'd5
 `define CMDEX_FDIV_M32        4'd6
 `define CMDEX_FDIV_M64        4'd7
+
+// PR-2b.4f (iter 57) — mem-form reverse arms FSUBR/FDIVR.  Completes the D8/DC
+// arith mem-form decode space (8 of 8 modrm.reg slots wired: /0 FADD, /1 FMUL,
+// /2 FCOM*, /3 FCOMP*, /4 FSUB, /5 FSUBR, /6 FDIV, /7 FDIVR).  Reuses the
+// existing reverse_lat path: when is_mem_form_lat=1 AND reverse_lat=1, the
+// op_a = arith_b = mem_z / op_b = arith_a = ST(0) mux already swings the
+// converted memory operand into op_a (the left-hand operand).  Result encoding
+// for FSUBR m32fp: ST(0) <- m32fp - ST(0); for FDIVR m32fp: ST(0) <- m32fp / ST(0).
+// Slots 4'd8..15 reserved at iter 56; this iter takes 4'd8..11.  4'd12..15 left
+// free for future mem-form ops (e.g. FCOM/FCOMP m32/m64 if they share the namespace).
+//   CMDEX_FSUBR_M32 (4'd8)  — D8 /5 mod!=11
+//   CMDEX_FSUBR_M64 (4'd9)  — DC /5 mod!=11
+//   CMDEX_FDIVR_M32 (4'd10) — D8 /7 mod!=11
+//   CMDEX_FDIVR_M64 (4'd11) — DC /7 mod!=11
+`define CMDEX_FSUBR_M32       4'd8
+`define CMDEX_FSUBR_M64       4'd9
+`define CMDEX_FDIVR_M32       4'd10
+`define CMDEX_FDIVR_M64       4'd11
