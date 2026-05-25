@@ -11,17 +11,14 @@ visible register/memory state we can grep the log for.
 
 ## One-time setup on this workstation
 
-1. **Lua 5.1+** — not currently installed. Options:
-   - `winget install DEVCOM.Lua` (verify which package version winget surfaces)
-   - or grab https://luabinaries.sourceforge.net/ portable zip → drop
-     `lua54.exe` into `tools/lua/bin/` and add to PATH for the session
-2. **altera_mf library path in vsim_start.bat** — current script reads
-   `-L C:\Projekte\ao486_MiSTer_dev\rtl\ao486\altera_mf_both` which is
-   the original author's tree, not present here. Replace with our
-   ModelSim ASE install:
-   ```
-   vsim -novopt work.etb -t 1ps -L C:\intelFPGA_lite\17.0\modelsim_ase\altera\verilog\altera_mf
-   ```
+1. **Lua 5.4.6** — **INSTALLED** (iter 14, via `winget install DEVCOM.Lua`).
+   Binary lives at `C:\Users\Caldor\AppData\Local\Programs\Lua\bin\lua.exe`.
+   Add that dir to PATH for the current shell or call it by absolute path.
+   FASM.EXE (the assembler) is already in `lua_tests/FASM.EXE`.
+2. **altera_mf library path in vsim_start.bat** — **FIXED** (iter 14):
+   the script now points to
+   `C:\intelFPGA_lite\17.0\modelsim_ase\altera\verilog\altera_mf`
+   (the path our ModelSim ASE install actually has).
 3. **Build the work library with PR-1a** — `vcom_all.bat` in this dir
    compiles the pristine TB, but for the PR-1a path you want our
    `../cpu_pr1a_elab.bat` followed by the VHDL TB compile steps from
@@ -29,6 +26,22 @@ visible register/memory state we can grep the log for.
    stringprocessor.vhd / tb.vhd` block). Easiest: pre-compile rtl with
    our batch, then run only the VHDL section of vcom_all.bat to layer
    in tb.vhd into the same work library.
+
+## Asm listing validated
+
+`lua_tests/pr1a_smoke.lua` produces a 35-byte FASM-assembled binary
+containing the right opcodes:
+
+```
+DB E3              FNINIT
+DF E0              FNSTSW AX
+67 D9 /7 = 67 D9 3E ...   FNSTCW [esi]
+DB E2              FNCLEX
+```
+
+Confirmed iter 14 by extracting the asm portion to a standalone file
+and running `FASM.EXE` on it — exits clean, 35 bytes out, opcode bytes
+in expected positions.
 
 ## Run procedure
 
