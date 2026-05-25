@@ -149,8 +149,9 @@ begin
       CLK                  => clk,
       RESET                => rst,
       
-      DISABLE              => '0',            
-                                          
+      DISABLE              => '0',
+      uma_ram              => '0',
+
       DDRAM_ADDR           => DDRAM_OUT_ADDR(27 downto 3)      ,
       DDRAM_DIN            => DDRAM_OUT_DIN       ,
       DDRAM_DOUT           => DDRAM_OUT_DOUT ,
