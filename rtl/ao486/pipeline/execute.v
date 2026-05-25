@@ -233,7 +233,16 @@ module execute(
     input       [31:0]  src_wire,
     input       [31:0]  dst_wire,
     input       [31:0]  rd_address_effective,
-    
+
+    // PR-2b.4a (iter 53): 64-bit memory operand lane for FPU mem-form ops.
+    // pipeline.v forwards `read_data[63:0]` from the read stage; we latch a
+    // snapshot on `e_load` into `exe_fpu_mem_data` and route it to
+    // execute_fpu.v's `exe_mem_data` port (was tied to 64'd0 in the PR-2b.0
+    // skeleton).  The arith primitives don't observe this lane until PR-2b.4d
+    // wires the first mem-form CMDEX; for now `exe_is_mem_form` stays 0 and
+    // execute_fpu's `is_op_active` doesn't engage on the mem_data path.
+    input       [63:0]  rd_read_data,
+
     //exe pipeline
     input               wr_busy,
     output              exe_ready,
@@ -395,6 +404,11 @@ always @(posedge clk) begin if(rst_n == 1'b0) exe_linear               <= 32'd0;
 always @(posedge clk) begin if(rst_n == 1'b0) exe_debug_read           <= 4'd0;      else if(e_load) exe_debug_read           <= rd_debug_read;           end
 always @(posedge clk) begin if(rst_n == 1'b0) src                      <= 32'd0;     else if(e_load) src                      <= src_wire;                end
 always @(posedge clk) begin if(rst_n == 1'b0) dst                      <= 32'd0;     else if(e_load) dst                      <= dst_wire;                end
+// PR-2b.4a: 64-bit FPU memory operand snapshot.  rd_read_data carries the
+// full memory operand from read.v's read_data[63:0] (m32 uses low 32, m64
+// uses the full 64).  Routed to u_execute_fpu's exe_mem_data port below.
+reg  [63:0] exe_fpu_mem_data;
+always @(posedge clk) begin if(rst_n == 1'b0) exe_fpu_mem_data         <= 64'd0;     else if(e_load) exe_fpu_mem_data         <= rd_read_data;            end
 always @(posedge clk) begin if(rst_n == 1'b0) exe_address_effective    <= 32'd0;     else if(e_load) exe_address_effective    <= rd_address_effective;    end
 always @(posedge clk) begin if(rst_n == 1'b0) exe_eip_next_sum         <= 32'd0;     else if(e_load) exe_eip_next_sum         <= rd_eip_next_sum;         end
 
@@ -756,12 +770,17 @@ execute_fpu u_execute_fpu (
     .exe_modregrm_reg_3b  (exe_modregrm_reg),
     .exe_modregrm_rm_3b   (exe_modregrm_rm),
 
-    // Mem-form / pop / mem-data: PR-2b.4 and PR-2b.6 add the real wires
-    // through autogen. Tie low for the skeleton — execute_fpu's op_active
-    // is hardcoded 0 so these values are never observed anyway.
+    // Mem-form / pop / mem-data.  PR-2b.4a (iter 53) wires exe_mem_data to
+    // the new 64-bit `exe_fpu_mem_data` latch (snapshot of pipeline.v's
+    // read_data on e_load).  The remaining four ports (is_mem_form,
+    // pop_after, mem_fmt, mem_data_valid) STAY tied for now — they need
+    // per-op decoder signals from autogen that PR-2b.4d will add when the
+    // first mem-form CMDEX (FADD m32fp) lands.  execute_fpu's mem-form
+    // dispatch (is_mem_form_lat) stays inactive across the 27 reg-form TB
+    // phases, so the live exe_mem_data lane has no behavioural effect yet.
     .exe_is_mem_form      (1'b0),
     .exe_pop_after        (1'b0),
-    .exe_mem_data         (64'd0),
+    .exe_mem_data         (exe_fpu_mem_data),
     .exe_mem_fmt          (2'b00),
     .exe_mem_data_valid   (1'b0),
 

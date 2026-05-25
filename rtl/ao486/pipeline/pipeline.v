@@ -1107,7 +1107,13 @@ execute execute_inst(
     .src_wire                      (src_wire),                      //input [31:0]
     .dst_wire                      (dst_wire),                      //input [31:0]
     .rd_address_effective          (rd_address_effective),          //input [31:0]
-    
+
+    // PR-2b.4a (iter 53): 64-bit memory operand lane for FPU mem-form ops.
+    // pipeline.v's existing `read_data[63:0]` input (line 197) carries the
+    // memory operand for m32/m64.  execute.v latches a snapshot on `e_load`
+    // and forwards it to execute_fpu.v's `exe_mem_data` port (was tied 64'd0).
+    .rd_read_data                  (read_data),                     //input [63:0]
+
     //exe pipeline
     .wr_busy                       (wr_busy),                       //input
     .exe_ready                     (exe_ready),                     //output
