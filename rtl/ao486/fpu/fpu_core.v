@@ -1,17 +1,19 @@
 // fpu_core.v
 //
-// PR-1 FPU stub. Owns fpu_regfile + fpu_csr. Handles the four no-arithmetic
-// ops that PR-1 needs to make CPUID-FPU advertisement honest:
+// PR-1a FPU stub: owns fpu_csr (CW/SW). Handles the four no-arithmetic ops
+// that PR-1a needs to make CPUID-FPU advertisement honest:
 //   - FNINIT   (DB E3)  : pulse init -> CW=0x037F, SW=0, tags=all-empty
 //   - FNCLEX   (DB E2)  : clear exception flags + SF
 //   - FNSTSW AX (DF E0) : drive AX <- SW (host pipeline mux)
 //   - FNSTCW m16 (D9/7) : drive memory-write port with CW
 //
-// Arithmetic ops (FLD/FSTP/FADD/...) land in PR-2 via microcode softfloatx80
-// (see research/design_fpu_paths.md, Path A).
+// PR-2b.1 refactor: the fpu_regfile instantiation moved up to execute.v so
+// the arithmetic FSM (execute_fpu.v) and the PR-1a control ops can share
+// one regfile. This module now only emits `fninit_pulse` to drive that
+// shared regfile's `init` port; it no longer owns register storage.
 //
-// Integration: pipeline.v instantiates this in the `exe` stage and decodes
-// CMDEX_* from CMD_fpu.txt (see research/pr1_patches.md Patch 3).
+// Arithmetic ops (FLD/FSTP/FADD/...) land in PR-2b+ via execute_fpu.v's
+// FSM-driven datapath, oracle-validated against sim/testfloat/glue/.
 
 `timescale 1ns / 1ps
 
@@ -27,6 +29,10 @@ module fpu_core (
     // Status word + control word readouts for pipeline mux
     output     [15:0] sw,
     output     [15:0] cw,
+
+    // FNINIT pulse to the shared fpu_regfile (instantiated up in execute.v
+    // as of PR-2b.1). High for the 1 cycle FNINIT retires.
+    output            fninit_pulse,
 
     // Memory-write helpers (for FNSTCW m16 etc.)
     output            mem_we_req,
@@ -80,24 +86,10 @@ module fpu_core (
         .exc_mask            ()
     );
 
-    // Connect a regfile so FNINIT also wipes the tag word.
-    wire [79:0] r0_w, r1_w, r2_w, r3_w, r4_w, r5_w, r6_w, r7_w;
-    wire [15:0] tag_w;
-    fpu_regfile u_rf (
-        .clk     (clk),
-        .reset   (reset),
-        .rd_idx  (3'd0),
-        .rd_data (),
-        .rd_tag  (),
-        .wr_idx  (3'd0),
-        .wr_data (80'd0),
-        .wr_tag  (2'b00),
-        .wr_en   (1'b0),
-        .init    (fninit_now),
-        .r0(r0_w), .r1(r1_w), .r2(r2_w), .r3(r3_w),
-        .r4(r4_w), .r5(r5_w), .r6(r6_w), .r7(r7_w),
-        .tag_word(tag_w)
-    );
+    // PR-2b.1: regfile instantiation moved up to execute.v. Just publish
+    // the FNINIT pulse so the shared regfile's `init` port sees the same
+    // 1-cycle assertion this module's CSR does.
+    assign fninit_pulse = fninit_now;
 
     assign sw       = sw_w;
     assign cw       = cw_w;

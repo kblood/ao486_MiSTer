@@ -303,7 +303,13 @@ wire [2:0]  exe_modregrm_reg;
 //------------------------------------------------------------------------------
 
 wire exe_waiting;
-    
+
+// PR-2b.1: forward declaration so the exe_ready assign below can chain
+// ~fpu_busy. The wire is driven by the execute_fpu instantiation further
+// down. ModelSim auto-creates implicit nets on first reference, so the
+// real declaration in the instantiation block would otherwise collide.
+wire fpu_busy;
+
 wire exe_is_8bit_clear;
 
 wire exe_cmpxchg_switch;
@@ -315,7 +321,7 @@ wire exe_eip_from_glob_param_2_16bit;
 
 //------------------------------------------------------------------------------
 
-assign exe_ready = ~(exe_reset) && ~(exe_waiting) && exe_cmd != `CMD_NULL && ~(wr_busy);
+assign exe_ready = ~(exe_reset) && ~(exe_waiting) && exe_cmd != `CMD_NULL && ~(wr_busy) && ~(fpu_busy);
 
 assign exe_busy = exe_waiting || (exe_ready == `FALSE && exe_cmd != `CMD_NULL);
 
@@ -577,10 +583,16 @@ execute_divide execute_divide_inst(
 );
 
 //------------------------------------------------------------------------------
-// PR-1a FPU integration. fpu_core owns the CW/SW/tag-word/regfile state.
+// PR-1a FPU integration. fpu_core owns the CW/SW state.
 // Macros CMD_fpu and CMDEX_FN_INIT/FN_CLEX/FNSTSW_AX/FNSTCW_M16 come from
 // autogen/defines.v (`include via defines.v) — autogen must be rebuilt
 // after applying the PR-1 patches before this file will elaborate.
+//
+// PR-2b.1 refactor: the shared fpu_regfile is now instantiated here so that
+// both the PR-1a control path (fpu_core, which only drives `init` on FNINIT)
+// and the PR-2b arithmetic FSM (execute_fpu, which drives the full R/W port)
+// hit the same storage. The write port is muxed by `fpu_busy`; PR-1a never
+// writes, so when fpu_busy=0 the write enables are forced low.
 
 wire        fpu_op_retires =
     exe_ready && exe_cmd == `CMD_fpu &&
@@ -589,17 +601,117 @@ wire        fpu_op_retires =
 
 wire [15:0] fpu_sw;
 wire [15:0] fpu_cw;
+wire        fpu_fninit_pulse;
 
 fpu_core u_fpu_core (
-    .clk         (clk),
-    .reset       (~rst_n),
-    .cmdex       (exe_cmdex),
-    .cmd_valid   (fpu_op_retires),
-    .cmd_done    (),                 // not used in PR-1 — single-cycle retire
-    .sw          (fpu_sw),
-    .cw          (fpu_cw),
-    .mem_we_req  (),                 // FNSTCW writes via the standard
-    .mem_we_data ()                  // exe_result + dst_is_memory path
+    .clk           (clk),
+    .reset         (~rst_n),
+    .cmdex         (exe_cmdex),
+    .cmd_valid     (fpu_op_retires),
+    .cmd_done      (),                 // not used in PR-1 — single-cycle retire
+    .sw            (fpu_sw),
+    .cw            (fpu_cw),
+    .fninit_pulse  (fpu_fninit_pulse),
+    .mem_we_req    (),                 // FNSTCW writes via the standard
+    .mem_we_data   ()                  // exe_result + dst_is_memory path
+);
+
+//------------------------------------------------------------------------------
+// PR-2b.0 skeleton + PR-2b.1 shared regfile.
+//
+// execute_fpu.v is instantiated as a behavioural no-op: its op_active is
+// hardcoded 0 so fpu_busy is permanently 0, the FSM stays in S_IDLE, all
+// write outputs stay deasserted. PR-2b.2 lifts that gate and wires the
+// arithmetic CMDs. Until then this entire block is invisible to PR-1a
+// smoke (same retire latencies, same regfile contents).
+
+// `wire fpu_busy;` forward-declared above the exe_ready assign.
+wire        fpu_done;
+wire [15:0] fpu_exec_sw_out;
+wire        fpu_exec_sw_we;
+wire [2:0]  fpu_rf_wr_idx;
+wire [79:0] fpu_rf_wr_data;
+wire [1:0]  fpu_rf_wr_tag;
+wire        fpu_rf_wr_en;
+wire [2:0]  fpu_top_din;
+wire        fpu_top_we;
+wire        fpu_trigger_mf_fault;
+wire [2:0]  fpu_rf_rd_idx;
+wire [79:0] fpu_rf_rd_data;
+wire [1:0]  fpu_rf_rd_tag;
+
+// Write-port mux: when fpu_busy=1 (PR-2b.2+) the arithmetic FSM owns the
+// write port; when fpu_busy=0 the PR-1a control path has no writes, so the
+// enable is forced low and the idx/data/tag get safe defaults.
+wire [2:0]  rf_wr_idx_muxed  = fpu_busy ? fpu_rf_wr_idx  : 3'd0;
+wire [79:0] rf_wr_data_muxed = fpu_busy ? fpu_rf_wr_data : 80'd0;
+wire [1:0]  rf_wr_tag_muxed  = fpu_busy ? fpu_rf_wr_tag  : 2'b00;
+wire        rf_wr_en_muxed   = fpu_busy ? fpu_rf_wr_en   : 1'b0;
+
+fpu_regfile u_fpu_regfile (
+    .clk      (clk),
+    .reset    (~rst_n),
+    .init     (fpu_fninit_pulse),
+
+    .rd_idx   (fpu_rf_rd_idx),
+    .rd_data  (fpu_rf_rd_data),
+    .rd_tag   (fpu_rf_rd_tag),
+
+    .wr_idx   (rf_wr_idx_muxed),
+    .wr_data  (rf_wr_data_muxed),
+    .wr_tag   (rf_wr_tag_muxed),
+    .wr_en    (rf_wr_en_muxed),
+
+    // Observability ports — unused in PR-2b.1; consumed in FSAVE/FXSAVE
+    // when those land.
+    .r0(), .r1(), .r2(), .r3(), .r4(), .r5(), .r6(), .r7(),
+    .tag_word ()
+);
+
+execute_fpu u_execute_fpu (
+    .clk                  (clk),
+    .rst_n                (rst_n),
+
+    .exe_reset            (exe_reset),
+    .exe_ready            (exe_ready),
+
+    // Command stream
+    .exe_cmd              (exe_cmd),
+    .exe_cmdex            (exe_cmdex),
+    .exe_modregrm_reg_3b  (exe_modregrm_reg),
+
+    // Mem-form / pop / mem-data: PR-2b.4 and PR-2b.6 add the real wires
+    // through autogen. Tie low for the skeleton — execute_fpu's op_active
+    // is hardcoded 0 so these values are never observed anyway.
+    .exe_is_mem_form      (1'b0),
+    .exe_pop_after        (1'b0),
+    .exe_mem_data         (64'd0),
+    .exe_mem_fmt          (2'b00),
+    .exe_mem_data_valid   (1'b0),
+
+    // CSR snapshot from fpu_core
+    .cw                   (fpu_cw),
+    .sw_in                (fpu_sw),
+
+    // Outputs
+    .fpu_busy             (fpu_busy),
+    .fpu_done             (fpu_done),
+    .sw_out               (fpu_exec_sw_out),
+    .sw_we                (fpu_exec_sw_we),
+
+    .rf_wr_idx            (fpu_rf_wr_idx),
+    .rf_wr_data           (fpu_rf_wr_data),
+    .rf_wr_tag            (fpu_rf_wr_tag),
+    .rf_wr_en             (fpu_rf_wr_en),
+
+    .top_din              (fpu_top_din),
+    .top_we               (fpu_top_we),
+    .exe_trigger_mf_fault (fpu_trigger_mf_fault),
+
+    // Regfile read port
+    .rf_rd_idx            (fpu_rf_rd_idx),
+    .rf_rd_data           (fpu_rf_rd_data),
+    .rf_rd_tag            (fpu_rf_rd_tag)
 );
 
 //------------------------------------------------------------------------------
