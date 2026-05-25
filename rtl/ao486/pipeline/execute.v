@@ -300,6 +300,10 @@ wire [10:0] exe_mutex_current;
 
 wire [2:0]  exe_modregrm_reg;
 
+// PR-2b.2b: modrm.rm field exposed for FPU register-form arith (D8/DC C0+i
+// encode the source ST(i) index in modrm.rm = exe_decoder[10:8]).
+wire [2:0]  exe_modregrm_rm;
+
 //------------------------------------------------------------------------------
 
 wire exe_waiting;
@@ -309,6 +313,30 @@ wire exe_waiting;
 // down. ModelSim auto-creates implicit nets on first reference, so the
 // real declaration in the instantiation block would otherwise collide.
 wire fpu_busy;
+
+// PR-2b.2d: same hoist for fpu_exec_exc_flags_set — referenced by the
+// fpu_csr instantiation that lives BETWEEN this block and the
+// execute_fpu instantiation that actually drives it.
+wire [5:0] fpu_exec_exc_flags_set;
+
+// PR-2b.3n: same hoist for fpu_cc_din / fpu_cc_we — driven by the FXAM
+// classifier inside execute_fpu, consumed by fpu_csr's cc lane (4-bit
+// {C3,C2,C1,C0} payload, pulsed during S_RETIRE when is_fxam_lat is set).
+wire [3:0] fpu_cc_din;
+wire       fpu_cc_we;
+
+// PR-2b.3u (iter 52): integer EFLAGS write-back lane out of execute_fpu.
+// Pulsed for one cycle in S_RETIRE during FCOMI / FUCOMI / FCOMIP /
+// FUCOMIP retire (when no unmasked exception trapped).  Payload is
+// {ZF, PF, CF} derived from the shared cmp_cc classifier.  These
+// signals are currently UNCONSUMED — the integration with the integer
+// write stage (pipeline/write.v → pipeline/write_commands.v →
+// write_register.v's cflag/pflag/zflag latches) is deferred to the
+// iter that wires FCOMI into a CPU-level smoke (likely paired with
+// PR-2b.4 mem-form arith).  The unit TB execute_fpu_tb.v validates
+// them directly off u_execute_fpu.
+wire [2:0] fpu_eflags_value;
+wire       fpu_eflags_we;
 
 wire exe_is_8bit_clear;
 
@@ -392,6 +420,7 @@ assign exe_address_16bit = ~(exe_address_32bit);
 assign exe_mutex_current      = wr_mutex;
 
 assign exe_modregrm_reg = exe_decoder[13:11];
+assign exe_modregrm_rm  = exe_decoder[10:8];
 
 //------------------------------------------------------------------------------ misc
 
@@ -583,7 +612,7 @@ execute_divide execute_divide_inst(
 );
 
 //------------------------------------------------------------------------------
-// PR-1a FPU integration. fpu_core owns the CW/SW state.
+// PR-1a FPU integration. fpu_core handles the four no-arithmetic CMDs.
 // Macros CMD_fpu and CMDEX_FN_INIT/FN_CLEX/FNSTSW_AX/FNSTCW_M16 come from
 // autogen/defines.v (`include via defines.v) — autogen must be rebuilt
 // after applying the PR-1 patches before this file will elaborate.
@@ -593,6 +622,13 @@ execute_divide execute_divide_inst(
 // and the PR-2b arithmetic FSM (execute_fpu, which drives the full R/W port)
 // hit the same storage. The write port is muxed by `fpu_busy`; PR-1a never
 // writes, so when fpu_busy=0 the write enables are forced low.
+//
+// PR-2b.2d refactor: fpu_csr is ALSO lifted up here so execute_fpu can OR
+// exception-flag deltas into the CSR via its `exc_flags_set` lane on each
+// retire.  fpu_core becomes a pure command decoder that emits fninit_pulse
+// + fnclex_pulse as side-effect signals to the now-external CSR; CW/SW
+// flow back in to fpu_core so FNSTSW_AX / FNSTCW_M16 still see the live
+// values.
 
 wire        fpu_op_retires =
     exe_ready && exe_cmd == `CMD_fpu &&
@@ -602,6 +638,7 @@ wire        fpu_op_retires =
 wire [15:0] fpu_sw;
 wire [15:0] fpu_cw;
 wire        fpu_fninit_pulse;
+wire        fpu_fnclex_pulse;
 
 fpu_core u_fpu_core (
     .clk           (clk),
@@ -612,8 +649,43 @@ fpu_core u_fpu_core (
     .sw            (fpu_sw),
     .cw            (fpu_cw),
     .fninit_pulse  (fpu_fninit_pulse),
+    .fnclex_pulse  (fpu_fnclex_pulse),
     .mem_we_req    (),                 // FNSTCW writes via the standard
     .mem_we_data   ()                  // exe_result + dst_is_memory path
+);
+
+// PR-2b.2d: fpu_csr lifted out of fpu_core.  init from FNINIT,
+// exc_flags_clear_all from FNCLEX, exc_flags_set from execute_fpu's
+// retire pulse.  cc / top / sf / cw_we / sw_we lanes will be wired in
+// PR-2b.2e+ (FCOM CC, FPU push/pop, FLDCW, FRSTOR); tied 0 for now.
+fpu_csr u_fpu_csr (
+    .clk                 (clk),
+    .reset               (~rst_n),
+    .init                (fpu_fninit_pulse),
+
+    .cw_we               (1'b0),
+    .cw_din              (16'h0),
+    .cw                  (fpu_cw),
+
+    .sw_we               (1'b0),
+    .sw_din              (16'h0),
+    .sw                  (fpu_sw),
+
+    .exc_flags_set       (fpu_exec_exc_flags_set),
+    .exc_flags_clear_all (fpu_fnclex_pulse),
+
+    .cc_we               (fpu_cc_we),
+    .cc_din              (fpu_cc_din),
+
+    .top                 (),
+    .top_din             (3'b0),
+    .top_we              (1'b0),
+
+    .sf_set              (1'b0),
+
+    .rc                  (),
+    .pc                  (),
+    .exc_mask            ()
 );
 
 //------------------------------------------------------------------------------
@@ -625,10 +697,13 @@ fpu_core u_fpu_core (
 // arithmetic CMDs. Until then this entire block is invisible to PR-1a
 // smoke (same retire latencies, same regfile contents).
 
-// `wire fpu_busy;` forward-declared above the exe_ready assign.
+// `wire fpu_busy;` AND `wire [5:0] fpu_exec_exc_flags_set;` are
+// forward-declared above the exe_ready assign (line ~315–321).  The
+// fpu_csr instance further up references fpu_exec_exc_flags_set before
+// the execute_fpu instantiation below drives it, so the hoist is
+// required (same vlog-2730 pattern as fpu_busy / sum_pre / flags_pre —
+// see HANDOFF Gotcha #9).
 wire        fpu_done;
-wire [15:0] fpu_exec_sw_out;
-wire        fpu_exec_sw_we;
 wire [2:0]  fpu_rf_wr_idx;
 wire [79:0] fpu_rf_wr_data;
 wire [1:0]  fpu_rf_wr_tag;
@@ -679,6 +754,7 @@ execute_fpu u_execute_fpu (
     .exe_cmd              (exe_cmd),
     .exe_cmdex            (exe_cmdex),
     .exe_modregrm_reg_3b  (exe_modregrm_reg),
+    .exe_modregrm_rm_3b   (exe_modregrm_rm),
 
     // Mem-form / pop / mem-data: PR-2b.4 and PR-2b.6 add the real wires
     // through autogen. Tie low for the skeleton — execute_fpu's op_active
@@ -693,11 +769,16 @@ execute_fpu u_execute_fpu (
     .cw                   (fpu_cw),
     .sw_in                (fpu_sw),
 
+    // PR-2b.3t (iter 51): integer-side EFLAGS bits consumed by FCMOVcc.
+    // execute.v's eflags inputs at lines 86/88/89 — already in scope here.
+    .cflag                (cflag),
+    .zflag                (zflag),
+    .pflag                (pflag),
+
     // Outputs
     .fpu_busy             (fpu_busy),
     .fpu_done             (fpu_done),
-    .sw_out               (fpu_exec_sw_out),
-    .sw_we                (fpu_exec_sw_we),
+    .exc_flags_set        (fpu_exec_exc_flags_set),
 
     .rf_wr_idx            (fpu_rf_wr_idx),
     .rf_wr_data           (fpu_rf_wr_data),
@@ -706,6 +787,13 @@ execute_fpu u_execute_fpu (
 
     .top_din              (fpu_top_din),
     .top_we               (fpu_top_we),
+
+    .cc_din               (fpu_cc_din),
+    .cc_we                (fpu_cc_we),
+
+    .eflags_value         (fpu_eflags_value),
+    .eflags_we            (fpu_eflags_we),
+
     .exe_trigger_mf_fault (fpu_trigger_mf_fault),
 
     // Regfile read port

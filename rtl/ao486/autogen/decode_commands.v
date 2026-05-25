@@ -144,15 +144,170 @@ wire cond_141 = dec_ready_one && decoder[7:0] == 8'h2F;
 wire cond_142 = dec_ready_2byte_modregrm && decoder[7:0] == 8'hBC;
 wire cond_143 = dec_ready_2byte_modregrm && decoder[7:0] == 8'hBD;
 // --- PR-1a additions: 4 new FPU-stub decode predicates ---
-// cond_144: FNINIT       = 9B DB E3 (we match the DB E3 prefix on 2-byte-one;
-//                                    the 9B WAIT prefix is handled by cond_66)
-// cond_145: FNCLEX       = 9B DB E2 / DB E2
-// cond_146: FNSTSW AX    = 9B DF E0 / DF E0
-// cond_147: FNSTCW m16   = 9B D9 /7  / D9 /7  (mem form, mod != 11)
-wire cond_144 = dec_ready_2byte_one      && decoder[15:8] == 8'hDB && decoder[7:0] == 8'hE3;
-wire cond_145 = dec_ready_2byte_one      && decoder[15:8] == 8'hDB && decoder[7:0] == 8'hE2;
-wire cond_146 = dec_ready_2byte_one      && decoder[15:8] == 8'hDF && decoder[7:0] == 8'hE0;
-wire cond_147 = dec_ready_modregrm_one   && decoder[15:8] == 8'hD9 && decoder[5:3] == 3'b111 && decoder[7:6] != 2'b11;
+// cond_144: FNINIT       = DB E3   (the 9B WAIT prefix is handled separately)
+// cond_145: FNCLEX       = DB E2
+// cond_146: FNSTSW AX    = DF E0
+// cond_147: FNSTCW m16   = D9 /7   (mem form, mod != 11)
+//
+// Iter-25 fix: PR-1a (iter 12) wrote these with the byte slices reversed
+// (decoder[15:8] for opcode, decoder[7:0] for modrm) AND cond_144..146
+// gated on dec_ready_2byte_one — that ready flag requires dec_prefix_2byte
+// (set only after a 0F escape in decode_prefix.v:163), so the conds were
+// unreachable. They never fired in PR-1a runtime testing because runtime
+// testing never ran. The correct convention is opcode in decoder[7:0],
+// modrm in decoder[15:8] (matches cond_29 / cond_16 / cond_148), and the
+// ready flag for a 1-byte-opcode + modrm form is dec_ready_modregrm_one.
+wire cond_144 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDB && decoder[15:8] == 8'hE3;
+wire cond_145 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDB && decoder[15:8] == 8'hE2;
+wire cond_146 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDF && decoder[15:8] == 8'hE0;
+wire cond_147 = dec_ready_modregrm_one   && decoder[7:0] == 8'hD9 && decoder[13:11] == 3'b111 && decoder[15:14] != 2'b11;
+
+// PR-2b.2b: FADD ST(0), ST(i) = D8 C0+i.  Single-byte ESC opcode (D8) + modrm
+// with mod=11 (register form) and reg=000 (/0 = ADD).  Source ST(i) index in
+// modrm.rm = decoder[10:8].
+//
+// NOTE on byte positions: dec_ready_modregrm_one is the no-0F-prefix path, so
+// decoder[7:0] holds the opcode and decoder[15:8] holds the modrm byte.
+// (cond_29 and cond_16 above use the same layout.  PR-1a's cond_144..147
+// have these byte slices swapped — known latent bug, tracked separately.)
+wire cond_148 = dec_ready_modregrm_one   && decoder[7:0] == 8'hD8 && decoder[15:14] == 2'b11 && decoder[13:11] == 3'd0;
+// PR-2b.3a: FSUB ST(0), ST(i) = D8 E0+i.  Same family as cond_148; reg=100
+// (/4 = SUB).  modrm.rm = decoder[10:8] carries the source ST(i) index;
+// reused unchanged by execute_fpu's is_arith_st0_sti dispatch.
+wire cond_149 = dec_ready_modregrm_one   && decoder[7:0] == 8'hD8 && decoder[15:14] == 2'b11 && decoder[13:11] == 3'd4;
+// PR-2b.3b: FMUL ST(0), ST(i) = D8 C8+i.  Same family again; reg=001
+// (/1 = MUL).  Same dispatch — third entry in execute_fpu's kind_lat
+// selector.
+wire cond_150 = dec_ready_modregrm_one   && decoder[7:0] == 8'hD8 && decoder[15:14] == 2'b11 && decoder[13:11] == 3'd1;
+// PR-2b.3c: FDIV ST(0), ST(i) = D8 F0+i.  Same family again; reg=110
+// (/6 = DIV).  Fourth entry in execute_fpu's kind_lat selector;
+// also first op to fire the unmasked-exception writeback-gate
+// (when b=0 + ZE-unmasked, ST(0) is preserved and #MF raises).
+wire cond_151 = dec_ready_modregrm_one   && decoder[7:0] == 8'hD8 && decoder[15:14] == 2'b11 && decoder[13:11] == 3'd6;
+// PR-2b.3d: FSUBR ST(0), ST(i) = D8 E8+i  (reg=101 = /5).  Reuses
+// softfloat_sub_x80 via an operand swap in execute_fpu (reverse_lat=1
+// captured at op-start when is_fsubr_st0_sti).
+wire cond_152 = dec_ready_modregrm_one   && decoder[7:0] == 8'hD8 && decoder[15:14] == 2'b11 && decoder[13:11] == 3'd5;
+// PR-2b.3d: FDIVR ST(0), ST(i) = D8 F8+i  (reg=111 = /7).  Reuses
+// softfloat_div_x80 the same way (reverse_lat=1 when is_fdivr_st0_sti).
+wire cond_153 = dec_ready_modregrm_one   && decoder[7:0] == 8'hD8 && decoder[15:14] == 2'b11 && decoder[13:11] == 3'd7;
+
+// PR-2b.3e: pop variants — DE family, "all instructions pop FPU stack"
+// (Bochs fetchdecode_x87.h line 353 note).  Opcode byte 0xDE, modrm with
+// mod=11 (reg-form), reg field selects the arithmetic op; rm carries the
+// destination ST(i) index.  Per Intel SDM Vol 2:
+//   DE C0+i = FADDP  ST(i), ST(0)  (reg=000, /0)
+//   DE C8+i = FMULP  ST(i), ST(0)  (reg=001, /1)
+//   DE E0+i = FSUBRP ST(i), ST(0)  (reg=100, /4) - dst <- ST(0) - ST(i)
+//   DE E8+i = FSUBP  ST(i), ST(0)  (reg=101, /5) - dst <- ST(i) - ST(0)
+//   DE F0+i = FDIVRP ST(i), ST(0)  (reg=110, /6) - dst <- ST(0) / ST(i)
+//   DE F8+i = FDIVP  ST(i), ST(0)  (reg=111, /7) - dst <- ST(i) / ST(0)
+// Same dispatcher as the D8 family, with two extra control bits added
+// in execute_fpu.v: dst_is_sti_lat and pop_after_lat.
+wire cond_154 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDE && decoder[15:14] == 2'b11 && decoder[13:11] == 3'd0;
+wire cond_155 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDE && decoder[15:14] == 2'b11 && decoder[13:11] == 3'd1;
+wire cond_156 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDE && decoder[15:14] == 2'b11 && decoder[13:11] == 3'd4;
+wire cond_157 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDE && decoder[15:14] == 2'b11 && decoder[13:11] == 3'd5;
+wire cond_158 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDE && decoder[15:14] == 2'b11 && decoder[13:11] == 3'd6;
+wire cond_159 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDE && decoder[15:14] == 2'b11 && decoder[13:11] == 3'd7;
+
+// PR-2b.3k: FXCH ST(i) = D9 C8+i.  Opcode 0xD9 + modrm with mod=11
+// (reg-form) and reg=001 (/1).  rm carries the destination ST(i) index.
+// Pure-control op (no math), swaps ST(0) ↔ ST(i).  Routed through
+// CMD_fpu_arith / CMDEX_FXCH_STi; execute_fpu.v owns the FSM.
+wire cond_160 = dec_ready_modregrm_one   && decoder[7:0] == 8'hD9 && decoder[15:14] == 2'b11 && decoder[13:11] == 3'd1;
+
+// PR-2b.3l: FLD ST(i) = D9 C0+i.  Opcode 0xD9 + modrm with mod=11
+// (reg-form) and reg=000 (/0).  rm carries the source ST(i) index.
+// Pure-control "push" op (no math): TOP-- and new ST(0) := old ST(i)
+// (data+tag).  Routed through CMD_fpu_arith / CMDEX_FLD_STi;
+// execute_fpu.v owns the FSM and the TOP write.
+wire cond_161 = dec_ready_modregrm_one   && decoder[7:0] == 8'hD9 && decoder[15:14] == 2'b11 && decoder[13:11] == 3'd0;
+
+// PR-2b.3m: FST ST(i) = D9 D0+i.  Opcode 0xD9 + modrm with mod=11
+// (reg-form) and reg=010 (/2).  rm carries the destination ST(i) index.
+// Pure-control "store" op (no math): ST(i) := ST(0) (data+tag); TOP
+// unchanged.  Routed through CMD_fpu_arith / CMDEX_FST_STi;
+// execute_fpu.v owns the FSM (reuses dst_is_sti_lat for the abs_stsrc
+// destination + is_fst_lat for the data/tag-source override).
+wire cond_162 = dec_ready_modregrm_one   && decoder[7:0] == 8'hD9 && decoder[15:14] == 2'b11 && decoder[13:11] == 3'd2;
+
+// PR-2b.3m: FSTP ST(i) = DD D8+i.  Opcode 0xDD + modrm with mod=11
+// (reg-form) and reg=011 (/3).  rm carries the destination ST(i) index.
+// Pure-control "store-then-pop" op (no math): ST(i) := ST(0) (data+tag),
+// then tag-clear at old ST(0) and TOP++.  Composes FST with the
+// existing iter-34 pop_after_lat path (S_RETIRE → S_POP cleanup).
+// Routed through CMD_fpu_arith / CMDEX_FSTP_STi.
+wire cond_163 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDD && decoder[15:14] == 2'b11 && decoder[13:11] == 3'd3;
+
+// PR-2b.3n: FCHS = D9 E0.  Unique 2-byte opcode (no modrm sub-fields):
+// the rm-byte is the whole opcode-extension.  Match the entire low 16 bits:
+// decoder[7:0]=0xD9, decoder[15:8]=0xE0.
+wire cond_164 = dec_ready_modregrm_one   && decoder[7:0] == 8'hD9 && decoder[15:8] == 8'hE0;
+
+// PR-2b.3n: FABS = D9 E1.
+wire cond_165 = dec_ready_modregrm_one   && decoder[7:0] == 8'hD9 && decoder[15:8] == 8'hE1;
+
+// PR-2b.3n: FXAM = D9 E5.  First op to drive the CSR's cc lane (C0/C1/C2/C3).
+wire cond_166 = dec_ready_modregrm_one   && decoder[7:0] == 8'hD9 && decoder[15:8] == 8'hE5;
+
+// PR-2b.3o (iter 46): FCOM ST(i)   = D8 D0+i (reg=3'd2, ordered  , no pop).
+wire cond_167 = dec_ready_modregrm_one   && decoder[7:0] == 8'hD8 && decoder[15:14] == 2'b11 && decoder[13:11] == 3'd2;
+// PR-2b.3o: FCOMP ST(i)  = D8 D8+i (reg=3'd3, ordered  , pop).
+wire cond_168 = dec_ready_modregrm_one   && decoder[7:0] == 8'hD8 && decoder[15:14] == 2'b11 && decoder[13:11] == 3'd3;
+// PR-2b.3o: FUCOM ST(i)  = DD E0+i (reg=3'd4, unordered, no pop).
+wire cond_169 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDD && decoder[15:14] == 2'b11 && decoder[13:11] == 3'd4;
+// PR-2b.3o: FUCOMP ST(i) = DD E8+i (reg=3'd5, unordered, pop).
+wire cond_170 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDD && decoder[15:14] == 2'b11 && decoder[13:11] == 3'd5;
+
+// PR-2b.3p (iter 47): FTST = D9 E4.  Unique 2-byte opcode like FCHS/FABS/FXAM —
+// the rm-byte is the entire opcode-extension.  Compare ST(0) to +0.0 and
+// set C0/C2/C3 in the cc lane (no regfile write).  Dispatched through
+// CMD_fpu_unary + CMDEX_FTST; execute_fpu.v includes is_ftst in is_cmp_now
+// so the cmp classifier engages with cmp_b_v overridden to 80'h0.
+wire cond_171 = dec_ready_modregrm_one   && decoder[7:0] == 8'hD9 && decoder[15:8] == 8'hE4;
+
+// PR-2b.3q (iter 48): FCOMPP = DE D9.  Unique 2-byte opcode (modrm.rm=001
+// happens to land src on ST(1), which is exactly what FCOMPP compares ST(0)
+// against — no override needed; the existing FETCH path reads ST(1)
+// naturally).  Pops ST(0) AND ST(1) after the compare — new pop_twice_lat
+// + S_POP2 state in execute_fpu.v.  FCOM-class IE policy (any NaN raises).
+wire cond_172 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDE && decoder[15:8] == 8'hD9;
+// PR-2b.3q: FUCOMPP = DA E9.  Same shape as FCOMPP but FUCOM-class IE
+// policy (QNaN silent, SNaN raises) — differentiated by is_fucom_lat.
+wire cond_173 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDA && decoder[15:8] == 8'hE9;
+
+// PR-2b.3r (iter 49): FFREE ST(i) = DD C0+i (modrm reg=000, mod=11).
+// Tag-only write of Empty to ST(i); data preserved.  Dispatched via the
+// new CMD_fpu_stack_ctrl namespace.
+wire cond_174 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDD && decoder[15:14] == 2'b11 && decoder[13:11] == 3'd0;
+
+// PR-2b.3s (iter 50): three more stack-control ops in CMD_fpu_stack_ctrl.
+// Each is a unique 2-byte opcode (D9 prefix + specific second byte).
+//   FNOP    = D9 D0 — no-op
+//   FDECSTP = D9 F6 — TOP -= 1
+//   FINCSTP = D9 F7 — TOP += 1
+wire cond_175 = dec_ready_modregrm_one   && decoder[7:0] == 8'hD9 && decoder[15:8] == 8'hD0;
+wire cond_176 = dec_ready_modregrm_one   && decoder[7:0] == 8'hD9 && decoder[15:8] == 8'hF6;
+wire cond_177 = dec_ready_modregrm_one   && decoder[7:0] == 8'hD9 && decoder[15:8] == 8'hF7;
+
+// PR-2b.3t (iter 51): FCMOVcc family.  Eight mod=11 mnemonics under two
+// opcode bytes (DA = non-negated, DB = negated).  modrm.reg selects the
+// condition source (B/E/BE/U); modrm.rm carries the source ST(i) index
+// — same dispatch shape as cond_148 (FADD ST0,ST(i)).
+wire cond_178 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDA && decoder[15:14] == 2'b11 && decoder[13:11] == 3'd0; // FCMOVB
+wire cond_179 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDA && decoder[15:14] == 2'b11 && decoder[13:11] == 3'd1; // FCMOVE
+wire cond_180 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDA && decoder[15:14] == 2'b11 && decoder[13:11] == 3'd2; // FCMOVBE
+wire cond_181 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDA && decoder[15:14] == 2'b11 && decoder[13:11] == 3'd3; // FCMOVU
+wire cond_182 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDB && decoder[15:14] == 2'b11 && decoder[13:11] == 3'd0; // FCMOVNB
+wire cond_183 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDB && decoder[15:14] == 2'b11 && decoder[13:11] == 3'd1; // FCMOVNE
+wire cond_184 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDB && decoder[15:14] == 2'b11 && decoder[13:11] == 3'd2; // FCMOVNBE
+wire cond_185 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDB && decoder[15:14] == 2'b11 && decoder[13:11] == 3'd3; // FCMOVNU
+// PR-2b.3u (iter 52): FCOMI / FUCOMI / FCOMIP / FUCOMIP — P6 cmp variants that write integer EFLAGS.
+wire cond_186 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDB && decoder[15:14] == 2'b11 && decoder[13:11] == 3'd6; // FCOMI    DB F0+i
+wire cond_187 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDB && decoder[15:14] == 2'b11 && decoder[13:11] == 3'd5; // FUCOMI   DB E8+i
+wire cond_188 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDF && decoder[15:14] == 2'b11 && decoder[13:11] == 3'd6; // FCOMIP   DF F0+i
+wire cond_189 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDF && decoder[15:14] == 2'b11 && decoder[13:11] == 3'd5; // FUCOMIP  DF E8+i
 //======================================================== saves
 //======================================================== always
 //======================================================== sets
@@ -216,6 +371,48 @@ assign dec_cmd =
     (cond_145 && ~cond_4)? ( `CMD_fpu) :
     (cond_146 && ~cond_4)? ( `CMD_fpu) :
     (cond_147 && ~cond_4)? ( `CMD_fpu) :
+    (cond_148 && ~cond_4)? ( `CMD_fpu_arith) :
+    (cond_149 && ~cond_4)? ( `CMD_fpu_arith) :
+    (cond_150 && ~cond_4)? ( `CMD_fpu_arith) :
+    (cond_151 && ~cond_4)? ( `CMD_fpu_arith) :
+    (cond_152 && ~cond_4)? ( `CMD_fpu_arith) :
+    (cond_153 && ~cond_4)? ( `CMD_fpu_arith) :
+    (cond_154 && ~cond_4)? ( `CMD_fpu_arith) :
+    (cond_155 && ~cond_4)? ( `CMD_fpu_arith) :
+    (cond_156 && ~cond_4)? ( `CMD_fpu_arith) :
+    (cond_157 && ~cond_4)? ( `CMD_fpu_arith) :
+    (cond_158 && ~cond_4)? ( `CMD_fpu_arith) :
+    (cond_159 && ~cond_4)? ( `CMD_fpu_arith) :
+    (cond_160 && ~cond_4)? ( `CMD_fpu_arith) :
+    (cond_161 && ~cond_4)? ( `CMD_fpu_arith) :
+    (cond_162 && ~cond_4)? ( `CMD_fpu_arith) :
+    (cond_163 && ~cond_4)? ( `CMD_fpu_arith) :
+    (cond_164 && ~cond_4)? ( `CMD_fpu_unary) :
+    (cond_165 && ~cond_4)? ( `CMD_fpu_unary) :
+    (cond_166 && ~cond_4)? ( `CMD_fpu_unary) :
+    (cond_167 && ~cond_4)? ( `CMD_fpu_cmp) :
+    (cond_168 && ~cond_4)? ( `CMD_fpu_cmp) :
+    (cond_169 && ~cond_4)? ( `CMD_fpu_cmp) :
+    (cond_170 && ~cond_4)? ( `CMD_fpu_cmp) :
+    (cond_171 && ~cond_4)? ( `CMD_fpu_unary) :
+    (cond_172 && ~cond_4)? ( `CMD_fpu_cmp) :
+    (cond_173 && ~cond_4)? ( `CMD_fpu_cmp) :
+    (cond_174 && ~cond_4)? ( `CMD_fpu_stack_ctrl) :
+    (cond_175 && ~cond_4)? ( `CMD_fpu_stack_ctrl) :
+    (cond_176 && ~cond_4)? ( `CMD_fpu_stack_ctrl) :
+    (cond_177 && ~cond_4)? ( `CMD_fpu_stack_ctrl) :
+    (cond_178 && ~cond_4)? ( `CMD_fpu_cmov) :
+    (cond_179 && ~cond_4)? ( `CMD_fpu_cmov) :
+    (cond_180 && ~cond_4)? ( `CMD_fpu_cmov) :
+    (cond_181 && ~cond_4)? ( `CMD_fpu_cmov) :
+    (cond_182 && ~cond_4)? ( `CMD_fpu_cmov) :
+    (cond_183 && ~cond_4)? ( `CMD_fpu_cmov) :
+    (cond_184 && ~cond_4)? ( `CMD_fpu_cmov) :
+    (cond_185 && ~cond_4)? ( `CMD_fpu_cmov) :
+    (cond_186 && ~cond_4)? ( `CMD_fpu_cmp) :
+    (cond_187 && ~cond_4)? ( `CMD_fpu_cmp) :
+    (cond_188 && ~cond_4)? ( `CMD_fpu_cmp) :
+    (cond_189 && ~cond_4)? ( `CMD_fpu_cmp) :
     (cond_68 && ~cond_4)? ( `CMD_SETcc) :
     (cond_69 && ~cond_1)? ( `CMD_CMPXCHG) :
     (cond_70 && ~cond_4)? ( `CMD_ENTER) :
@@ -370,9 +567,6 @@ assign consume_one =
     (cond_58 && ~cond_4)? (`TRUE) :
     (cond_65 && ~cond_4)? (`TRUE) :
     (cond_66 && ~cond_4)? (`TRUE) :
-    (cond_144 && ~cond_4)? (`TRUE) :
-    (cond_145 && ~cond_4)? (`TRUE) :
-    (cond_146 && ~cond_4)? (`TRUE) :
     (cond_73 && ~cond_4)? (`TRUE) :
     (cond_77 && ~cond_4)? (`TRUE) :
     (cond_88 && ~cond_4)? (`TRUE) :
@@ -573,7 +767,52 @@ assign consume_modregrm_one =
     (cond_63 && ~cond_22)? (`TRUE) :
     (cond_64 && ~cond_22)? (`TRUE) :
     (cond_67 && ~cond_4)? (`TRUE) :
+    (cond_144 && ~cond_4)? (`TRUE) :
+    (cond_145 && ~cond_4)? (`TRUE) :
+    (cond_146 && ~cond_4)? (`TRUE) :
     (cond_147 && ~cond_4)? (`TRUE) :
+    (cond_148 && ~cond_4)? (`TRUE) :
+    (cond_149 && ~cond_4)? (`TRUE) :
+    (cond_150 && ~cond_4)? (`TRUE) :
+    (cond_151 && ~cond_4)? (`TRUE) :
+    (cond_152 && ~cond_4)? (`TRUE) :
+    (cond_153 && ~cond_4)? (`TRUE) :
+    (cond_154 && ~cond_4)? (`TRUE) :
+    (cond_155 && ~cond_4)? (`TRUE) :
+    (cond_156 && ~cond_4)? (`TRUE) :
+    (cond_157 && ~cond_4)? (`TRUE) :
+    (cond_158 && ~cond_4)? (`TRUE) :
+    (cond_159 && ~cond_4)? (`TRUE) :
+    (cond_160 && ~cond_4)? (`TRUE) :
+    (cond_161 && ~cond_4)? (`TRUE) :
+    (cond_162 && ~cond_4)? (`TRUE) :
+    (cond_163 && ~cond_4)? (`TRUE) :
+    (cond_164 && ~cond_4)? (`TRUE) :
+    (cond_165 && ~cond_4)? (`TRUE) :
+    (cond_166 && ~cond_4)? (`TRUE) :
+    (cond_167 && ~cond_4)? (`TRUE) :
+    (cond_168 && ~cond_4)? (`TRUE) :
+    (cond_169 && ~cond_4)? (`TRUE) :
+    (cond_170 && ~cond_4)? (`TRUE) :
+    (cond_171 && ~cond_4)? (`TRUE) :
+    (cond_172 && ~cond_4)? (`TRUE) :
+    (cond_173 && ~cond_4)? (`TRUE) :
+    (cond_174 && ~cond_4)? (`TRUE) :
+    (cond_175 && ~cond_4)? (`TRUE) :
+    (cond_176 && ~cond_4)? (`TRUE) :
+    (cond_177 && ~cond_4)? (`TRUE) :
+    (cond_178 && ~cond_4)? (`TRUE) :
+    (cond_179 && ~cond_4)? (`TRUE) :
+    (cond_180 && ~cond_4)? (`TRUE) :
+    (cond_181 && ~cond_4)? (`TRUE) :
+    (cond_182 && ~cond_4)? (`TRUE) :
+    (cond_183 && ~cond_4)? (`TRUE) :
+    (cond_184 && ~cond_4)? (`TRUE) :
+    (cond_185 && ~cond_4)? (`TRUE) :
+    (cond_186 && ~cond_4)? (`TRUE) :
+    (cond_187 && ~cond_4)? (`TRUE) :
+    (cond_188 && ~cond_4)? (`TRUE) :
+    (cond_189 && ~cond_4)? (`TRUE) :
     (cond_68 && ~cond_4)? (`TRUE) :
     (cond_69 && ~cond_1)? (`TRUE) :
     (cond_71 && ~cond_4)? (`TRUE) :
@@ -702,6 +941,48 @@ assign dec_cmdex =
     (cond_145 && ~cond_4)? ( `CMDEX_FN_CLEX) :
     (cond_146 && ~cond_4)? ( `CMDEX_FNSTSW_AX) :
     (cond_147 && ~cond_4)? ( `CMDEX_FNSTCW_M16) :
+    (cond_148 && ~cond_4)? ( `CMDEX_FADD_ST0_STi) :
+    (cond_149 && ~cond_4)? ( `CMDEX_FSUB_ST0_STi) :
+    (cond_150 && ~cond_4)? ( `CMDEX_FMUL_ST0_STi) :
+    (cond_151 && ~cond_4)? ( `CMDEX_FDIV_ST0_STi) :
+    (cond_152 && ~cond_4)? ( `CMDEX_FSUBR_ST0_STi) :
+    (cond_153 && ~cond_4)? ( `CMDEX_FDIVR_ST0_STi) :
+    (cond_154 && ~cond_4)? ( `CMDEX_FADDP_STi_ST0) :
+    (cond_155 && ~cond_4)? ( `CMDEX_FMULP_STi_ST0) :
+    (cond_156 && ~cond_4)? ( `CMDEX_FSUBRP_STi_ST0) :
+    (cond_157 && ~cond_4)? ( `CMDEX_FSUBP_STi_ST0) :
+    (cond_158 && ~cond_4)? ( `CMDEX_FDIVRP_STi_ST0) :
+    (cond_159 && ~cond_4)? ( `CMDEX_FDIVP_STi_ST0) :
+    (cond_160 && ~cond_4)? ( `CMDEX_FXCH_STi) :
+    (cond_161 && ~cond_4)? ( `CMDEX_FLD_STi) :
+    (cond_162 && ~cond_4)? ( `CMDEX_FST_STi) :
+    (cond_163 && ~cond_4)? ( `CMDEX_FSTP_STi) :
+    (cond_164 && ~cond_4)? ( `CMDEX_FCHS) :
+    (cond_165 && ~cond_4)? ( `CMDEX_FABS) :
+    (cond_166 && ~cond_4)? ( `CMDEX_FXAM) :
+    (cond_167 && ~cond_4)? ( `CMDEX_FCOM) :
+    (cond_168 && ~cond_4)? ( `CMDEX_FCOMP) :
+    (cond_169 && ~cond_4)? ( `CMDEX_FUCOM) :
+    (cond_170 && ~cond_4)? ( `CMDEX_FUCOMP) :
+    (cond_171 && ~cond_4)? ( `CMDEX_FTST) :
+    (cond_172 && ~cond_4)? ( `CMDEX_FCOMPP) :
+    (cond_173 && ~cond_4)? ( `CMDEX_FUCOMPP) :
+    (cond_174 && ~cond_4)? ( `CMDEX_FFREE) :
+    (cond_175 && ~cond_4)? ( `CMDEX_FNOP) :
+    (cond_176 && ~cond_4)? ( `CMDEX_FDECSTP) :
+    (cond_177 && ~cond_4)? ( `CMDEX_FINCSTP) :
+    (cond_178 && ~cond_4)? ( `CMDEX_FCMOVB) :
+    (cond_179 && ~cond_4)? ( `CMDEX_FCMOVE) :
+    (cond_180 && ~cond_4)? ( `CMDEX_FCMOVBE) :
+    (cond_181 && ~cond_4)? ( `CMDEX_FCMOVU) :
+    (cond_182 && ~cond_4)? ( `CMDEX_FCMOVNB) :
+    (cond_183 && ~cond_4)? ( `CMDEX_FCMOVNE) :
+    (cond_184 && ~cond_4)? ( `CMDEX_FCMOVNBE) :
+    (cond_185 && ~cond_4)? ( `CMDEX_FCMOVNU) :
+    (cond_186 && ~cond_4)? ( `CMDEX_FCOMI) :
+    (cond_187 && ~cond_4)? ( `CMDEX_FUCOMI) :
+    (cond_188 && ~cond_4)? ( `CMDEX_FCOMIP) :
+    (cond_189 && ~cond_4)? ( `CMDEX_FUCOMIP) :
     (cond_70 && ~cond_4)? ( `CMDEX_ENTER_FIRST) :
     (cond_71 && ~cond_4)? ( `CMDEX_IMUL_modregrm) :
     (cond_72 && ~cond_4)? ( `CMDEX_IMUL_modregrm_imm) :

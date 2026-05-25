@@ -454,3 +454,245 @@
 `define CMDEX_FNSTSW_AX    4'd4
 `define CMDEX_FNSTCW_M16   4'd5
 `define CPUID_FEATURES_EDX 32'd1
+
+// --- PR-2b.2b additions: FPU arithmetic CMD code + first arith CMDEX ---
+// CMD_fpu_arith is a distinct CMD from CMD_fpu (7'd50) so the arith family
+// gets its own CMDEX namespace. Iter-24 ships only CMDEX_FADD_ST0_STi
+// (D8 C0+i); the rest of the family (FSUB/FMUL/FDIV/reverse/pop/mem-form)
+// lands in PR-2b.3+.
+`define CMD_fpu_arith         7'd118
+`define CMDEX_FADD_ST0_STi    4'd6
+
+// --- PR-2b.3a additions: FSUB ST(0), ST(i) = D8 E0+i (D8 /4) ---
+// Same encoding family as FADD (single ESC byte D8 + reg-form modrm), reg
+// field switches from 000 (/0=ADD) to 100 (/4=SUB).
+`define CMDEX_FSUB_ST0_STi    4'd7
+
+// --- PR-2b.3b additions: FMUL ST(0), ST(i) = D8 C8+i (D8 /1) ---
+// Same family again; reg field = 001 (/1 = MUL).
+`define CMDEX_FMUL_ST0_STi    4'd8
+
+// --- PR-2b.3c additions: FDIV ST(0), ST(i) = D8 F0+i (D8 /6) ---
+// Same family again; reg field = 110 (/6 = DIV).  First op to exercise the
+// FSM's unmasked-exception writeback-gate via real Zero_Divide inputs.
+`define CMDEX_FDIV_ST0_STi    4'd9
+
+// --- PR-2b.3d additions: reverse variants FSUBR/FDIVR ---
+// FSUBR ST(0), ST(i) = D8 E8+i (D8 /5).  Computes ST(0) <- ST(i) - ST(0)
+// (operands swapped vs FSUB).  Reuses softfloat_sub_x80 via an operand
+// swap in execute_fpu.v.
+// FDIVR ST(0), ST(i) = D8 F8+i (D8 /7).  Computes ST(0) <- ST(i) / ST(0)
+// (dividend/divisor swapped vs FDIV).  Reuses softfloat_div_x80 the same
+// way.  No new primitive, no new kind in kind_lat -- the reverse flag is
+// carried in a separate 1-bit reverse_lat reg captured at op-start.
+`define CMDEX_FSUBR_ST0_STi   4'd10
+`define CMDEX_FDIVR_ST0_STi   4'd11
+
+// --- PR-2b.3e additions: pop variants (DE family, "all instructions pop FPU stack") ---
+// Per Intel SDM Vol. 2 and Bochs fetchdecode_x87.h:
+//   DE C0+i = FADDP   ST(i), ST(0) : ST(i) <- ST(i) + ST(0), then FPU_pop()
+//   DE C8+i = FMULP   ST(i), ST(0) : ST(i) <- ST(i) * ST(0), then FPU_pop()
+//   DE E0+i = FSUBRP  ST(i), ST(0) : ST(i) <- ST(0) - ST(i), then FPU_pop()
+//   DE E8+i = FSUBP   ST(i), ST(0) : ST(i) <- ST(i) - ST(0), then FPU_pop()
+//   DE F0+i = FDIVRP  ST(i), ST(0) : ST(i) <- ST(0) / ST(i), then FPU_pop()
+//   DE F8+i = FDIVP   ST(i), ST(0) : ST(i) <- ST(i) / ST(0), then FPU_pop()
+// All six reuse the existing four softfloat primitives; the FSM adds a
+// `dst_is_sti_lat` control (rf_wr_idx = abs_stsrc) and a one-cycle S_POP
+// state that clears the old ST(0)'s tag to Empty and bumps TOP.
+`define CMDEX_FADDP_STi_ST0   4'd12
+`define CMDEX_FMULP_STi_ST0   4'd13
+`define CMDEX_FSUBP_STi_ST0   4'd14
+`define CMDEX_FSUBRP_STi_ST0  4'd15
+`define CMDEX_FDIVP_STi_ST0   4'd16
+`define CMDEX_FDIVRP_STi_ST0  4'd17
+
+// --- PR-2b.3k additions: FXCH ST(i) = D9 C8+i (D9 /1) ---
+// Pure-control op: swap ST(0) data+tag with ST(i) data+tag in one
+// op, TOP unchanged.  Reuses the existing arith FSM fetch path
+// (S_FETCH_A → S_FETCH_B → S_COMPUTE) to read both slots; the four
+// arith primitives still run combinationally but their outputs are
+// ignored.  A new is_fxch_lat (captured at S_IDLE→S_FETCH_A) routes
+// S_RETIRE to write ST(0) := old-ST(i) and adds a one-cycle S_FXCH2
+// state that writes ST(i) := old-ST(0).  flags_lat is forced 6'b0 so
+// the writeback-gate and #MF lane stay quiet; exc_flags_set / mf
+// stay zero.  No new primitive, no SW change.
+`define CMDEX_FXCH_STi        4'd18
+
+// --- PR-2b.3l additions: FLD ST(i) = D9 C0+i (D9 /0) ---
+// Pure-control "push" op: TOP-- and new ST(0) := old ST(i) (data+tag).
+// Read of old ST(i) happens BEFORE TOP shifts — so the regfile read
+// uses the pre-shift abs_stsrc = (top_lat + rm) & 7, then the S_RETIRE
+// write targets (top_lat - 1) & 7 = the new ST(0) slot, and the same
+// cycle pulses top_we with top_din = top_lat - 1.  Single-cycle write
+// (no S_FXCH2 / S_POP companion).  Like FXCH, flags_lat is forced 6'b0
+// in S_COMPUTE so the writeback-gate / #MF / CSR OR-lane all stay
+// quiet; exc_flags_set / mf stay zero.  #IS on Empty ST(i) is advisory
+// only (stsrc_empty_lat is captured but not yet faulted on).  No new
+// primitive, no SW change.
+`define CMDEX_FLD_STi         4'd19
+
+// --- PR-2b.3m additions: FST ST(i) = D9 D0+i (D9 /2) ---
+// --- PR-2b.3m additions: FSTP ST(i) = DD D8+i (DD /3) ---
+// Pure-control "store" ops, completing the swap/push/store control-op
+// trio that started with FXCH (iter 42) and FLD (iter 43).  FST writes
+// ST(0) data+tag into ST(i); TOP unchanged.  FSTP composes FST with a
+// pop (tag-clear at old ST(0), TOP++) via the existing iter-34
+// dst_is_sti_lat + pop_after_lat machinery — the only new control flag
+// is is_fst_lat (which covers BOTH FST and FSTP) and merely overrides
+// rf_wr_data → a_lat (= ST(0)) and rf_wr_tag → st0_tag_lat (= ST(0)'s
+// tag).  The destination muxing (dst_is_sti_lat → abs_stsrc) and the
+// pop side-effects (pop_after_lat → S_POP cleanup) are reused from
+// iter 34.  flags_lat is forced 6'b0 in S_COMPUTE (merge predicate
+// extended) so the writeback-gate / #MF / CSR OR-lane stay quiet.  No
+// new primitive, no SW change.  FST: dest=abs_stsrc, no pop, TOP
+// unchanged.  FSTP: dest=abs_stsrc, then S_POP (Empty at abs_st0,
+// TOP++).
+`define CMDEX_FST_STi         4'd20
+`define CMDEX_FSTP_STi        4'd21
+
+// --- PR-2b.3n additions: unary control ops on ST(0) (no source ST(i)) ---
+// FCHS = D9 E0 : ST(0) <- ST(0) with bit 79 toggled (sign flip).
+// FABS = D9 E1 : ST(0) <- ST(0) with bit 79 cleared (magnitude).
+// FXAM = D9 E5 : classify ST(0) and drive {C3,C2,C1,C0} into the CSR's cc
+//                lane.  C1 carries ST(0)'s sign; C3/C2/C0 encode the class
+//                (Empty / NaN / Normal / Inf / Zero / Denormal / Unsupported)
+//                per Intel SDM Vol 1 §8.3.5 / Bochs FXAM table.
+// All three are dispatched via a NEW `CMD_fpu_unary` (7'd119) so they get
+// a fresh 4-bit CMDEX namespace.  This is necessary because the existing
+// CMD_fpu_arith namespace is FULL — 16 distinct CMDEX values (4'd0..4'd15)
+// are already assigned across FADD/FSUB/FMUL/FDIV/FSUBR/FDIVR plus the
+// FADDP/FMULP/FSUBP/FSUBRP/FDIVP/FDIVRP pop variants plus FXCH/FLD/FST/FSTP.
+// Note: the existing iter-23..44 CMDEX literals 4'd16..4'd21 silently
+// truncate (Verilog drops upper bits when the literal value exceeds the
+// declared width) into 4'd0..4'd5; that "works" only because no two
+// arith-namespace ops collide post-truncation.  Naively extending with
+// 4'd22 (truncates to 4'd6 = CMDEX_FADD) WOULD collide — hence the
+// separate CMD code here.
+`define CMD_fpu_unary         7'd119
+`define CMDEX_FCHS            4'd0
+`define CMDEX_FABS            4'd1
+`define CMDEX_FXAM            4'd2
+// PR-2b.3p (iter 47) — FTST = D9 E4 : compare ST(0) to +0.0.  No source
+// operand; the existing FETCH path reads ST(rm) but execute_fpu's cmp
+// classifier overrides cmp_b_v = 80'h0 when is_ftst_lat is set, so the
+// FCOM-encoded {C3,C2,C1=0,C0} drops out of the same machinery.  Raises
+// IE on any NaN (FCOM-class — not FUCOM).  Same dispatch family as
+// FCHS/FABS/FXAM (CMD_fpu_unary) but flows through is_cmp_now in
+// execute_fpu.v so the cmp lane (cc_we + flags_lat IE override) engages.
+`define CMDEX_FTST            4'd3
+
+// PR-2b.3o (iter 46) — x87 comparison ops on ST(0) vs ST(i): FCOM / FCOMP /
+// FUCOM / FUCOMP.  Read BOTH ST(0) and ST(i) via the existing fetch path;
+// classify result (much like FXAM but on the comparison outcome); pulse
+// `cc_we` to the CSR with {C3,C2,C1=0,C0} per Intel SDM Vol 1 §8.3.6.
+// No regfile data writeback (rf_wr_en gated off).  FCOMP / FUCOMP pop
+// after compare via the iter-30 `pop_after_lat=1` mechanism.
+//   FCOM   = D8 D0+i (modrm reg=2)
+//   FCOMP  = D8 D8+i (modrm reg=3)
+//   FUCOM  = DD E0+i (modrm reg=4)
+//   FUCOMP = DD E8+i (modrm reg=5)
+// Dispatched via a NEW `CMD_fpu_cmp` (7'd120) so they get a fresh 4-bit
+// CMDEX namespace — same reasoning as CMD_fpu_unary iter-45 (arith CMDEX
+// namespace is FULL).  FCOM raises IE on ANY NaN; FUCOM raises IE only on
+// SNaN — the difference is captured by `is_fucom_lat` in execute_fpu.v.
+`define CMD_fpu_cmp           7'd120
+`define CMDEX_FCOM            4'd0
+`define CMDEX_FCOMP           4'd1
+`define CMDEX_FUCOM           4'd2
+`define CMDEX_FUCOMP          4'd3
+
+// PR-2b.3q (iter 48) — FCOMPP / FUCOMPP : x87 cmp + double-pop ops.
+//   FCOMPP  = DE D9   (unique 2-byte opcode, no modrm sub-field — like FTST)
+//   FUCOMPP = DA E9   (unique 2-byte opcode)
+// Same dispatch family as FCOM/FCOMP/FUCOM/FUCOMP (CMD_fpu_cmp); the cmp
+// classifier in execute_fpu.v fires unchanged.  FCOMPP shares FCOM's IE
+// policy (raise on any NaN); FUCOMPP shares FUCOM's (silent QNaN, raise
+// on SNaN only).  Differentiating feature: BOTH pop ST(0) and ST(1) —
+// driven by a new `pop_twice_lat` reg + a new S_POP2 FSM state that
+// mirrors S_POP for the second tag-clear + TOP++ cycle.
+`define CMDEX_FCOMPP          4'd4
+`define CMDEX_FUCOMPP         4'd5
+
+// PR-2b.3u (iter 52) — FCOMI / FUCOMI / FCOMIP / FUCOMIP : P6-era cmp ops
+// that write the INTEGER EFLAGS register (CF, ZF, PF) instead of the FPU
+// CSR cc bits (C0..C3).  Mirror of iter-51 FCMOVcc: where FCMOVcc CONSUMES
+// integer EFLAGS, FCOMI PRODUCES them.  Reuses the iter-46 cmp classifier
+// 100% — same sign-aware compare, same NaN detection, same ±0 equality
+// rules.  Differentiating feature: at S_RETIRE, drive the new
+// `eflags_we` / `eflags_value` output ports (mapping cmp_cc → {ZF,PF,CF}
+// per Intel SDM Vol 1 §8.3.6:
+//    greater    cc=0000 → ZF=0 PF=0 CF=0
+//    less       cc=0001 → ZF=0 PF=0 CF=1
+//    equal      cc=1000 → ZF=1 PF=0 CF=0
+//    unordered  cc=1101 → ZF=1 PF=1 CF=1)
+// instead of cc_we / cc_din.  The CSR cc lane stays silent for FCOMI ops
+// (the SDM-mandated C1=0 partial-write is deferred — see iter-52 log).
+//
+// Encodings (per Intel SDM Vol 2):
+//   FCOMI   ST,ST(i)  = DB F0+i   (mod=11, reg=110, no pop)
+//   FCOMIP  ST,ST(i)  = DF F0+i   (mod=11, reg=110, pop)
+//   FUCOMI  ST,ST(i)  = DB E8+i   (mod=11, reg=101, no pop)
+//   FUCOMIP ST,ST(i)  = DF E8+i   (mod=11, reg=101, pop)
+//
+// IE policy mirrors FCOM/FUCOM: FCOMI/FCOMIP raise on ANY NaN;
+// FUCOMI/FUCOMIP raise IE only on SNaN (QNaN silent — joins
+// is_cmp_unord_now).  FCOMIP/FUCOMIP pop via existing pop_after_lat=1.
+`define CMDEX_FCOMI           4'd6
+`define CMDEX_FCOMIP          4'd7
+`define CMDEX_FUCOMI          4'd8
+`define CMDEX_FUCOMIP         4'd9
+
+// PR-2b.3r (iter 49) — x87 stack-control ops on ST(i): FFREE (DD C0+i).
+//   FFREE ST(i)  = DD C0+i (modrm reg=000, mod=11) — free (mark Empty) ST(i).
+// Tag-only write of Empty to ST(i).  Data preserved (regfile write uses
+// b_lat = ST(i)'s data as captured in the FETCH path so the write is a
+// data-preserving + tag-stomping operation rather than data-stomping).
+// No TOP change, no flags, no #MF.
+// Dispatched via a NEW `CMD_fpu_stack_ctrl` (7'd121) — distinct from
+// CMD_fpu_unary (which targets ST(0)) because FFREE is the first stack-
+// control op that targets ST(i).  Future tag-manipulation / TOP-only
+// ops (FNOP, FINCSTP, FDECSTP) can also land in this namespace.
+`define CMD_fpu_stack_ctrl    7'd121
+`define CMDEX_FFREE           4'd0
+
+// PR-2b.3s (iter 50) — three more stack-control ops joining the
+// CMD_fpu_stack_ctrl namespace established at iter 49:
+//   FNOP    = D9 D0  (no-op — no regfile / TOP / cc / flags change)
+//   FDECSTP = D9 F6  (TOP -= 1; no tag change, no data write)
+//   FINCSTP = D9 F7  (TOP += 1; no tag change, no data write)
+// All three walk the existing IDLE→FETCH→COMPUTE→POST→RETIRE FSM
+// (FETCH reads are discarded).  FNOP retires with NO side-effects;
+// FDECSTP and FINCSTP pulse top_we at S_RETIRE with top_din = top_lat
+// ∓ 1.  No FSM state additions, no new ports.  Demonstrates the
+// multi-occupant scaling of the iter-49 namespace.
+`define CMDEX_FNOP            4'd1
+`define CMDEX_FDECSTP         4'd2
+`define CMDEX_FINCSTP         4'd3
+
+// PR-2b.3t (iter 51) — FCMOVcc family (P6 conditional move on EFLAGS).
+//   DA C0+i .. C7+i  FCMOVB   ST(0), ST(i)   if CF=1
+//   DA C8+i .. CF+i  FCMOVE   ST(0), ST(i)   if ZF=1
+//   DA D0+i .. D7+i  FCMOVBE  ST(0), ST(i)   if (CF|ZF)=1
+//   DA D8+i .. DF+i  FCMOVU   ST(0), ST(i)   if PF=1
+//   DB C0+i .. C7+i  FCMOVNB  ST(0), ST(i)   if CF=0
+//   DB C8+i .. CF+i  FCMOVNE  ST(0), ST(i)   if ZF=0
+//   DB D0+i .. D7+i  FCMOVNBE ST(0), ST(i)   if (CF|ZF)=0
+//   DB D8+i .. DF+i  FCMOVNU  ST(0), ST(i)   if PF=0
+// Dispatched via a NEW `CMD_fpu_cmov` (7'd122) — first FPU CMD that reads
+// non-FPU CPU state (the integer-side EFLAGS lane).  execute_fpu.v gains
+// three new inputs (cflag/zflag/pflag) plumbed from execute.v's
+// already-in-scope EFLAGS bundle.  When the condition is taken, ST(0)
+// := ST(i) (data + tag); when not taken, ST(0) is left unchanged
+// (rf_wr_en gated off).  No TOP change, no pop, no flags.  CMDEX bits
+// are sequential (0..7) so the dispatch table in decode_commands.v
+// stays a flat 8-way match — the cond-evaluation and invert logic
+// live entirely in execute_fpu.v.
+`define CMD_fpu_cmov          7'd122
+`define CMDEX_FCMOVB          4'd0
+`define CMDEX_FCMOVE          4'd1
+`define CMDEX_FCMOVBE         4'd2
+`define CMDEX_FCMOVU          4'd3
+`define CMDEX_FCMOVNB         4'd4
+`define CMDEX_FCMOVNE         4'd5
+`define CMDEX_FCMOVNBE        4'd6
+`define CMDEX_FCMOVNU         4'd7

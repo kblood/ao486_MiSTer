@@ -76,10 +76,24 @@ module fpu_csr (
 
     wire es = |(exc_flags & ~cw[5:0]);
 
-    assign sw = { es /*B mirrors ES on 387+*/,
+    // SDM bit layout (MSB → LSB):
+    //   [15] B (mirrors ES on 387+)
+    //   [14] C3
+    //   [13:11] TOP
+    //   [10] C2
+    //   [9]  C1
+    //   [8]  C0
+    //   [7]  ES (summary)
+    //   [6]  SF (stack fault)
+    //   [5:0] exception flags IE..PE
+    // Widths: 1+1+3+1+1+1+1+1+6 = 16. (Pre-iter-28 had an extra `1'b0`
+    // between C2 and C1 that made the RHS 17 bits — silently truncated by
+    // Verilog and put C0/C1/C2 + TOP + C3 at the wrong positions. Fixed
+    // by PR-2b.2d; see memory entry `fpu_csr_sw_concat_bug.md`.)
+    assign sw = { es,
                   c3,
                   top_r,
-                  c_lo[2], 1'b0 /*reserved 0*/, c_lo[1], c_lo[0],
+                  c_lo[2], c_lo[1], c_lo[0],
                   es,
                   sf,
                   exc_flags };
