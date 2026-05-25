@@ -66,7 +66,23 @@ wire cond_63 = dec_ready_2byte_modregrm && decoder[7:0] == 8'h01 && decoder[13:1
 wire cond_64 = dec_ready_2byte_modregrm && decoder[7:0] == 8'h01 && decoder[13:11] == 3'd3;
 wire cond_65 = dec_ready_one && decoder[7:0] == 8'h60;
 wire cond_66 = dec_ready_one && decoder[7:0] == 8'h9B;
-wire cond_67 = dec_ready_modregrm_one && { decoder[7:3], 3'b0 } == 8'hD8;
+// PR-2b.4h (iter 59): gate the legacy D8..DF catch-all to reg-form only.
+// Before: catch-all fired for ANY modrm byte, dispatching to CMD_fpu /
+// CMDEX_ESC_STEP_0 (legacy stub) and shadowing the more specific
+// cond_144..147 (PR-1a) and cond_148..205 (PR-2b) at runtime.  After: cond_67
+// only matches reg-form (mod=11) opcodes, so mem-form D8/DC opcodes
+// (cond_190..205) and mem-form D9 /7 FNSTCW (cond_147) can win in the
+// dispatch cascade — unblocking real DOS-workload runtime testing of every
+// iter-55..58 mem-form op + PR-1a FNSTCW m16.  Reg-form PR-2b ops
+// (cond_148..170, etc.) still lose to cond_67 in the cascade; reg-form
+// runtime dispatch is a separate follow-up iter.  Trade-off: mem-form
+// D9 /0..6, DA, DB, DD, DE, DF instructions no longer hit the legacy stub
+// (which silently no-op'd them); they now fail to decode and would hang
+// the CPU at runtime.  Those ops were never actually implemented anyway —
+// the previous behaviour was "silent no-op", the new behaviour is "explicit
+// hang" — both are wrong, but the new shape is louder and pushes the
+// missing-ops work forward instead of hiding it.
+wire cond_67 = dec_ready_modregrm_one && { decoder[7:3], 3'b0 } == 8'hD8 && `DEC_MODREGRM_IS_MOD_11;
 wire cond_68 = dec_ready_2byte_modregrm && decoder[7:4] == 4'h9;
 wire cond_69 = dec_ready_2byte_modregrm && { decoder[7:1], 1'b0 } == 8'hB0;
 wire cond_70 = dec_ready_one_three && decoder[7:0] == 8'hC8;
