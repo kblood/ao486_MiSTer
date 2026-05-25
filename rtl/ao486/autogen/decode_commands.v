@@ -417,7 +417,9 @@ assign dec_cmd =
     (cond_64 && ~cond_22)? ( `CMD_LIDT) :
     (cond_65 && ~cond_4)? ( `CMD_PUSHA) :
     (cond_66 && ~cond_4)? ( `CMD_fpu) :
-    (cond_67 && ~cond_4)? ( `CMD_fpu) :
+    // PR-2b.4i (iter 60): cond_67 reg-form catch-all moved BELOW the
+    // PR-1a / PR-2b cond_144..205 arms so the more-specific decode
+    // wins.  See the cascade tail after cond_205 below.
     (cond_144 && ~cond_4)? ( `CMD_fpu) :
     (cond_145 && ~cond_4)? ( `CMD_fpu) :
     (cond_146 && ~cond_4)? ( `CMD_fpu) :
@@ -480,6 +482,17 @@ assign dec_cmd =
     (cond_203 && ~cond_4)? ( `CMD_fpu_arith_mem) :
     (cond_204 && ~cond_4)? ( `CMD_fpu_arith_mem) :
     (cond_205 && ~cond_4)? ( `CMD_fpu_arith_mem) :
+    // PR-2b.4i (iter 60): cond_67 reg-form catch-all relocated here, BELOW
+    // cond_144..205, so reg-form D8..DF + modregrm_one falls back to the
+    // legacy CMD_fpu / CMDEX_ESC_STEP_0 stub ONLY when no more-specific
+    // PR-1a / PR-2b cond catches the opcode first.  Unblocks runtime
+    // dispatch for every reg-form PR-2b op (cond_148..189) + PR-1a
+    // FNINIT/FNCLEX/FNSTSW AX (cond_144..146) — those previously won
+    // their dispatch arms inside cond_67's shadow at line 404 and now
+    // get their proper CMDEX values.  Reg-form D8..DF opcodes NOT
+    // covered by any cond_144..205 still fall through to the legacy
+    // stub here (no functional regression for un-implemented ops).
+    (cond_67 && ~cond_4)? ( `CMD_fpu) :
     (cond_68 && ~cond_4)? ( `CMD_SETcc) :
     (cond_69 && ~cond_1)? ( `CMD_CMPXCHG) :
     (cond_70 && ~cond_4)? ( `CMD_ENTER) :
@@ -833,7 +846,9 @@ assign consume_modregrm_one =
     (cond_61 && ~cond_62)? (`TRUE) :
     (cond_63 && ~cond_22)? (`TRUE) :
     (cond_64 && ~cond_22)? (`TRUE) :
-    (cond_67 && ~cond_4)? (`TRUE) :
+    // PR-2b.4i (iter 60): cond_67 relocated below cond_205 in this cascade
+    // so PR-1a (cond_144..147) and PR-2b (cond_148..205) win first; cond_67
+    // remains as a fall-through for un-implemented reg-form D8..DF.
     (cond_144 && ~cond_4)? (`TRUE) :
     (cond_145 && ~cond_4)? (`TRUE) :
     (cond_146 && ~cond_4)? (`TRUE) :
@@ -896,6 +911,11 @@ assign consume_modregrm_one =
     (cond_203 && ~cond_4)? (`TRUE) :
     (cond_204 && ~cond_4)? (`TRUE) :
     (cond_205 && ~cond_4)? (`TRUE) :
+    // PR-2b.4i (iter 60): cond_67 reg-form catch-all relocated here so
+    // un-implemented reg-form D8..DF + modregrm_one still asserts
+    // consume_modregrm_one (advancing the decoder past the instruction)
+    // via the legacy stub fallback.
+    (cond_67 && ~cond_4)? (`TRUE) :
     (cond_68 && ~cond_4)? (`TRUE) :
     (cond_69 && ~cond_1)? (`TRUE) :
     (cond_71 && ~cond_4)? (`TRUE) :
@@ -1019,7 +1039,8 @@ assign dec_cmdex =
     (cond_64 && ~cond_22)? ( `CMDEX_LGDT_LIDT_STEP_1) :
     (cond_65 && ~cond_4)? ( `CMDEX_PUSHA_STEP_0) :
     (cond_66 && ~cond_4)? ( `CMDEX_WAIT_STEP_0) :
-    (cond_67 && ~cond_4)? ( `CMDEX_ESC_STEP_0) :
+    // PR-2b.4i (iter 60): cond_67's CMDEX_ESC_STEP_0 arm relocated to
+    // the tail of this cascade so PR-1a / PR-2b CMDEXes win first.
     (cond_144 && ~cond_4)? ( `CMDEX_FN_INIT) :
     (cond_145 && ~cond_4)? ( `CMDEX_FN_CLEX) :
     (cond_146 && ~cond_4)? ( `CMDEX_FNSTSW_AX) :
@@ -1082,6 +1103,9 @@ assign dec_cmdex =
     (cond_203 && ~cond_4)? ( `CMDEX_FCOM_M64) :
     (cond_204 && ~cond_4)? ( `CMDEX_FCOMP_M32) :
     (cond_205 && ~cond_4)? ( `CMDEX_FCOMP_M64) :
+    // PR-2b.4i (iter 60): cond_67's CMDEX_ESC_STEP_0 fallback for any
+    // reg-form D8..DF not caught by cond_144..205.
+    (cond_67 && ~cond_4)? ( `CMDEX_ESC_STEP_0) :
     (cond_70 && ~cond_4)? ( `CMDEX_ENTER_FIRST) :
     (cond_71 && ~cond_4)? ( `CMDEX_IMUL_modregrm) :
     (cond_72 && ~cond_4)? ( `CMDEX_IMUL_modregrm_imm) :
