@@ -54,7 +54,9 @@ for i = 1, #listing do
    outfile:write(listing[i].."\n")
 end
 io.close(outfile)
-os.execute("FASM.EXE listing.txt")
+-- iter 61: FASM.EXE is in CWD (lua_tests/) but Windows cmd.exe doesn't
+-- include "." in PATH by default; prefix with .\ so the local copy is found.
+os.execute(".\\FASM.EXE listing.txt")
 
 -- Inject boot ROM at 0xF0000 (BIOS area) and our code at 0.
 -- boot0.rom is a stock fake that jumps to 0.

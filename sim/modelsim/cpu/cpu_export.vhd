@@ -40,7 +40,12 @@ begin
       variable line_out    : line;
       variable recordcount : integer := 0;
       
-      constant filenamebase    : string := "R:\debug_";
+      -- PR-1a runtime smoke (iter 61, 2026-05-26): upstream wrote to
+      -- R:\ which doesn't exist on this workstation.  Switched to a
+      -- relative path that lands in vsim's CWD (project-relative,
+      -- writable on any workstation).  Length-preserved at 9 chars
+      -- so the existing 14-char filename buffer still fits.
+      constant filenamebase    : string := "./debug__";
       variable filename        : string(1 to 14);
       
       variable nh : std_logic := '1';
