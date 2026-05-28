@@ -350,6 +350,14 @@ wire cond_262 = rd_cmd == `CMD_fpu_load_mem && rd_cmdex == `CMDEX_FLD_M64;
 // read.v to fire only after beat 1, so the cond_5 (~read_for_rd_ready) hold
 // below naturally spans both beats.
 wire cond_281 = rd_cmd == `CMD_fpu_load_mem && rd_cmdex == `CMDEX_FLD_M80;
+// PR-2b.5o (iter 129): FLDCW m16 read-stage arm.  Single-beat 16-bit memory
+// fetch (read_length_word -> 2 bytes); the loaded word rides the standard
+// read_data -> rd_read_data -> exe_fpu_mem_data lane (latched on e_load) and
+// execute.v drives fpu_csr.cw_we/cw_din[15:0] when the op retires.  Mirror of
+// FLD m32 (cond_261): read_virtual on (cond_3 && ~cond_9); rd_waiting on the
+// mem-busy and not-yet-ready hazards.  CMD_fpu namespace (FNSTCW's twin), NOT
+// CMD_fpu_load_mem, so execute_fpu's stack FSM never sees it.
+wire cond_282 = rd_cmd == `CMD_fpu && rd_cmdex == `CMDEX_FLDCW_M16;
 // PR-2b.4d-g defensive read-stage plumbing (iter 81).
 // The existing PR-2b.4d-g mem-form arith ops (FADD/FSUB/FMUL/FDIV/FSUBR/
 // FDIVR/FCOM/FCOMP m32+m64 across 16 CMDEXes) landed via unit TBs that
@@ -634,6 +642,8 @@ assign read_virtual =
     (cond_262 && cond_3 && ~cond_9)? (`TRUE) :
     // PR-2b.5g (iter 124): FLD m80fp mem-fetch trigger (2-beat read in read.v).
     (cond_281 && cond_3 && ~cond_9)? (`TRUE) :
+    // PR-2b.5o (iter 129): FLDCW m16 mem-fetch trigger (single-beat 16-bit).
+    (cond_282 && cond_3 && ~cond_9)? (`TRUE) :
     // PR-2b.4d-g defensive plumbing (iter 81): catch-all for CMD_fpu_arith_mem
     // covering FADD/FSUB/FMUL/FDIV/FSUBR/FDIVR/FCOM/FCOMP m32+m64.
     (cond_263 && cond_3 && ~cond_9)? (`TRUE) :
@@ -1253,6 +1263,9 @@ assign rd_waiting =
     // read_for_rd_ready fires (after beat 1, the qword); cond_5 = ~ready.
     (cond_281 && cond_3 && cond_9)? (`TRUE) :
     (cond_281 && cond_3 && ~cond_9 && cond_5)? (`TRUE) :
+    // PR-2b.5o (iter 129): FLDCW m16 — hold on mem-busy / until read ready.
+    (cond_282 && cond_3 && cond_9)? (`TRUE) :
+    (cond_282 && cond_3 && ~cond_9 && cond_5)? (`TRUE) :
     // PR-2b.4d-g defensive plumbing (iter 81): rd_waiting arms for
     // CMD_fpu_arith_mem.  Same shape as FLD m32/m64 — mem-only, no
     // reg-form variant (D8/DC reg-form lives in CMD_fpu_arith).
@@ -1373,6 +1386,7 @@ assign read_length_word =
     (cond_206 && cond_207)? (`TRUE) :
     (cond_246 && cond_247)? (`TRUE) :
     (cond_250 && cond_3)? (`TRUE) :
+    (cond_282 && cond_3)? (`TRUE) :  // PR-2b.5o iter 129: FLDCW m16 = 2-byte fetch
     1'd0;
 assign address_xlat_transform =
     (cond_256)? (`TRUE) :

@@ -707,6 +707,20 @@ wire        fpu_op_retires =
     (exe_cmdex == `CMDEX_FN_INIT    || exe_cmdex == `CMDEX_FN_CLEX ||
      exe_cmdex == `CMDEX_FNSTSW_AX  || exe_cmdex == `CMDEX_FNSTCW_M16);
 
+// PR-2b.5o (iter 129): FLDCW m16 (D9 /5).  The inbound twin of FNSTCW: the
+// 16-bit control word is fetched in the READ stage (read_commands.v cond_282,
+// read_length_word) and snapshotted into exe_fpu_mem_data on e_load, so when
+// the op reaches EXECUTE the value is already present.  This single-cycle
+// pulse drives fpu_csr.cw_we to latch exe_fpu_mem_data[15:0] into CW.  It is
+// intentionally NOT routed to fpu_core (cmd_valid) — fpu_core only reads
+// CW/SW; the actual write lives in fpu_csr, fed directly here.  Handling
+// FLDCW outside execute_fpu avoids the late-S_RETIRE-pulse hazard (the FPU
+// FSM retires several cycles after the pipeline does); the CW therefore
+// commits in lockstep with FLDCW's in-order retire, before any following
+// FPU op samples cw[11:10] in execute_fpu.
+wire        fpu_fldcw_retires =
+    exe_ready && exe_cmd == `CMD_fpu && exe_cmdex == `CMDEX_FLDCW_M16;
+
 wire [15:0] fpu_sw;
 wire [15:0] fpu_cw;
 wire        fpu_fninit_pulse;
@@ -728,15 +742,16 @@ fpu_core u_fpu_core (
 
 // PR-2b.2d: fpu_csr lifted out of fpu_core.  init from FNINIT,
 // exc_flags_clear_all from FNCLEX, exc_flags_set from execute_fpu's
-// retire pulse.  cc / top / sf / cw_we / sw_we lanes will be wired in
-// PR-2b.2e+ (FCOM CC, FPU push/pop, FLDCW, FRSTOR); tied 0 for now.
+// retire pulse.  cc / top / sf lanes wired in PR-2b.2e+ (FCOM CC, push/pop).
+// PR-2b.5o (iter 129): the cw_we / cw_din lane is now driven by FLDCW m16
+// (was tied 0).  sw_we still tied 0 (no FRSTOR / direct-SW-write op yet).
 fpu_csr u_fpu_csr (
     .clk                 (clk),
     .reset               (~rst_n),
     .init                (fpu_fninit_pulse),
 
-    .cw_we               (1'b0),
-    .cw_din              (16'h0),
+    .cw_we               (fpu_fldcw_retires),
+    .cw_din              (exe_fpu_mem_data[15:0]),
     .cw                  (fpu_cw),
 
     .sw_we               (1'b0),

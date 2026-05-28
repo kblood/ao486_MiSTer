@@ -453,6 +453,11 @@
 `define CMDEX_FN_CLEX      4'd3
 `define CMDEX_FNSTSW_AX    4'd4
 `define CMDEX_FNSTCW_M16   4'd5
+// PR-2b.5o (iter 129) — FLDCW m16 = D9 /5 mem-form: load a 16-bit control
+// word from memory into fpu_csr.  The inbound twin of FNSTCW (D9 /7); shares
+// the CMD_fpu namespace and is handled at the execute.v level (drives the
+// fpu_csr cw_we/cw_din lane), NOT through execute_fpu's stack FSM.
+`define CMDEX_FLDCW_M16    4'd6
 `define CPUID_FEATURES_EDX 32'd1
 
 // --- PR-2b.2b additions: FPU arithmetic CMD code + first arith CMDEX ---

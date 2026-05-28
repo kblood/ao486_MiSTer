@@ -397,6 +397,13 @@ wire cond_220 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDB && decoder[13:
 // dispatch family as FCHS (cond_164, D9 E0): CMD_fpu_unary / CMDEX_FRNDINT,
 // consumes the ModRM byte, no source operand beyond ST(0).
 wire cond_221 = dec_ready_modregrm_one   && decoder[7:0] == 8'hD9 && decoder[15:8] == 8'hFC; // FRNDINT (D9 FC)
+// PR-2b.5o (iter 129): FLDCW m16 = D9 /5 mem-form (mod != 11).  The inbound
+// twin of FNSTCW (cond_147 = D9 /7 mem-form): same byte layout (opcode in
+// decoder[7:0], modrm in decoder[15:8], reg field decoder[13:11], mod
+// decoder[15:14]).  D9 /5 reg-form is the FLDxxx constant family (cond_208..
+// 214, gated on full-byte decoder[15:8]==E8..EE), so the mem-form is free.
+// Routes to CMD_fpu / CMDEX_FLDCW_M16 — handled at execute.v, not execute_fpu.
+wire cond_222 = dec_ready_modregrm_one   && decoder[7:0] == 8'hD9 && decoder[13:11] == 3'b101 && decoder[15:14] != 2'b11; // FLDCW m16 (D9 /5)
 //======================================================== saves
 //======================================================== always
 //======================================================== sets
@@ -462,6 +469,7 @@ assign dec_cmd =
     (cond_145 && ~cond_4)? ( `CMD_fpu) :
     (cond_146 && ~cond_4)? ( `CMD_fpu) :
     (cond_147 && ~cond_4)? ( `CMD_fpu) :
+    (cond_222 && ~cond_4)? ( `CMD_fpu) :  // PR-2b.5o iter 129: FLDCW m16 (D9 /5)
     (cond_148 && ~cond_4)? ( `CMD_fpu_arith) :
     (cond_149 && ~cond_4)? ( `CMD_fpu_arith) :
     (cond_150 && ~cond_4)? ( `CMD_fpu_arith) :
@@ -913,6 +921,7 @@ assign consume_modregrm_one =
     (cond_145 && ~cond_4)? (`TRUE) :
     (cond_146 && ~cond_4)? (`TRUE) :
     (cond_147 && ~cond_4)? (`TRUE) :
+    (cond_222 && ~cond_4)? (`TRUE) :  // PR-2b.5o iter 129: FLDCW m16 consume_modregrm_one
     (cond_148 && ~cond_4)? (`TRUE) :
     (cond_149 && ~cond_4)? (`TRUE) :
     (cond_150 && ~cond_4)? (`TRUE) :
@@ -1125,6 +1134,7 @@ assign dec_cmdex =
     (cond_145 && ~cond_4)? ( `CMDEX_FN_CLEX) :
     (cond_146 && ~cond_4)? ( `CMDEX_FNSTSW_AX) :
     (cond_147 && ~cond_4)? ( `CMDEX_FNSTCW_M16) :
+    (cond_222 && ~cond_4)? ( `CMDEX_FLDCW_M16) :  // PR-2b.5o iter 129: FLDCW m16
     (cond_148 && ~cond_4)? ( `CMDEX_FADD_ST0_STi) :
     (cond_149 && ~cond_4)? ( `CMDEX_FSUB_ST0_STi) :
     (cond_150 && ~cond_4)? ( `CMDEX_FMUL_ST0_STi) :
