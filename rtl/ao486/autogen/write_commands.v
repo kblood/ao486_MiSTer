@@ -299,6 +299,40 @@ wire cond_272 = wr_cmd == `CMD_AAA || wr_cmd == `CMD_AAS;
 wire cond_273 = wr_cmd == `CMD_DAA || wr_cmd == `CMD_DAS;
 wire cond_274 = { wr_cmd[6:1], 1'd0 } == `CMD_BSx;
 wire cond_275 = eax > 32'd1;
+// PR-1a follow-up (iter 69): cond_276 wires the write-stage half of FNSTCW m16's
+// memory write — pulses write_virtual when wr_dst_is_memory.  Pairs with
+// autogen/read_commands.v cond_259 which sets rd_dst_is_memory at the read stage.
+wire cond_276 = wr_cmd == `CMD_fpu && wr_cmdex == `CMDEX_FNSTCW_M16;
+// PR-2b.5a (iter 113): cond_279 wires the write-stage half of FSTP m80fp —
+// pulses write_virtual when wr_dst_is_memory, and holds wr_waiting via cond_1
+// (wr_dst_is_memory && ~write_for_wr_ready) so the op stays in the write stage
+// across all 3 raw-store transactions.  write.v overrides write_for_wr_ready
+// for this op to fire only on the 3rd write, so cond_1 naturally holds until
+// then.  Pairs with autogen/read_commands.v cond_279.
+// PR-2b.5c (iter 116): broadened to the whole CMD_fpu_store_mem namespace so
+// FSTP m32fp (and future FST/FSTP m32/m64) share the wr_waiting hold +
+// write_virtual arms.  Width-specific step count lives in pipeline/write.v.
+wire cond_279 = wr_cmd == `CMD_fpu_store_mem;
+// PR-1a follow-up (iter 71): cond_277 wires the write-stage half of FNSTSW AX.
+// execute_commands.v line 1111 sets exe_result = {16'd0, fpu_sw} for this op,
+// but PR-1a never added a write_eax arm — so the result was computed and
+// discarded.  EAX retained its prior value, masking the bug whenever EAX was
+// already 0 (which it was in iter-12's PR-1a smoke since SW=0 after FNINIT).
+// Surfaced by iter-71's regform smoke probes which confirmed cc_we/top_we
+// update fpu_csr correctly but FNSTSW AX still landed EAX=0.
+wire cond_277 = wr_cmd == `CMD_fpu && wr_cmdex == `CMDEX_FNSTSW_AX;
+// PR-2b.4l (iter 103): cond_278 wires the FCOMI / FUCOMI / FCOMIP / FUCOMIP
+// integer EFLAGS writeback (deferred since iter 52, see execute.v:344-355).
+// execute_fpu drives eflags_value = {ZF, PF, CF} = {cmp_cc[3], cmp_cc[2],
+// cmp_cc[0]} and eflags_we = (state == S_RETIRE) && is_cmpi_lat && ~es_now.
+// pipeline/write.v latches both on w_load into wr_fpu_eflags_value/_we and
+// passes them in via pipeline/write_commands.v's port list.  Arms below
+// gate on (cond_278 && wr_fpu_eflags_we) so an unmasked #IA mid-FCOMI
+// (which clears eflags_we) preserves the prior CF/PF/ZF state.
+// Per the iter-72 / iter-71 lessons (mutex tracks reads, missing write arm
+// silently passes elaboration), the matching defensive rd_req_eflags arm
+// lands in autogen/read_commands.v as cond_265.
+wire cond_278 = wr_cmd == `CMD_fpu_cmp && (wr_cmdex == `CMDEX_FCOMI || wr_cmdex == `CMDEX_FCOMIP || wr_cmdex == `CMDEX_FUCOMI || wr_cmdex == `CMDEX_FUCOMIP);
 //======================================================== saves
 assign gdtr_limit_to_reg =
     (cond_119 && cond_121 && cond_120)? ( result2[15:0]) :
@@ -365,6 +399,7 @@ assign zflag_to_reg =
     (cond_273)? ( zflag_result) :
     (cond_274 && cond_5)? ( `TRUE) :
     (cond_274 && ~cond_5)? ( `FALSE) :
+    (cond_278 && wr_fpu_eflags_we)? ( wr_fpu_eflags_value[2]) :
     zflag;
 assign fs_rpl_to_reg =
     (cond_87)? ( 2'd3) :
@@ -823,6 +858,7 @@ assign pflag_to_reg =
     (cond_272)? ( pflag_result) :
     (cond_273)? ( pflag_result) :
     (cond_274 && ~cond_5)? ( pflag_result) :
+    (cond_278 && wr_fpu_eflags_we)? ( wr_fpu_eflags_value[1]) :
     pflag;
 assign dr6_breakpoints_to_reg =
     (cond_266 && cond_268)? ( result2[3:0]) :
@@ -865,6 +901,7 @@ assign cflag_to_reg =
     (cond_272)? ( result_signals[1]) :
     (cond_273)? ( result_signals[0]) :
     (cond_274 && ~cond_5)? ( cflag_arith) :
+    (cond_278 && wr_fpu_eflags_we)? ( wr_fpu_eflags_value[0]) :
     cflag;
 assign idflag_to_reg =
     (cond_82 && cond_83)? ( glob_param_3[21]) :
@@ -1014,6 +1051,8 @@ assign wr_waiting =
     (cond_253 && cond_254 && cond_9)? (`TRUE) :
     (cond_258 && cond_9)? (`TRUE) :
     (cond_261 && cond_33 && cond_9)? (`TRUE) :
+    (cond_276 && cond_1)? (`TRUE) :
+    (cond_279 && cond_1)? (`TRUE) :  // PR-2b.5a iter 113: FSTP m80fp wr_waiting (holds across 3 writes)
     1'd0;
 assign wr_inhibit_interrupts_and_debug =
     (cond_44 && cond_45)? (`TRUE) :
@@ -1146,6 +1185,8 @@ assign write_virtual =
     (cond_128)? (   wr_dst_is_memory) :
     (cond_212)? (  wr_dst_is_memory) :
     (cond_258)? (`TRUE) :
+    (cond_276)? (   wr_dst_is_memory) :
+    (cond_279)? (   wr_dst_is_memory) :  // PR-2b.5a iter 113: FSTP m80fp write_virtual
     1'd0;
 assign wr_not_finished =
     (cond_0)? (`TRUE) :
@@ -1561,6 +1602,7 @@ assign write_eax =
     (cond_139 && cond_141)? (          wr_dst_is_eax) :
     (cond_212)? (      wr_dst_is_eax) :
     (cond_271)? (`TRUE) :
+    (cond_277)? (`TRUE) :
     1'd0;
 assign write_new_stack_virtual =
     (cond_14 && cond_15)? (`TRUE) :
@@ -1635,6 +1677,7 @@ assign wr_hlt_in_progress =
     1'd0;
 assign wr_regrm_word =
     (cond_39)? (`TRUE) :
+    (cond_277)? (`TRUE) :
     1'd0;
 assign wr_glob_param_1_value =
     (cond_240)? ( (glob_descriptor[`DESC_BITS_TYPE] <= 4'd3)? { 13'd0, `SEGMENT_LDT, exe_buffer_shifted[47:32] } : { 13'd0, `SEGMENT_LDT, exe_buffer_shifted[15:0] }) :

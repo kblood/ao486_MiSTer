@@ -90,6 +90,12 @@ module write_commands(
     input       [31:0]  wr_dst,
     input       [4:0]   result_signals,
     input       [31:0]  result_push,
+
+    // PR-2b.4l (iter 103): FCOMI/FUCOMI eflags writeback lane — latched in
+    // pipeline/write.v from execute.v's exe_fpu_eflags_value/_we, consumed
+    // by the autogen body's cflag/pflag/zflag_to_reg cascades via cond_278.
+    input       [2:0]   wr_fpu_eflags_value,
+    input               wr_fpu_eflags_we,
     
     input       [31:0]  exe_buffer,
     input       [463:0] exe_buffer_shifted,

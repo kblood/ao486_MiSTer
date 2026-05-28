@@ -149,6 +149,16 @@ module write_register(
     input               oflag_to_reg,
     input               tflag_to_reg,
     input               iflag_to_reg,
+
+    // PR-2b.4l (iter 104): direct FCOMI eflags override from execute_fpu.
+    // fpu_eflags_we_direct is a 1-cycle pulse asserted in S_RETIRE; when
+    // high it overrides {z,p,c}flag_to_reg for that one edge.  Decoupled
+    // from pipeline w_load timing — the pulse fires 4-6 cycles AFTER the
+    // FCOMI has retired through write.v, so the standard wr_*_to_reg lane
+    // captures stale (pre-FCOMI) values.  See execute.v:374-388.
+    input               fpu_eflags_we_direct,
+    input       [2:0]   fpu_eflags_value_direct,
+
     input               dflag_to_reg,
     input       [1:0]   iopl_to_reg,
     input               ntflag_to_reg,
@@ -444,10 +454,26 @@ end
 
 //------------------------------------------------------------------------------ eflags
 
-always @(posedge clk) begin if(rst_n == 1'b0) cflag  <= `STARTUP_CFLAG;  else cflag  <= cflag_to_reg;  end
-always @(posedge clk) begin if(rst_n == 1'b0) pflag  <= `STARTUP_PFLAG;  else pflag  <= pflag_to_reg;  end
+// PR-2b.4l (iter 104): cflag / pflag / zflag latches gain a direct override
+// arm so FCOMI's deferred S_RETIRE pulse can land on whatever edge it fires
+// (independent of pipeline w_load).  aflag is not in the FCOMI payload —
+// the cmp encoding is {ZF, PF, CF} per Intel SDM Vol 1 §8.3.6.1.
+always @(posedge clk) begin
+    if      (rst_n == 1'b0)         cflag <= `STARTUP_CFLAG;
+    else if (fpu_eflags_we_direct)  cflag <= fpu_eflags_value_direct[0];
+    else                            cflag <= cflag_to_reg;
+end
+always @(posedge clk) begin
+    if      (rst_n == 1'b0)         pflag <= `STARTUP_PFLAG;
+    else if (fpu_eflags_we_direct)  pflag <= fpu_eflags_value_direct[1];
+    else                            pflag <= pflag_to_reg;
+end
 always @(posedge clk) begin if(rst_n == 1'b0) aflag  <= `STARTUP_AFLAG;  else aflag  <= aflag_to_reg;  end
-always @(posedge clk) begin if(rst_n == 1'b0) zflag  <= `STARTUP_ZFLAG;  else zflag  <= zflag_to_reg;  end
+always @(posedge clk) begin
+    if      (rst_n == 1'b0)         zflag <= `STARTUP_ZFLAG;
+    else if (fpu_eflags_we_direct)  zflag <= fpu_eflags_value_direct[2];
+    else                            zflag <= zflag_to_reg;
+end
 always @(posedge clk) begin if(rst_n == 1'b0) sflag  <= `STARTUP_SFLAG;  else sflag  <= sflag_to_reg;  end
 always @(posedge clk) begin if(rst_n == 1'b0) oflag  <= `STARTUP_OFLAG;  else oflag  <= oflag_to_reg;  end
 always @(posedge clk) begin if(rst_n == 1'b0) tflag  <= `STARTUP_TFLAG;  else tflag  <= tflag_to_reg;  end

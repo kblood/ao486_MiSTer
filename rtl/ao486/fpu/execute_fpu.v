@@ -125,6 +125,17 @@ module execute_fpu (
     input               exe_reset,
     input               exe_ready,           // pipeline retire pulse — frees the FSM
 
+    // PR-2b.4d/iter-87 — FNINIT pulse from fpu_core.  Iter-82/85 RED
+    // (TEST 7 FMUL m64 +0 SW=0x3E3D) was traced in iter 86 to a TEST 4
+    // (FDIV m32 /0) ZE-leak through FNINIT.  fpu_csr.init clears the
+    // architectural sw_reg but execute_fpu's internal state (flags_lat
+    // + per-op latches) carried no FNINIT-clear path.  This input lets
+    // execute_fpu's FSM-state reset arm fire on FNINIT pulses too —
+    // see the always block at the bottom (`if (!rst_n || exe_reset ||
+    // init)`).  Symmetric with the fpu_csr/fpu_regfile init wiring at
+    // execute.v:685/758.
+    input               init,
+
     // Command stream from execute_commands.v
     input       [6:0]   exe_cmd,             // CMD_fpu_arith / CMD_fpu_compare / ...
     input       [3:0]   exe_cmdex,           // CMDEX_FADD_ST0_STi / ...
@@ -137,6 +148,10 @@ module execute_fpu (
 
     // Memory-form operand (driven by the existing load path)
     input       [63:0]  exe_mem_data,
+    // PR-2b.5g (iter 124): FLD m80fp high 16 bits ({sign,exp}).  The low 64
+    // bits arrive on exe_mem_data; together they form the raw floatx80 loaded
+    // verbatim into ST(0) (no converter).
+    input       [15:0]  exe_mem_data_hi,
     input       [1:0]   exe_mem_fmt,         // 00=m32, 01=m64, 10=m80 (PR-2b.4+)
     input               exe_mem_data_valid,
 
@@ -212,6 +227,20 @@ module execute_fpu (
     output              exe_trigger_mf_fault,
 
     //--------------------------------------------------------------------
+    // PR-2b.5a (iter 113): FSTP m80fp raw-store lane.  store_data carries
+    // ST(0)'s verbatim 80-bit floatx80 value (= a_lat); store_ready is a
+    // LEVEL signal held high across S_COMPUTE..S_POP (i.e. once a_lat is
+    // valid, through the pop) so the write stage can latch the payload on
+    // its first observation and drive its own 3-transaction write FSM.
+    // These bypass the w_load-latched wr_* path on purpose — the FPU op
+    // enters the write stage at op-entry, BEFORE the FSM produces a_lat
+    // (iter-103/104 FCOMI timing trap), so a w_load latch would capture
+    // stale data.  Plumbed execute_fpu -> execute.v -> pipeline.v -> write.v
+    // as a direct combinational override (mirrors the iter-104 EFLAGS path).
+    output      [79:0]  store_data,
+    output              store_ready,
+
+    //--------------------------------------------------------------------
     // Regfile read port (combinational request + 1-cycle synchronous
     // data; matches fpu_regfile.v's 1R1W interface).
     //--------------------------------------------------------------------
@@ -269,6 +298,51 @@ module execute_fpu (
     // the same cycle.  Single-cycle write (no S_FXCH2 / S_POP).
     wire is_fld_sti        = (exe_cmd  == `CMD_fpu_arith) &&
                              (exe_cmdex == `CMDEX_FLD_STi);
+    // PR-2b.4k STAGE 3 (iter 77): mem-form FLD m32fp / m64fp.  Push ST(0)
+    // from the converted float32/float64 value in `mem_z` (see existing
+    // converter wiring at ~line 1058+).  Distinct namespace `CMD_fpu_load_mem`
+    // (7'd124, see defines.v iter 75) so the reg-form FLD ST(i) and mem-form
+    // FLD m32/m64 don't share a CMDEX value.  The new `is_fld_mem_lat` reg
+    // captured below tracks mem-form FLD separately from `is_fld_lat`
+    // (reg-form): both share the push semantics in S_RETIRE (write abs_new_top,
+    // top_we=1, top_din=top_lat-1) but differ in (i) data source — mem-form
+    // uses `b_lat` which S_COMPUTE drives from `mem_z` via the existing
+    // is_mem_form_lat gate, reg-form uses `b_lat` from rf_rd_data (ST(i)); and
+    // (ii) tag derivation — mem-form classifies `mem_z` directly into
+    // Valid/Zero/Special (no Empty source to copy from); and (iii) flags —
+    // mem-form propagates DE/IE from the converter (mem_de_flag/mem_ie_flag)
+    // whereas reg-form FLD forces flags_lat=0 since copying an existing slot
+    // can't raise any new exception.
+    wire is_fld_m32        = (exe_cmd  == `CMD_fpu_load_mem) &&
+                             (exe_cmdex == `CMDEX_FLD_M32);
+    wire is_fld_m64        = (exe_cmd  == `CMD_fpu_load_mem) &&
+                             (exe_cmdex == `CMDEX_FLD_M64);
+    wire is_fld_mem        = is_fld_m32 | is_fld_m64;
+    // PR-2b.5g (iter 124): FLD m80fp — raw 80-bit load.  Kept OUT of is_fld_mem
+    // (and is_mem_form_now) because there is NO converter: the bits ARE the
+    // floatx80.  Its own latch routes the raw {hi16, lo64} straight to b_lat,
+    // bypassing the float32/64_to_floatx80 mem_z path.  Shares the FLD push
+    // machinery (abs_new_top write, top_we/top_din) via is_fld_m80_lat below.
+    wire is_fld_m80        = (exe_cmd  == `CMD_fpu_load_mem) &&
+                             (exe_cmdex == `CMDEX_FLD_M80);
+    // PR-2b.4n (iter 112): FPU constant loads FLD1/FLDL2T/FLDL2E/FLDPI/
+    // FLDLG2/FLDLN2/FLDZ (D9 E8..EE).  Each PUSHes a hardcoded 80-bit
+    // constant onto the x87 stack; reuses the FLD push path exactly
+    // (abs_new_top write index, top_din=top_lat-1, rf_wr_en at S_RETIRE)
+    // but sources rf_wr_data from a combinational constant ROM selected by
+    // exe_cmdex instead of b_lat.  No exceptions raised (flags_lat=0).  Tag
+    // is Zero (2'b01) for FLDZ, Valid (2'b00) for the rest.  Distinct
+    // CMD_fpu_const (7'd125) namespace, CMDEX 0..6 = FLD1..FLDZ.
+    wire is_fconst         = (exe_cmd == `CMD_fpu_const);
+    wire [79:0] fconst_value =
+        (exe_cmdex == `CMDEX_FLD1)   ? 80'h3FFF8000000000000000 :  // +1.0
+        (exe_cmdex == `CMDEX_FLDL2T) ? 80'h4000D49A784BCD1B8AFE :  // log2(10)
+        (exe_cmdex == `CMDEX_FLDL2E) ? 80'h3FFFB8AA3B295C17F0BC :  // log2(e)
+        (exe_cmdex == `CMDEX_FLDPI)  ? 80'h4000C90FDAA22168C235 :  // pi
+        (exe_cmdex == `CMDEX_FLDLG2) ? 80'h3FFD9A209A84FBCFF799 :  // log10(2)
+        (exe_cmdex == `CMDEX_FLDLN2) ? 80'h3FFEB17217F7D1CF79AC :  // ln(2)
+                                       80'h00000000000000000000 ;  // FLDZ +0.0
+    wire [1:0] fconst_tag  = (exe_cmdex == `CMDEX_FLDZ) ? 2'b01 : 2'b00; // Zero : Valid
     // PR-2b.3m: FST ST(i) — pure-control "store" op.  Same CMD_fpu_arith
     // path; the new is_fst_lat reg (covering both FST and FSTP) routes
     // S_RETIRE to write abs_stsrc with a_lat (= ST(0) data) and tag =
@@ -280,6 +354,43 @@ module execute_fpu (
     wire is_fstp_sti       = (exe_cmd  == `CMD_fpu_arith) &&
                              (exe_cmdex == `CMDEX_FSTP_STi);
     wire is_fst_family     = is_fst_sti | is_fstp_sti;
+    // PR-2b.5a (iter 113): FSTP m80fp (DB /7 mem-form).  Stores ST(0)'s raw
+    // 80-bit floatx80 value to memory (3 write-stage transactions, see
+    // write.v) then pops the stack.  Walks the same fetch path as FST/FSTP
+    // (a_lat <= ST(0)) but the destination is MEMORY, not ST(i): the regfile
+    // S_RETIRE data write is suppressed (~is_fstp_m80_lat) and the store data
+    // rides a DIRECT combinational path (store_data/store_ready) into write.v,
+    // bypassing the w_load-latched wr_* path which would capture stale a_lat
+    // (the op enters the write stage at op-entry, BEFORE the FSM runs — the
+    // iter-103/104 FCOMI timing trap).  The pop happens via the normal
+    // pop_after_lat -> S_POP mechanism (Empty tag @ abs_st0, TOP++).  Own CMD
+    // namespace `CMD_fpu_store_mem` (7'd126) so it doesn't collide with the
+    // reg-form FSTP ST(i) in CMD_fpu_arith.
+    wire is_fstp_m80       = (exe_cmd  == `CMD_fpu_store_mem) &&
+                             (exe_cmdex == `CMDEX_FSTP_M80);
+    // PR-2b.5c (iter 116): FSTP m32fp (D9 /3 mem-form).  Same fetch+pop path as
+    // FSTP m80, but ST(0) is NARROWED floatx80->float32 (RTNE) by the new
+    // floatx80_to_float32 converter and stored as a SINGLE 4-byte write
+    // (fpu_store_max_step=0 in write.v).  Regfile S_RETIRE data write is
+    // suppressed (memory dest); pop fires via pop_after_lat -> S_POP.  Phase
+    // 115a forces flags_lat=0 (exception-flag SW wiring deferred to iter 117).
+    wire is_fstp_m32       = (exe_cmd  == `CMD_fpu_store_mem) &&
+                             (exe_cmdex == `CMDEX_FSTP_M32);
+    // PR-2b.5d (iter 117): FSTP m64fp (DD /3 mem-form).  Symmetric twin of
+    // FSTP m32 — ST(0) is narrowed floatx80->float64 (RTNE) by
+    // floatx80_to_float64 and stored as TWO 4-byte writes (fpu_store_max_step=1
+    // in write.v).  Same suppress-regfile / pop / flags=0 routing as m32.
+    wire is_fstp_m64       = (exe_cmd  == `CMD_fpu_store_mem) &&
+                             (exe_cmdex == `CMDEX_FSTP_M64);
+    // PR-2b.5e (iter 118): FST m32fp (D9 /2) / FST m64fp (DD /2) — the NO-POP
+    // store variants.  Byte-for-byte identical routing to FSTP m32/m64 (same
+    // narrowing converters, same direct store_data/store_ready lane, same
+    // suppress-regfile-data-write at S_RETIRE) EXCEPT they are deliberately NOT
+    // added to pop_after_now, so ST(0) is retained after the store.
+    wire is_fst_m32        = (exe_cmd  == `CMD_fpu_store_mem) &&
+                             (exe_cmdex == `CMDEX_FST_M32);
+    wire is_fst_m64        = (exe_cmd  == `CMD_fpu_store_mem) &&
+                             (exe_cmdex == `CMDEX_FST_M64);
     // PR-2b.3n: unary control ops on ST(0).  Dispatched via the new
     // `CMD_fpu_unary` (7'd119) so they get a fresh 4-bit CMDEX namespace
     // — the CMD_fpu_arith namespace is already FULL (see defines.v).
@@ -488,13 +599,20 @@ module execute_fpu (
     // separate from is_arith_mem so the kind_now / reverse_now / is_arith_d8
     // OR-lists stay scoped to true arith ops only (cmp ops don't write the
     // regfile data lane and don't engage the arith primitive bank).
-    wire is_mem_form_now  = is_arith_mem | is_cmp_mem;
+    // PR-2b.4k STAGE 3 (iter 77): is_fld_mem joins is_mem_form_now so the
+    // existing mem-form latch capture path (is_mem_form_lat, mem_fmt_lat,
+    // mem_data_lat <= exe_mem_data) all engage on FLD m32/m64.  The
+    // converter wiring (mem_z / mem_de_flag / mem_ie_flag at ~line 1075-77)
+    // is already triggered by is_mem_form_lat, so adding FLD here is
+    // sufficient to get the converted floatx80 onto b_lat in S_COMPUTE.
+    wire is_mem_form_now  = is_arith_mem | is_cmp_mem | is_fld_mem;
     // mem_fmt: 00 = m32fp, 01 = m64fp.  All M64 CMDEXes are odd literals
-    // (4'd1/3/5/7/9/11/13/15); equivalently exe_cmdex[0] selects m64 when
-    // is_mem_form_now.
+    // (4'd1/3/5/7/9/11/13/15) in the CMD_fpu_arith_mem namespace;
+    // for CMD_fpu_load_mem (iter 75) is_fld_m64 takes 4'd1 explicitly.
     wire [1:0] mem_fmt_now = (is_fadd_m64  | is_fsub_m64  | is_fmul_m64 | is_fdiv_m64 |
                               is_fsubr_m64 | is_fdivr_m64 |
-                              is_fcom_m64  | is_fcomp_m64)
+                              is_fcom_m64  | is_fcomp_m64 |
+                              is_fld_m64)
                                 ? 2'b01 : 2'b00;
     // Condition selection.  Each pair (B/NB, E/NE, BE/NBE, U/NU) shares
     // the same EFLAGS expression; the invert bit (set for the N-prefixed
@@ -526,7 +644,13 @@ module execute_fpu (
     // force their respective *_lat regs at op-start so the retire
     // path diverges from the normal arith data write.
     wire is_op_active     = is_arith_st0_sti | is_fxch_sti | is_fld_sti |
-                            is_fst_family | is_unary_now | is_cmp_now |
+                            is_fld_mem |                              // PR-2b.4k iter 77
+                            is_fld_m80 |                              // PR-2b.5g iter 124
+                            is_fconst |                               // PR-2b.4n iter 112
+                            is_fst_family | is_fstp_m80 |             // PR-2b.5a iter 113
+                            is_fstp_m32 | is_fstp_m64 |               // PR-2b.5c/5d iter 116/117
+                            is_fst_m32 | is_fst_m64 |                 // PR-2b.5e iter 118 (no-pop)
+                            is_unary_now | is_cmp_now |
                             is_ffree | is_fnop | is_fdecstp | is_fincstp |
                             is_fcmov_now;
     // Control-op predicate: ops whose result is a regfile-data move,
@@ -535,6 +659,7 @@ module execute_fpu (
     // arith retire path.  FXCH / FLD / FST / FSTP / FCHS / FABS / FXAM /
     // FCMOVcc share this predicate.
     wire is_control_op_now = is_fxch_sti | is_fld_sti | is_fst_family |
+                             is_fconst |                              // PR-2b.4n iter 112
                              is_unary_now | is_ffree |
                              is_fnop | is_fdecstp | is_fincstp |
                              is_fcmov_now;
@@ -597,7 +722,12 @@ module execute_fpu (
     // mechanism (one cycle in S_POP that bumps TOP and clears the old
     // ST(0) tag).  Unlike arith DE-pops, the cmp path also has cc_we
     // pulse in S_RETIRE — the two are independent.
-    wire pop_after_now  = is_arith_de | is_fstp_sti | is_cmp_pop_now;
+    // PR-2b.5e (iter 118): is_fst_m32/is_fst_m64 are INTENTIONALLY ABSENT here —
+    // FST is the no-pop store, so ST(0) must survive.  They still ride every
+    // other FSTP lane (store_data, store_ready, rf_wr_en suppress, flags_lat=0).
+    wire pop_after_now  = is_arith_de | is_fstp_sti | is_cmp_pop_now |
+                          is_fstp_m80 |                           // PR-2b.5a iter 113
+                          is_fstp_m32 | is_fstp_m64;              // PR-2b.5c/5d iter 116/117
 
     wire op_active = exe_ready && is_op_active;
 
@@ -672,6 +802,30 @@ module execute_fpu (
     // is_fxch_lat, dst_is_sti_lat, pop_after_lat (D9 C0+i is its own
     // opcode family).
     reg        is_fld_lat;
+    // PR-2b.4k STAGE 3 (iter 77): mem-form FLD latch — captured alongside
+    // is_fld_lat at S_IDLE→S_FETCH_A but ONLY for FLD m32/m64 (NOT FLD
+    // ST(i)).  Separate from is_fld_lat so the flags_lat S_COMPUTE cascade
+    // can give mem-form FLD its DE/IE from the converter while reg-form
+    // FLD still forces flags_lat=0 (existing behavior).  Shares the push
+    // semantics with is_fld_lat in rf_wr_idx (abs_new_top) + top_we/top_din
+    // (top_lat-1) but uses a different rf_wr_tag derivation (classification
+    // of mem_z rather than copy of stsrc_tag_lat).
+    reg        is_fld_mem_lat;
+    // PR-2b.5g (iter 124): FLD m80fp latch + the captured high 16 bits.  The
+    // low 64 bits arrive via the existing exe_mem_data -> mem_data_lat path
+    // (FLD m80's last read beat is the qword); mem80_hi_lat holds {sign,exp}.
+    // b_lat is assembled as {mem80_hi_lat, mem_data_lat} in S_COMPUTE.
+    reg        is_fld_m80_lat;
+    reg [15:0] mem80_hi_lat;
+    // PR-2b.4n (iter 112): FPU-constant latch — captured at S_IDLE→S_FETCH_A.
+    // Routes S_RETIRE to push the latched 80-bit constant (fconst_lat) onto
+    // a new ST(0) slot, sharing the FLD push semantics (abs_new_top write
+    // index, top_we/top_din=top_lat-1).  fconst_tag_lat carries the precom-
+    // puted tag (Zero for FLDZ, Valid otherwise).  No data fetch / regfile
+    // read needed; the value is sourced entirely from the constant ROM.
+    reg        is_fconst_lat;
+    reg [79:0] fconst_lat;
+    reg [1:0]  fconst_tag_lat;
     // PR-2b.3m: FST/FSTP latch — captured at S_IDLE→S_FETCH_A.  Covers
     // BOTH FST and FSTP; the FSTP-only pop side-effect is carried by
     // pop_after_lat (set alongside).  is_fst_lat overrides rf_wr_data
@@ -681,6 +835,29 @@ module execute_fpu (
     // families); coexists with dst_is_sti_lat (FST/FSTP set it) and
     // (for FSTP) pop_after_lat.
     reg        is_fst_lat;
+    // PR-2b.5a (iter 113): FSTP m80 latch — captured at S_IDLE→S_FETCH_A.
+    // Routes the op like FSTP (a_lat = ST(0), pop_after_lat set) but with
+    // (a) the S_RETIRE regfile DATA write suppressed (dest is memory, not a
+    // register), (b) flags_lat forced 6'd0 in S_COMPUTE (a verbatim 80-bit
+    // store raises no exception), and (c) the store payload exposed on the
+    // direct store_data/store_ready outputs for write.v's 3-step write FSM.
+    reg        is_fstp_m80_lat;
+    // PR-2b.5c (iter 116): FSTP m32 latch.  Same routing as is_fstp_m80_lat but
+    // the store payload is the floatx80->float32 narrowing of a_lat (1 write).
+    reg        is_fstp_m32_lat;
+    // PR-2b.5d (iter 117): FSTP m64 latch.  floatx80->float64 narrowing (2 writes).
+    reg        is_fstp_m64_lat;
+    // PR-2b.5e (iter 118): FST m32/m64 no-pop latches.  Same routing as the FSTP
+    // m32/m64 latches; the only difference (no pop) is handled at op-start where
+    // pop_after_now excludes is_fst_m32/m64.
+    reg        is_fst_m32_lat;
+    reg        is_fst_m64_lat;
+    // PR-2b.5f (iter 119): narrowing-store converter exception flags.  Declared
+    // here (ahead of the flags_lat S_COMPUTE block that consumes them) because
+    // ModelSim vlog requires nets used procedurally to be declared textually
+    // first.  Driven by the floatx80_to_float32/64 instances further below.
+    wire       f32_pe, f32_oe, f32_ue, f32_ie;
+    wire       f64_pe, f64_oe, f64_ue, f64_ie;
     // PR-2b.3n: unary control-op latches.  Captured at S_IDLE→S_FETCH_A.
     // FCHS/FABS override rf_wr_data with a bit-79-toggled / bit-79-cleared
     // copy of a_lat; FXAM suppresses rf_wr_en and pulses cc_we instead.
@@ -837,7 +1014,16 @@ module execute_fpu (
     // FSM transitions
     //--------------------------------------------------------------------
     always @(posedge clk) begin
-        if (!rst_n || exe_reset) begin
+        // PR-2b/iter-87: FNINIT joins reset+exe_reset as a state-clear
+        // trigger.  Iter-86 trace `debug_iter86_no_fdiv_m32_GREEN.txt`
+        // (51 KB) showed TEST 4's exception state leaking past FNINIT
+        // into TEST 7's SW=0x3E3D — 5-bit accumulator signal.  fpu_csr
+        // and fpu_regfile already clear on `init`; this extends the
+        // same discipline to execute_fpu's FSM-state + operand latches.
+        // FNINIT can only fire when execute_fpu is idle (fpu_core's
+        // 1-cycle FNINIT op doesn't enter execute_fpu's FSM), so
+        // forcing state<=S_IDLE during init is a no-op for correctness.
+        if (!rst_n || exe_reset || init) begin
             state           <= S_IDLE;
             a_lat           <= 80'd0;
             b_lat           <= 80'd0;
@@ -852,7 +1038,18 @@ module execute_fpu (
             pop_twice_lat   <= 1'b0;
             is_fxch_lat     <= 1'b0;
             is_fld_lat      <= 1'b0;
+            is_fld_mem_lat  <= 1'b0;    // PR-2b.4k iter 77
+            is_fld_m80_lat  <= 1'b0;    // PR-2b.5g iter 124
+            mem80_hi_lat    <= 16'd0;   // PR-2b.5g iter 124
+            is_fconst_lat   <= 1'b0;    // PR-2b.4n iter 112
+            fconst_lat      <= 80'd0;
+            fconst_tag_lat  <= 2'b00;
             is_fst_lat      <= 1'b0;
+            is_fstp_m80_lat <= 1'b0;    // PR-2b.5a iter 113
+            is_fstp_m32_lat <= 1'b0;    // PR-2b.5c iter 116
+            is_fstp_m64_lat <= 1'b0;    // PR-2b.5d iter 117
+            is_fst_m32_lat  <= 1'b0;    // PR-2b.5e iter 118
+            is_fst_m64_lat  <= 1'b0;    // PR-2b.5e iter 118
             is_fchs_lat     <= 1'b0;
             is_fabs_lat     <= 1'b0;
             is_fxam_lat     <= 1'b0;
@@ -887,7 +1084,18 @@ module execute_fpu (
                         pop_twice_lat  <= pop_twice_now;
                         is_fxch_lat    <= is_fxch_sti;
                         is_fld_lat     <= is_fld_sti;
+                        is_fld_mem_lat <= is_fld_mem;    // PR-2b.4k iter 77
+                        is_fld_m80_lat <= is_fld_m80;    // PR-2b.5g iter 124
+                        mem80_hi_lat   <= exe_mem_data_hi; // PR-2b.5g iter 124
+                        is_fconst_lat  <= is_fconst;     // PR-2b.4n iter 112
+                        fconst_lat     <= fconst_value;
+                        fconst_tag_lat <= fconst_tag;
                         is_fst_lat     <= is_fst_family;
+                        is_fstp_m80_lat <= is_fstp_m80;  // PR-2b.5a iter 113
+                        is_fstp_m32_lat <= is_fstp_m32;  // PR-2b.5c iter 116
+                        is_fstp_m64_lat <= is_fstp_m64;  // PR-2b.5d iter 117
+                        is_fst_m32_lat  <= is_fst_m32;   // PR-2b.5e iter 118
+                        is_fst_m64_lat  <= is_fst_m64;   // PR-2b.5e iter 118
                         is_fchs_lat    <= is_fchs;
                         is_fabs_lat    <= is_fabs;
                         is_fxam_lat    <= is_fxam;
@@ -935,7 +1143,12 @@ module execute_fpu (
                     // mem_z (converted) not rf_rd_data — rf_rd_data still
                     // reflects an unrelated ST(stnr) read since FETCH_B
                     // drove abs_stsrc regardless, but mem-form discards it.
-                    b_lat           <= is_mem_form_lat ? mem_z : rf_rd_data;
+                    // PR-2b.5g (iter 124): FLD m80 assembles the RAW floatx80
+                    // from the captured halves — no converter (the bits ARE the
+                    // floatx80).  Takes priority over the m32/m64 mem_z path
+                    // (is_mem_form_lat is 0 for FLD m80, but be explicit).
+                    b_lat           <= is_fld_m80_lat ? {mem80_hi_lat, mem_data_lat} :
+                                       is_mem_form_lat ? mem_z : rf_rd_data;
                     stsrc_empty_lat <= (rf_rd_tag == 2'b11);
                     stsrc_tag_lat   <= rf_rd_tag;
                     z_lat           <= sum_pre;
@@ -946,11 +1159,26 @@ module execute_fpu (
                     //   flags_lat[0] = IE
                     //   flags_lat[1] = DE
                     // Higher bits (ZE/OE/UE/PE) come solely from flags_pre.
-                    flags_lat       <= (is_fxch_lat | is_fld_lat | is_fst_lat |
+                    flags_lat       <= // PR-2b.4k STAGE 3 (iter 77): mem-form FLD takes ONLY
+                                       // the converter's DE/IE — flags_pre is junk for FLD
+                                       // (the arith primitive ran on a fabricated a/b pair).
+                                       // Check this BEFORE the is_fld_lat-in-OR-list arm so
+                                       // mem-form FLD doesn't fall through to 6'd0.
+                                       is_fld_mem_lat ? {4'd0, mem_de_flag, mem_ie_flag} :
+                                       // PR-2b.5f (iter 119): narrowing-store exception flags.
+                                       // {PE,UE,OE,ZE,DE,IE} = {pe, ue, oe, 0, 0, ie} taken from
+                                       // the active converter (FST and FSTP share the same lane).
+                                       // ZE/DE are never raised by a store narrowing-conversion.
+                                       // Must precede the 6'd0 control-op arm below.
+                                       (is_fstp_m32_lat | is_fst_m32_lat) ? {f32_pe, f32_ue, f32_oe, 1'b0, 1'b0, f32_ie} :
+                                       (is_fstp_m64_lat | is_fst_m64_lat) ? {f64_pe, f64_ue, f64_oe, 1'b0, 1'b0, f64_ie} :
+                                       (is_fxch_lat | is_fld_lat | is_fst_lat |
+                                        is_fstp_m80_lat |                       // PR-2b.5a iter 113: verbatim 80-bit store, no exceptions
+                                        is_fld_m80_lat |                        // PR-2b.5g iter 124: verbatim 80-bit load, no exceptions (even on SNaN)
                                         is_fchs_lat | is_fabs_lat | is_fxam_lat |
                                         is_ffree_lat | is_fnop_lat |
                                         is_fdecstp_lat | is_fincstp_lat |
-                                        is_fcmov_lat) ? 6'd0 :
+                                        is_fcmov_lat | is_fconst_lat) ? 6'd0 :  // PR-2b.4n iter 112
                                        // PR-2b.4g (iter 58): mem-form cmp ops OR the
                                        // converter's de/ie into the cmp_ie_now lane.
                                        // Denormal mem -> DE (converter); SNaN mem ->
@@ -1151,6 +1379,50 @@ module execute_fpu (
                       ((state == S_RETIRE) && !is_fxch_lat
                                            && !(pop_after_lat && ~es_now));
 
+    // PR-2b.5c (iter 116): FSTP m32 narrowing converter.  Fed combinationally by
+    // a_lat (ST(0), latched at S_FETCH_B); the RTNE-rounded float32 rides
+    // store_data[31:0] when is_fstp_m32_lat.  PR-2b.5f (iter 119): exc-flag
+    // outputs (pe/oe/ue/ie) now feed flags_lat (see narrowing-store arm above)
+    // and flow through exc_flags_set -> fpu_csr -> SW at S_RETIRE.
+    wire [31:0] fstp_m32_z;   // f32_pe/oe/ue/ie declared near the *_lat block above
+    floatx80_to_float32 u_floatx80_to_float32 (
+        .a  (a_lat),
+        .z  (fstp_m32_z),
+        .pe (f32_pe),
+        .oe (f32_oe),
+        .ue (f32_ue),
+        .ie (f32_ie)
+    );
+    // PR-2b.5d (iter 117): FSTP m64 narrowing converter — fed by a_lat, RTNE
+    // float64 rides store_data[63:0] when is_fstp_m64_lat.  PR-2b.5f (iter 119):
+    // flags (pe/oe/ue/ie) now drive flags_lat -> exc_flags_set -> SW.
+    wire [63:0] fstp_m64_z;   // f64_pe/oe/ue/ie declared near the *_lat block above
+    floatx80_to_float64 u_floatx80_to_float64 (
+        .a  (a_lat),
+        .z  (fstp_m64_z),
+        .pe (f64_pe),
+        .oe (f64_oe),
+        .ue (f64_ue),
+        .ie (f64_ie)
+    );
+
+    // PR-2b.5a (iter 113): FSTP m80 raw-store outputs.  store_data is the
+    // verbatim ST(0) value (a_lat, latched at S_FETCH_B); store_ready holds
+    // high from S_COMPUTE (first cycle a_lat is valid) through S_POP so the
+    // write stage can latch the payload at any point before its write
+    // sequence retires the op.  PR-2b.5c: FSTP m32 substitutes the narrowed
+    // float32 in [31:0] (write.v emits only step 0 for m32).  Both 0 otherwise.
+    assign store_data  = (is_fstp_m32_lat || is_fst_m32_lat) ? {48'd0, fstp_m32_z} :
+                         (is_fstp_m64_lat || is_fst_m64_lat) ? {16'd0, fstp_m64_z} : a_lat;
+    // PR-2b.5e (iter 118): FST m32/m64 share the window.  For the no-pop ops the
+    // FSM never enters S_POP, but the latch in write.v fires during S_COMPUTE
+    // (the write stage runs concurrently with the FPU FSM, retiring early), so
+    // the S_RETIRE-and-earlier window suffices; the S_POP term is dead for FST.
+    assign store_ready = (is_fstp_m80_lat || is_fstp_m32_lat || is_fstp_m64_lat ||
+                          is_fst_m32_lat  || is_fst_m64_lat) &&
+                         ((state == S_COMPUTE) || (state == S_POST) ||
+                          (state == S_RETIRE)  || (state == S_POP));
+
     //--------------------------------------------------------------------
     // PR-2b.2d: exc_flags_set OR-lane into the external fpu_csr.
     //
@@ -1184,13 +1456,19 @@ module execute_fpu (
     // masking is needed.
     assign top_din              = (state == S_POP)  ? (top_lat + 3'd1) :
                                   (state == S_POP2) ? (top_lat + 3'd2) :
-                                  is_fld_lat        ? abs_new_top      :
+                                  (is_fld_lat |
+                                   is_fld_mem_lat |
+                                   is_fld_m80_lat |                       // PR-2b.5g iter 124
+                                   is_fconst_lat)   ? abs_new_top      :  // PR-2b.4k iter 77 / 4n iter 112
                                   is_fdecstp_lat    ? (top_lat - 3'd1) :
                                   is_fincstp_lat    ? (top_lat + 3'd1) :
                                                       top_lat;          // unused otherwise
     assign top_we               = (state == S_POP) ||
                                   (state == S_POP2) ||
                                   ((state == S_RETIRE) && (is_fld_lat |
+                                                           is_fld_mem_lat |    // PR-2b.4k iter 77
+                                                           is_fld_m80_lat |    // PR-2b.5g iter 124
+                                                           is_fconst_lat |     // PR-2b.4n iter 112
                                                            is_fdecstp_lat |
                                                            is_fincstp_lat));
 
@@ -1221,7 +1499,10 @@ module execute_fpu (
                         (state == S_POP2)   ? abs_st1     :
                         (state == S_FXCH2)  ? abs_stsrc   :
                         is_fxch_lat         ? abs_st0     :
-                        is_fld_lat          ? abs_new_top :   // FLD push dest
+                        (is_fld_lat |
+                         is_fld_mem_lat |
+                         is_fld_m80_lat |                      // PR-2b.5g iter 124: push dest
+                         is_fconst_lat)     ? abs_new_top :   // PR-2b.4k iter 77 / 4n iter 112: push dest
                         dst_is_sti_lat      ? abs_stsrc   :   // arith-DE / FST / FSTP
                                               abs_st0;
     // PR-2b.3n: FCHS / FABS unary-result encodings.  Both preserve ST(0)'s
@@ -1233,18 +1514,46 @@ module execute_fpu (
 
     assign rf_wr_data = (state == S_FXCH2) ? a_lat :
                         is_fxch_lat        ? b_lat :
-                        is_fld_lat         ? b_lat :          // old ST(i) data
+                        is_fld_lat         ? b_lat :          // old ST(i) data (reg-form)
+                        is_fld_mem_lat     ? b_lat :          // PR-2b.4k iter 77: converted mem_z (S_COMPUTE sets b_lat=mem_z under is_mem_form_lat)
+                        is_fld_m80_lat     ? b_lat :          // PR-2b.5g iter 124: raw {hi16, lo64} floatx80 (S_COMPUTE assembled it)
+                        is_fconst_lat      ? fconst_lat :     // PR-2b.4n iter 112: hardcoded x87 constant
                         is_fst_lat         ? a_lat :          // FST/FSTP: ST(0) data
                         is_fchs_lat        ? fchs_result :    // FCHS: ~bit79 of ST(0)
                         is_fabs_lat        ? fabs_result :    // FABS: clear bit79 of ST(0)
                         is_ffree_lat       ? b_lat :          // PR-2b.3r FFREE: preserve ST(i) data
                         is_fcmov_lat       ? b_lat :          // PR-2b.3t FCMOV taken: ST(0) <- ST(i)
                                              z_lat;
+    // PR-2b.4k STAGE 3 (iter 77): tag classification for mem-form FLD.
+    // b_lat carries the converted floatx80 (from mem_z) at S_RETIRE; classify
+    // its bit pattern into Intel SDM Vol 1 Table 8-1 tags:
+    //   Valid  (2'b00) — finite normal value (default)
+    //   Zero   (2'b01) — all bits [78:0] == 0 (sign-agnostic zero)
+    //   Special(2'b10) — exp==0x7FFF (NaN/Inf).  Denormal float32/float64
+    //                    inputs are normalised by the existing converters
+    //                    so they don't produce x80 with exp==0; if a
+    //                    pseudo-denormal somehow lands here we fall through
+    //                    to Valid which is the safe choice (the value is
+    //                    still architecturally non-empty).
+    wire [1:0] fld_mem_tag = (b_lat[78:0] == 79'd0)        ? 2'b01 :  // Zero
+                             (b_lat[78:64] == 15'h7FFF)    ? 2'b10 :  // NaN/Inf
+                                                             2'b00;   // Valid
+    // PR-2b.5g (iter 124): FLD m80 classifies the RAW floatx80.  Unlike the
+    // m32/m64 converters (which normalise denormals away), a raw m80 load can
+    // carry exp==0 with a nonzero significand (true denormal / pseudo-denormal)
+    // — those are Special (2'b10) per Intel tag-word semantics.
+    wire [1:0] fld_m80_tag = (b_lat[78:0] == 79'd0)        ? 2'b01 :  // Zero
+                             (b_lat[78:64] == 15'h7FFF)    ? 2'b10 :  // NaN/Inf
+                             (b_lat[78:64] == 15'h0)       ? 2'b10 :  // denormal/pseudo-denormal -> Special
+                                                             2'b00;   // Valid
     assign rf_wr_tag  = (state == S_POP)    ? 2'b11         :  // Empty
                         (state == S_POP2)   ? 2'b11         :  // PR-2b.3q: Empty (second pop)
                         (state == S_FXCH2)  ? st0_tag_lat   :  // FXCH tag swap
                         is_fxch_lat         ? stsrc_tag_lat :  // first FXCH write
-                        is_fld_lat          ? stsrc_tag_lat :  // copy ST(i) tag
+                        is_fld_lat          ? stsrc_tag_lat :  // copy ST(i) tag (reg-form FLD)
+                        is_fld_mem_lat      ? fld_mem_tag   :  // PR-2b.4k iter 77: classify mem_z
+                        is_fld_m80_lat      ? fld_m80_tag   :  // PR-2b.5g iter 124: classify raw floatx80
+                        is_fconst_lat       ? fconst_tag_lat:  // PR-2b.4n iter 112: precomputed (Zero/Valid)
                         is_fst_lat          ? st0_tag_lat   :  // FST/FSTP: copy ST(0) tag
                         (is_fchs_lat | is_fabs_lat) ? st0_tag_lat :  // FCHS/FABS: preserve ST(0) tag
                         is_ffree_lat        ? 2'b11         :  // PR-2b.3r FFREE: Empty
@@ -1267,6 +1576,11 @@ module execute_fpu (
     // existing ~is_fxam_lat / ~is_cmp_lat / etc. masks stay quiet for FCMOV.
     assign rf_wr_en   = ((state == S_RETIRE) && ~es_now && ~is_fxam_lat && ~is_cmp_lat
                                             && ~is_fnop_lat && ~is_fdecstp_lat && ~is_fincstp_lat
+                                            && ~is_fstp_m80_lat   // PR-2b.5a iter 113: dest is memory, no regfile data write
+                                            && ~is_fstp_m32_lat   // PR-2b.5c iter 116: dest is memory, no regfile data write
+                                            && ~is_fstp_m64_lat   // PR-2b.5d iter 117: dest is memory, no regfile data write
+                                            && ~is_fst_m32_lat    // PR-2b.5e iter 118: dest is memory, no regfile data write
+                                            && ~is_fst_m64_lat    // PR-2b.5e iter 118: dest is memory, no regfile data write
                                             && (~is_fcmov_lat | fcmov_taken_lat)) ||
                         (state == S_POP) ||
                         (state == S_POP2) ||    // PR-2b.3q: second tag-Empty write

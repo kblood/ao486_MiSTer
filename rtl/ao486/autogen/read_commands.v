@@ -294,6 +294,106 @@ wire cond_255 = rd_cmd == `CMD_debug_reg && rd_cmdex == `CMDEX_debug_reg_MOV_loa
 wire cond_256 = rd_cmd == `CMD_XLAT;
 wire cond_257 = rd_cmd == `CMD_AAA || rd_cmd == `CMD_AAS || rd_cmd == `CMD_DAA || rd_cmd == `CMD_DAS;
 wire cond_258 = { rd_cmd[6:1], 1'd0 } == `CMD_BSx;
+// PR-1a follow-up (iter 69): cond_259 wires the read-stage half of FNSTCW m16's
+// memory write — sets rd_dst_is_memory + rd_req_memory + write_virtual_check
+// in parallel to MOV [m16], reg.  Pairs with autogen/write_commands.v cond_276.
+wire cond_259 = rd_cmd == `CMD_fpu && rd_cmdex == `CMDEX_FNSTCW_M16;
+// PR-2b.5a (iter 113): cond_279 wires the read-stage half of FSTP m80fp's
+// memory write — identical arm set to FNSTCW cond_259 (write_virtual_check +
+// rd_req_memory + rd_dst_is_memory + rd_waiting), all gated by cond_3 (mem-
+// form, mod!=11).  Pairs with autogen/write_commands.v cond_279.  The 3-step
+// 80-bit store is driven entirely in pipeline/write.v off the direct
+// store_data/store_ready lane; the read stage just precomputes the linear
+// address + page-fault check (FNSTCW's m16 length suffices — the in-page
+// smoke never straddles a page).
+// PR-2b.5c (iter 116): broadened to the whole CMD_fpu_store_mem namespace so
+// FSTP m32fp (and future FST/FSTP m32/m64) get the identical read-stage setup
+// (virtual-write check + dst_is_memory).  Store WIDTH is handled in write.v;
+// the read stage only precomputes the linear address + page-fault check.
+wire cond_279 = rd_cmd == `CMD_fpu_store_mem;
+// PR-1a follow-up (iter 72): cond_260 registers FNSTSW AX with the read-stage
+// mutex tracker by setting rd_req_eax.  FNSTSW AX writes EAX via cond_277 in
+// write_commands.v (iter 71), but without a mutex entry, the very next op
+// (including x86 NOPs, which decode as XCHG EAX,EAX) reads EAX at READ stage
+// while FNSTSW AX is still in EXECUTE/WRITE.  The reader gets stale EAX=0,
+// and one cycle after FNSTSW retires EAX=0x4100, the trailing XCHG writes
+// EAX=0, clobbering the SW value before any subsequent mov [m16],ax can see
+// it.  Setting rd_req_eax here causes read_mutex.v to OR bit[0] into
+// rd_mutex_next, which propagates through exe_mutex / wr_mutex and stalls
+// the next op's READ stage until FNSTSW AX's WRITE retires.  Pairs with
+// autogen/write_commands.v cond_277.
+wire cond_260 = rd_cmd == `CMD_fpu && rd_cmdex == `CMDEX_FNSTSW_AX;
+// PR-2b.4k STAGE 2 (iter 76): FLD m32fp / m64fp read-stage arms.
+// cond_261/262 trigger the standard memory-fetch path so read.v's
+// read_data[63:0] lane is populated.  The 64-bit operand is then
+// forwarded to execute.v via rd_read_data and snapshotted into
+// exe_fpu_mem_data on e_load (PR-2b.4a iter-54 plumbing), so
+// execute_fpu sees the m32fp/m64fp bytes regardless of mem_fmt.
+// Mirror of the canonical MOV reg,[m] (cond_216) LOAD pattern:
+// (i) read_virtual fires on cond_3 && ~cond_9 (mem-form, not
+// memory-busy); (ii) rd_waiting stalls on cond_9 (mem-busy hazard)
+// and on ~cond_9 && cond_5 (memory not yet ready).  rd_src_is_memory
+// is INTENTIONALLY NOT asserted — the integer src lane (read_4) is
+// orthogonal to the FPU mem-form lane (rd_read_data → exe_fpu_mem_data),
+// and FLD has no integer destination.  rd_req_memory is also NOT
+// asserted — consume_modregrm_one=TRUE in decode_commands.v's cond_206/207
+// already routes the op through the modrm-fetch state machine which
+// implicitly enters the memory hazard via read_for_rd_*.  Pairs with
+// future autogen/execute_commands.v dispatch arm + execute_fpu.v
+// S_FLD_MEM state branch (STAGE 3, deferred to iter 77+).
+wire cond_261 = rd_cmd == `CMD_fpu_load_mem && rd_cmdex == `CMDEX_FLD_M32;
+wire cond_262 = rd_cmd == `CMD_fpu_load_mem && rd_cmdex == `CMDEX_FLD_M64;
+// PR-2b.5g (iter 124): FLD m80fp — same mem-fetch trigger + rd_waiting hold
+// as FLD m64, but the read LENGTH/ADDRESS and the 2-beat sequencing live in
+// read.v's FLD m80 step FSM (NOT read_length_qword here — read.v overrides
+// read_length fully for is_fld_m80_op).  read_for_rd_ready is overridden in
+// read.v to fire only after beat 1, so the cond_5 (~read_for_rd_ready) hold
+// below naturally spans both beats.
+wire cond_281 = rd_cmd == `CMD_fpu_load_mem && rd_cmdex == `CMDEX_FLD_M80;
+// PR-2b.4d-g defensive read-stage plumbing (iter 81).
+// The existing PR-2b.4d-g mem-form arith ops (FADD/FSUB/FMUL/FDIV/FSUBR/
+// FDIVR/FCOM/FCOMP m32+m64 across 16 CMDEXes) landed via unit TBs that
+// pre-load FPU datapath inputs directly, bypassing the read stage.  They
+// therefore have NO arms in this file (iter-76 audit finding) — meaning
+// pipeline-runtime dispatch of any D8/DC mem-form op silently fetches
+// nothing and execute_fpu sees stale exe_fpu_mem_data.  Now that iter-80
+// has fully validated PR-2b.4k (FLD m32/m64 end-to-end) and proven the
+// read-stage path works, mirror iter-76's cond_261/262 pattern across
+// all of CMD_fpu_arith_mem.  Single catch-all cond_263 covers all 16
+// CMDEXes (same hazard model, same read_virtual semantics); separate
+// cond_264 gates the read_length_qword cascade on m64 variants only,
+// riding iter-56's "m64 CMDEX is odd" convention from defines.v:716-770
+// (FADD_M64=4'd1, FMUL_M64=4'd3, FSUB_M64=4'd5, FDIV_M64=4'd7,
+// FSUBR_M64=4'd9, FDIVR_M64=4'd11, FCOM_M64=4'd13, FCOMP_M64=4'd15).
+// m32 variants fall through to read.v:554-569's default 4'd4 fetch.
+// As with cond_261/262: rd_src_is_memory and rd_req_memory are both
+// INTENTIONALLY NOT asserted — the integer src lane is orthogonal to
+// the FPU mem-form lane, and decode_commands.v's cond_190..205 set
+// consume_modregrm_one=TRUE which implicitly enters the memory hazard
+// via the modrm-fetch state machine's read_for_rd_* path.
+wire cond_263 = rd_cmd == `CMD_fpu_arith_mem;
+wire cond_264 = rd_cmd == `CMD_fpu_arith_mem && rd_cmdex[0] == 1'b1;
+// PR-2b.4l (iter 103): defensive rd_req_eflags arm for FCOMI / FUCOMI /
+// FCOMIP / FUCOMIP — pairs with autogen/write_commands.v cond_278.  Per
+// [[feedback-mutex-tracks-source-reads]] and [[feedback-fnstsw-ax-missing
+// -write-eax-arm]], registering EFLAGS as a phantom source-read keeps the
+// pipeline mutex honest so a downstream op that reads ZF/PF/CF (e.g. a
+// follow-on JCC) blocks for the FCOMI writeback instead of sampling the
+// pre-FCOMI value.
+wire cond_265 = rd_cmd == `CMD_fpu_cmp && (rd_cmdex == `CMDEX_FCOMI || rd_cmdex == `CMDEX_FCOMIP || rd_cmdex == `CMDEX_FUCOMI || rd_cmdex == `CMDEX_FUCOMIP);
+// PR-2b.4d (iter 104): rd_req_eflags arm for FCMOVcc.  execute_fpu.v's
+// FCMOVcc evaluator reads cflag/zflag/pflag DIRECTLY (combinational
+// wires from execute.v lines 837-839, sourced live from write_register.v's
+// flag latches) at the cycle FCMOVcc enters execute.  Without registering
+// EFLAGS as a phantom source-read here, the read_mutex does NOT stall
+// FCMOVcc when a prior flag-writing op (CMP/TEST/SUB/XOR/...) is still
+// in flight, and FCMOVcc samples the pre-flag-set values.  Iter-104
+// pr2b4d_fcmovcc_smoke.lua TEST 1/3/6/7/8 all reproduced this: each
+// failing FCMOVcc returned the value the FXAM would predict for the OLD
+// EFLAGS, not the new ones.  All 8 results matched the stale-read model
+// perfectly.  Pattern is the same iter-72/iter-103 lesson applied to
+// EFLAGS-source-reads.
+wire cond_266 = rd_cmd == `CMD_fpu_cmov;
 //======================================================== saves
 //======================================================== always
 //======================================================== sets
@@ -468,6 +568,7 @@ assign rd_req_eax =
     (cond_226)? (`TRUE) :
     (cond_256)? (`TRUE) :
     (cond_257)? (`TRUE) :
+    (cond_260)? (`TRUE) :
     1'd0;
 assign address_stack_for_iret_last =
     (cond_98 && cond_101)? (`TRUE) :
@@ -528,6 +629,14 @@ assign read_virtual =
     (cond_206 && ~cond_9)? (`TRUE) :
     (cond_213 && cond_214 && ~cond_9)? (`TRUE) :
     (cond_216 && cond_3 && ~cond_9)? (`TRUE) :
+    // PR-2b.4k STAGE 2 (iter 76): FLD m32fp/m64fp mem-fetch trigger.
+    (cond_261 && cond_3 && ~cond_9)? (`TRUE) :
+    (cond_262 && cond_3 && ~cond_9)? (`TRUE) :
+    // PR-2b.5g (iter 124): FLD m80fp mem-fetch trigger (2-beat read in read.v).
+    (cond_281 && cond_3 && ~cond_9)? (`TRUE) :
+    // PR-2b.4d-g defensive plumbing (iter 81): catch-all for CMD_fpu_arith_mem
+    // covering FADD/FSUB/FMUL/FDIV/FSUBR/FDIVR/FCOM/FCOMP m32+m64.
+    (cond_263 && cond_3 && ~cond_9)? (`TRUE) :
     (cond_222 && ~cond_9)? (`TRUE) :
     (cond_224 && ~cond_9)? (`TRUE) :
     (cond_225 && ~cond_9)? (`TRUE) :
@@ -560,6 +669,8 @@ assign write_virtual_check =
     (cond_217 && cond_3 && ~cond_218)? (`TRUE) :
     (cond_219 && cond_3 && ~cond_218)? (`TRUE) :
     (cond_246)? (`TRUE) :
+    (cond_259 && cond_3)? (`TRUE) :
+    (cond_279 && cond_3)? (`TRUE) :  // PR-2b.5a iter 113: FSTP m80fp write_virtual_check
     1'd0;
 assign rd_req_esi =
     (cond_114 && ~cond_38 && cond_39)? (`TRUE) :
@@ -607,6 +718,8 @@ assign rd_req_eflags =
     (cond_223)? (`TRUE) :
     (cond_257)? (`TRUE) :
     (cond_258)? (`TRUE) :
+    (cond_265)? (`TRUE) :
+    (cond_266)? (`TRUE) :
     1'd0;
 assign rd_extra_wire =
     (cond_14)? ( rd_decoder[55:24]) :
@@ -670,6 +783,8 @@ assign rd_req_memory =
     (cond_231)? (`TRUE) :
     (cond_246)? (`TRUE) :
     (cond_249 && ~cond_38 && cond_39)? (`TRUE) :
+    (cond_259 && cond_3)? (`TRUE) :
+    (cond_279 && cond_3)? (`TRUE) :  // PR-2b.5a iter 113: FSTP m80fp rd_req_memory
     1'd0;
 assign rd_glob_param_3_set =
     (cond_15 && ~cond_16 && cond_17)? (`TRUE) :
@@ -1077,6 +1192,12 @@ assign rd_waiting =
     (cond_169 && cond_3 && cond_9)? (`TRUE) :
     (cond_169 && cond_3 && ~cond_9 && cond_5)? (`TRUE) :
     (cond_170 && cond_171)? (`TRUE) :
+    // PR-2b.4d (iter 104): FCMOVcc must stall when a prior op has the eflags
+    // mutex slot busy (i.e. cflag/pflag/zflag write still in flight), or
+    // FCMOVcc reads stale flags on its execute-entry cycle.  Pairs with
+    // cond_266 in the rd_req_eflags cascade above.  Same wait pattern as
+    // INTO (cond_170 above).
+    (cond_266 && cond_171)? (`TRUE) :
     (cond_172 && cond_68)? (`TRUE) :
     (cond_173 && cond_174)? (`TRUE) :
     (cond_173 && ~cond_174 && cond_175 && cond_176)? (`TRUE) :
@@ -1120,6 +1241,23 @@ assign rd_waiting =
     (cond_216 && cond_1 && cond_8)? (`TRUE) :
     (cond_216 && cond_3 && cond_9)? (`TRUE) :
     (cond_216 && cond_3 && ~cond_9 && cond_5)? (`TRUE) :
+    // PR-2b.4k STAGE 2 (iter 76): FLD m32fp/m64fp rd_waiting arms.
+    // cond_3 (mem-form gate): cond_9 stalls on memory-busy hazard;
+    // ~cond_9 && cond_5 stalls until read_for_rd_ready fires.  No
+    // reg-form variant (cond_1) since FLD m32/m64 is mem-only.
+    (cond_261 && cond_3 && cond_9)? (`TRUE) :
+    (cond_261 && cond_3 && ~cond_9 && cond_5)? (`TRUE) :
+    (cond_262 && cond_3 && cond_9)? (`TRUE) :
+    (cond_262 && cond_3 && ~cond_9 && cond_5)? (`TRUE) :
+    // PR-2b.5g (iter 124): FLD m80fp — hold until read.v's overridden
+    // read_for_rd_ready fires (after beat 1, the qword); cond_5 = ~ready.
+    (cond_281 && cond_3 && cond_9)? (`TRUE) :
+    (cond_281 && cond_3 && ~cond_9 && cond_5)? (`TRUE) :
+    // PR-2b.4d-g defensive plumbing (iter 81): rd_waiting arms for
+    // CMD_fpu_arith_mem.  Same shape as FLD m32/m64 — mem-only, no
+    // reg-form variant (D8/DC reg-form lives in CMD_fpu_arith).
+    (cond_263 && cond_3 && cond_9)? (`TRUE) :
+    (cond_263 && cond_3 && ~cond_9 && cond_5)? (`TRUE) :
     (cond_217 && cond_1 && cond_218)? (`TRUE) :
     (cond_217 && cond_3 && cond_218)? (`TRUE) :
     (cond_217 && cond_3 && ~cond_218 && cond_29)? (`TRUE) :
@@ -1162,6 +1300,8 @@ assign rd_waiting =
     (cond_258 && cond_1 && cond_8)? (`TRUE) :
     (cond_258 && cond_3 && cond_9)? (`TRUE) :
     (cond_258 && cond_3 && ~cond_9 && cond_5)? (`TRUE) :
+    (cond_259 && cond_3 && cond_29)? (`TRUE) :
+    (cond_279 && cond_3 && cond_29)? (`TRUE) :  // PR-2b.5a iter 113: FSTP m80fp rd_waiting (holds for write_virtual_check)
     1'd0;
 assign address_ea_buffer =
     (cond_11 && cond_12)? (`TRUE) :
@@ -1350,6 +1490,8 @@ assign rd_dst_is_memory =
     (cond_213 && ~cond_214)? (`TRUE) :
     (cond_217 && cond_3)? (`TRUE) :
     (cond_219 && cond_3)? (`TRUE) :
+    (cond_259 && cond_3)? (`TRUE) :
+    (cond_279 && cond_3)? (`TRUE) :  // PR-2b.5a iter 113: FSTP m80fp rd_dst_is_memory
     1'd0;
 assign rd_glob_descriptor_2_set =
     (cond_97)? (`TRUE) :
@@ -1437,4 +1579,23 @@ assign read_length_dword =
     (cond_22 && cond_24)? (`TRUE) :
     (cond_121 && cond_123)? (`TRUE) :
     (cond_246 && cond_248)? (`TRUE) :
+    1'd0;
+// PR-2b.4k iter 79: FLD m64fp — fetch 8 bytes (qword) from memory.
+// Iter-76's cond_262 (CMD_fpu_load_mem + CMDEX_FLD_M64) set read_virtual=TRUE
+// to trigger a memory read, but the pre-iter-79 read.v read_length cascade
+// defaulted to 32-bit fetches for any read_virtual that wasn't word-sized.
+// Iter-78's smoke RED on m64 confirmed only the low 32 bits arrived at
+// exe_fpu_mem_data.  This new arm pulses read_length_qword=TRUE for FLD m64
+// (mem-form gate cond_3, mem-not-busy gate ~cond_9), driving read.v's new
+// 4'd8 arm (iter-79 added) so memory_read fetches the full 64-bit operand.
+// FLD m32 (cond_261) deliberately omitted from this cascade — float32 is
+// 4 bytes and the existing 4'd4 fallback at read.v already handles m32
+// correctly (iter-78 TESTs 1-4 all GREEN).  Iter-81 added cond_264 for
+// the PR-2b.4d-g defensive fix — covers FADD_M64/FMUL_M64/FSUB_M64/
+// FDIV_M64/FSUBR_M64/FDIVR_M64/FCOM_M64/FCOMP_M64 via the m64-CMDEX-is-odd
+// convention (rd_cmdex[0] == 1'b1).  m32 arith-mem variants fall through
+// to read.v's default 4-byte fetch as expected.
+assign read_length_qword =
+    (cond_262 && cond_3 && ~cond_9)? (`TRUE) :
+    (cond_264 && cond_3 && ~cond_9)? (`TRUE) :
     1'd0;

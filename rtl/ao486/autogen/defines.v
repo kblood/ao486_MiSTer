@@ -712,6 +712,16 @@
 // quiet for now (they'll be driven by the decoder lane the design doc plans
 // when later sub-iters expand the mem-form set to FSUB/FMUL/FDIV/etc.).
 // Destination is ST(0) for both (matches D8/DC mem-form SDM canonical).
+//
+// INVARIANT (iter 83): within CMD_fpu_arith_mem, CMDEX values are paired
+// even=m32 / odd=m64.  read_commands.v derives `read_length_qword` from
+// `rd_cmdex[0]` (see arith-mem arms around lines 355 and 1541 there) —
+// the bit-0 test only works because every M32 sits at an even slot and
+// every M64 sits at the matching odd slot below.  If you add a new
+// mem-form arith op, KEEP the pairing: assign m32 to the next even slot
+// and m64 to the next odd slot.  Codex flagged this in the iter-82/83
+// review as a brittle implicit contract.  Breaking it silently routes
+// 32-bit fetches into 64-bit lanes (or vice versa) with no elab error.
 `define CMD_fpu_arith_mem     7'd123
 `define CMDEX_FADD_M32        4'd0
 `define CMDEX_FADD_M64        4'd1
@@ -768,3 +778,61 @@
 `define CMDEX_FCOM_M64        4'd13
 `define CMDEX_FCOMP_M32       4'd14
 `define CMDEX_FCOMP_M64       4'd15
+
+// PR-2b.4k (iter 75) — mem-form FPU load: FLD m32fp (D9 /0 mod!=11) and
+// FLD m64fp (DD /0 mod!=11).  Pushes the converted floatx80 value onto
+// the FPU stack (TOP-- then write new ST(0)).  Lives in a NEW CMD value
+// space (`CMD_fpu_load_mem`) rather than reusing `CMD_fpu` (7'd50)
+// because (a) FLD m32/m64 is a memory LOAD with different pipeline
+// read-stage requirements than the rest of CMD_fpu's misc ops, and (b)
+// keeping FLD in its own namespace makes read_commands.v / write_commands.v
+// arms cleaner.  CMDEX encodes the operand width:
+//   CMDEX_FLD_M32 (4'd0) — m32fp source (D9 /0 mod!=11)
+//   CMDEX_FLD_M64 (4'd1) — m64fp source (DD /0 mod!=11)
+// execute_fpu derives the operand width from this CMDEX (mirrors PR-2b.4d's
+// is_mem_form_lat / mem_fmt_lat internal derivation).  Destination is
+// implicit ST(new TOP) after TOP-- (push semantics).  This iter (75) just
+// lays the defines + decode_commands.v dispatch arms; read_commands.v +
+// execute_commands.v + execute_fpu.v state branch lands in iter 76+.
+`define CMD_fpu_load_mem      7'd124
+`define CMDEX_FLD_M32         4'd0
+`define CMDEX_FLD_M64         4'd1
+// PR-2b.5g (iter 124): FLD m80fp (DB /5 mem-form) — load a raw 80-bit
+// floatx80 from memory straight into ST(0) (the load twin of FSTP m80,
+// CMD_fpu_store_mem/CMDEX_FSTP_M80).  No converter: the bits ARE the
+// floatx80.  Needs a 2-beat read (word@addr+8 then qword@addr+0) since the
+// read DATA bus is 64-bit; the FSM lives in pipeline/read.v.
+`define CMDEX_FLD_M80         4'd2
+
+// PR-2b.4n (iter 112): FPU constant loads FLD1/FLDL2T/FLDL2E/FLDPI/
+// FLDLG2/FLDLN2/FLDZ (D9 E8..EE).  Each pushes a hardcoded 80-bit
+// extended-precision constant onto the FPU stack (TOP-- then write the
+// new ST(0)), reusing the FLD push path in execute_fpu.v.  NEW CMD value
+// space CMD_fpu_const (7'd125) with a fresh 4-bit CMDEX namespace; the
+// CMDEX selects which constant the execute_fpu constant-ROM mux emits.
+`define CMD_fpu_const         7'd125
+`define CMDEX_FLD1            4'd0
+`define CMDEX_FLDL2T          4'd1
+`define CMDEX_FLDL2E          4'd2
+`define CMDEX_FLDPI           4'd3
+`define CMDEX_FLDLG2          4'd4
+`define CMDEX_FLDLN2          4'd5
+`define CMDEX_FLDZ            4'd6
+
+// PR-2b.5a (iter 113): FSTP m80fp = DB /7 mem-form.  Stores ST(0)'s raw
+// 80-bit floatx80 value to memory (10 bytes, little-endian: mantissa[63:0]
+// then {sign,exp}[15:0]) then pops the x87 stack.  No converter (value is
+// already floatx80).  NEW CMD value space CMD_fpu_store_mem (7'd126) — the
+// first FPU op that writes WIDE data to memory, requiring a 3-step write
+// (4+4+2 bytes) in write.v since the core write path caps at 4 bytes/xact.
+// See research/design_fstp_m80.md.
+`define CMD_fpu_store_mem     7'd126
+`define CMDEX_FSTP_M80        4'd0
+// PR-2b.5c (iter 116): FST/FSTP m32fp/m64fp — the ROUNDING stores (convert
+// ST(0) floatx80 -> float32/float64 then store).  CMDEX in CMD_fpu_store_mem.
+// FSTP m32 (D9 /3) landed iter 116; FST m32 / m64 variants staged (115b/c).
+// See research/design_fst_m32_m64.md.
+`define CMDEX_FSTP_M32        4'd1
+`define CMDEX_FST_M32         4'd2
+`define CMDEX_FSTP_M64        4'd3
+`define CMDEX_FST_M64         4'd4

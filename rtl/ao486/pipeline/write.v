@@ -279,7 +279,18 @@ module write(
     input       [31:0]  exe_result2,
     input       [31:0]  exe_result_push,
     input       [4:0]   exe_result_signals,
-    
+
+    // PR-2b.4l (iter 103): FCOMI eflags lane from execute.
+    input       [2:0]   exe_fpu_eflags_value,
+    input               exe_fpu_eflags_we,
+
+    // PR-2b.5a (iter 113): FSTP m80fp raw-store lane from execute.  Direct
+    // (combinational, no w_load latch) — exe_fpu_store_ready is a LEVEL held
+    // high S_COMPUTE..S_POP, exe_fpu_store_data is ST(0)'s verbatim 80-bit
+    // value.  Latched locally into wr_fpu_store_data on first observation.
+    input       [79:0]  exe_fpu_store_data,
+    input               exe_fpu_store_ready,
+
     input       [3:0]   exe_arith_index,
     
     input               exe_arith_sub_carry,
@@ -330,6 +341,26 @@ reg [31:0]  result;
 reg [31:0]  result2;
 reg [4:0]   result_signals;
 reg [31:0]  result_push;
+
+// PR-2b.4l (iter 103): latched FCOMI eflags writeback payload, sampled on
+// w_load from execute.v's exe_fpu_eflags_value / exe_fpu_eflags_we (which
+// pulse for one cycle in S_RETIRE when the FPU committed the compare).
+reg [2:0]   wr_fpu_eflags_value;
+reg         wr_fpu_eflags_we;
+
+// PR-2b.5a (iter 113): FSTP m80fp 3-step write-stage FSM state.
+//   wr_fpu_store_data : the latched 80-bit floatx80 payload.
+//   fpu_store_latched : payload captured (gates the first write so step-0
+//                       can't fire with stale data before the FPU FSM ran).
+//   fpu_store_step    : 0/1/2 — selects {addr+0,4B,[31:0]} / {addr+4,4B,
+//                       [63:32]} / {addr+8,2B,[79:64]}.  Advances on each
+//                       logical write_done.
+//   fpu_store_complete: set when step-2's write_done lands; drops write_do
+//                       so the 1-cycle wr_ready overlap can't issue a 4th.
+reg [79:0]  wr_fpu_store_data;
+reg         fpu_store_latched;
+reg [1:0]   fpu_store_step;
+reg         fpu_store_complete;
 
 reg [3:0]   wr_arith_index;
 reg [31:0]  wr_src;
@@ -612,6 +643,10 @@ always @(posedge clk) begin if(rst_n == 1'b0) result2                 <= 32'd0; 
 always @(posedge clk) begin if(rst_n == 1'b0) result_push             <= 32'd0;     else if(w_load) result_push             <= exe_result_push;          end
 always @(posedge clk) begin if(rst_n == 1'b0) result_signals          <= 5'd0;      else if(w_load) result_signals          <= exe_result_signals;       end
 
+// PR-2b.4l (iter 103): FCOMI eflags latch — same w_load pattern.
+always @(posedge clk) begin if(rst_n == 1'b0) wr_fpu_eflags_value     <= 3'd0;      else if(w_load) wr_fpu_eflags_value     <= exe_fpu_eflags_value;     end
+always @(posedge clk) begin if(rst_n == 1'b0) wr_fpu_eflags_we        <= 1'b0;      else if(w_load) wr_fpu_eflags_we        <= exe_fpu_eflags_we;        end
+
 always @(posedge clk) begin if(rst_n == 1'b0) wr_arith_index          <= 4'd0;      else if(w_load) wr_arith_index          <= exe_arith_index;          end
 always @(posedge clk) begin if(rst_n == 1'b0) wr_src                  <= 32'd0;     else if(w_load) wr_src                  <= src_final;                end
 always @(posedge clk) begin if(rst_n == 1'b0) wr_dst                  <= 32'd0;     else if(w_load) wr_dst                  <= dst_final;                end
@@ -685,7 +720,65 @@ assign write_lock = wr_prefix_group_1_lock;
 
 assign write_rmw = write_rmw_virtual || write_rmw_system_dword;
 
+//------------------------------------------------------------------------------
+// PR-2b.5a (iter 113): FSTP m80fp 3-transaction raw store.
+//
+// The write datapath caps at write_data[31:0] / write_length<=4 per logical
+// write (memory_write.v auto-splits a <=4-byte write across a 16-byte line,
+// but the payload is still 32-bit).  A floatx80 is 10 bytes, so we issue 3
+// writes: 4B mantissa[31:0] @ +0, 4B mantissa[63:32] @ +4, 2B {sign,exp} @ +8.
+//
+// The op enters the write stage at op-entry (before the FPU FSM produces
+// a_lat — the iter-103/104 FCOMI timing trap), so the payload CANNOT ride the
+// w_load-latched wr_* path.  Instead the FSM (running in parallel in the
+// execute stage) raises exe_fpu_store_ready once a_lat is valid; we latch it
+// here and run the 3-step write FSM.  The autogen `wr_waiting` arm
+// (cond_279 && cond_1, cond_1 = wr_dst_is_memory && ~write_for_wr_ready) holds
+// the op in the write stage across all 3 writes — we report ready only when
+// step-2 completes, which is always AFTER a_lat was captured.
+wire is_fstp_m80_op = (wr_cmd == `CMD_fpu_store_mem) && (wr_cmdex == `CMDEX_FSTP_M80);
+// PR-2b.5c (iter 116): width-aware generalization.  is_fp_store_op = any
+// CMD_fpu_store_mem op; the per-op write-step count differs by width:
+//   m80 = 3 writes (4+4+2 B, steps 0..2);  m32 = 1 write (4 B, step 0);
+//   m64 (115b, future) = 2 writes (4+4 B, steps 0..1).
+// fpu_store_max_step is the last step index; only m80's last step is 2 bytes.
+wire is_fp_store_op = (wr_cmd == `CMD_fpu_store_mem);
+// PR-2b.5d (iter 117): FSTP m64fp = 2 writes (4B frac[31:0]@+0, 4B
+// {sign,exp,frac[51:32]}@+4, steps 0..1 — both 4 bytes, no 2-byte tail).
+wire is_fstp_m64_op = is_fp_store_op && (wr_cmdex == `CMDEX_FSTP_M64);
+// PR-2b.5e (iter 118): FST m64 (no-pop) is the same 2-write width as FSTP m64;
+// FST m32 (CMDEX_FST_M32) falls through to the default 1-write m32 path.
+wire is_fst_m64_op  = is_fp_store_op && (wr_cmdex == `CMDEX_FST_M64);
+wire [1:0] fpu_store_max_step = is_fstp_m80_op ? 2'd2 :
+                                (is_fstp_m64_op || is_fst_m64_op) ? 2'd1 : 2'd0;  // m80=3 / m64=2 / m32=1 writes
+wire fstp_raw_done  = write_done && ~(write_page_fault) && ~(write_ac_fault);
+
+always @(posedge clk) begin
+    if(rst_n == 1'b0) begin
+        wr_fpu_store_data  <= 80'd0;
+        fpu_store_latched  <= 1'b0;
+        fpu_store_step     <= 2'd0;
+        fpu_store_complete <= 1'b0;
+    end else if(wr_reset || w_load) begin
+        // Fresh per-op state.  w_load fires only when a NEW op enters the
+        // write stage (during the FSTP hold, exe_ready=0 so w_load stays 0).
+        fpu_store_latched  <= 1'b0;
+        fpu_store_step     <= 2'd0;
+        fpu_store_complete <= 1'b0;
+    end else if(is_fp_store_op) begin
+        if(exe_fpu_store_ready && ~fpu_store_latched) begin
+            wr_fpu_store_data <= exe_fpu_store_data;
+            fpu_store_latched <= 1'b1;
+        end
+        if(fstp_raw_done && fpu_store_step != fpu_store_max_step)
+            fpu_store_step <= fpu_store_step + 2'd1;
+        if(fstp_raw_done && fpu_store_step == fpu_store_max_step)
+            fpu_store_complete <= 1'b1;
+    end
+end
+
 assign write_address =
+    (is_fp_store_op)?                           (wr_linear + { 28'd0, fpu_store_step, 2'd0 }) :  // +0 / +4 / +8
     (write_string_es_virtual)?                  wr_string_es_linear :
     (write_stack_virtual)?                      wr_push_linear :
     (write_new_stack_virtual)?                  wr_new_push_linear :
@@ -695,6 +788,9 @@ assign write_address =
                                                 wr_linear; //used by write_rmw_system_dword
 
 assign write_data =
+    (is_fp_store_op)?  ( (fpu_store_step == 2'd0)? wr_fpu_store_data[31:0]  :
+                         (fpu_store_step == 2'd1)? wr_fpu_store_data[63:32] :
+                                                   { 16'd0, wr_fpu_store_data[79:64] } ) :
     (write_stack_virtual || write_string_es_virtual || write_new_stack_virtual)?    result_push :
     (write_system_touch)?                                                           { 24'd0, glob_descriptor[47:41], 1'b1 } :
     (write_system_busy_tss)?                                                        glob_descriptor[63:32] | 32'h00000200 :
@@ -702,6 +798,7 @@ assign write_data =
                                                                                     result;
 
 assign write_length =
+    (is_fp_store_op)?           ( (is_fstp_m80_op && fpu_store_step == 2'd2)? 3'd2 : 3'd4 ) :  // m80: 4/4/2 ; m32: 4
     (write_stack_virtual || write_new_stack_virtual)?   wr_push_length :
     (write_system_touch)?       3'd1 :
     (write_system_busy_tss)?    3'd4 :
@@ -714,12 +811,17 @@ assign write_length =
     wr_operand_16bit?           3'd2 :
                                 3'd4;
 
+// FP-store ops mask the autogen write_virtual contribution (which would fire at
+// op-entry, before the payload is latched) and substitute a gated term that
+// only issues once the data is captured and the per-width writes aren't complete.
 assign write_do = ~(wr_reset) && ~(write_page_fault) && ~(write_ac_fault) &&
-    (write_rmw_virtual || write_virtual || write_stack_virtual || write_new_stack_virtual ||
-     write_string_es_virtual || memory_write_system);
+    (write_rmw_virtual || (write_virtual && ~is_fp_store_op) || write_stack_virtual || write_new_stack_virtual ||
+     write_string_es_virtual || memory_write_system ||
+     (is_fp_store_op && fpu_store_latched && ~fpu_store_complete));
 
 
-assign write_for_wr_ready = write_done && ~(write_page_fault) && ~(write_ac_fault);
+assign write_for_wr_ready = (is_fp_store_op)? (fstp_raw_done && fpu_store_step == fpu_store_max_step)
+                                            : (write_done && ~(write_page_fault) && ~(write_ac_fault));
 
 //------------------------------------------------------------------------------ write io
 
@@ -814,6 +916,10 @@ write_commands write_commands_inst(
     
     .result                        (result),                        //input [31:0]
     .result2                       (result2),                       //input [31:0]
+
+    // PR-2b.4l (iter 103): FCOMI eflags writeback inputs.
+    .wr_fpu_eflags_value           (wr_fpu_eflags_value),           //input [2:0]
+    .wr_fpu_eflags_we              (wr_fpu_eflags_we),              //input
 
     .wr_src                        (wr_src),                        //input [31:0]
     .wr_dst                        (wr_dst),                        //input [31:0]
@@ -1289,6 +1395,12 @@ write_register write_register_inst(
     .pflag_to_reg                  (pflag_to_reg),                  //input
     .aflag_to_reg                  (aflag_to_reg),                  //input
     .zflag_to_reg                  (zflag_to_reg),                  //input
+
+    // PR-2b.4l (iter 104): FCOMI eflags override — direct combinational
+    // pass-through of the FPU's S_RETIRE pulse, bypassing wr_* latches
+    // because w_load fires 4-6 cycles BEFORE the pulse for FCMP ops.
+    .fpu_eflags_we_direct          (exe_fpu_eflags_we),             //input
+    .fpu_eflags_value_direct       (exe_fpu_eflags_value),          //input [2:0]
     .sflag_to_reg                  (sflag_to_reg),                  //input
     .oflag_to_reg                  (oflag_to_reg),                  //input
     .tflag_to_reg                  (tflag_to_reg),                  //input

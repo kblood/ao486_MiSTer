@@ -243,6 +243,11 @@ module execute(
     // execute_fpu's `is_op_active` doesn't engage on the mem_data path.
     input       [63:0]  rd_read_data,
 
+    // PR-2b.5g (iter 124): FLD m80fp high 16 bits ({sign,exp}) from read.v's
+    // 2-beat FSM.  Latched on e_load alongside rd_read_data (which carries the
+    // low 64 bits for FLD m80's final beat) and forwarded to execute_fpu.
+    input       [15:0]  rd_fpu_mem_data_hi,
+
     //exe pipeline
     input               wr_busy,
     output              exe_ready,
@@ -271,7 +276,25 @@ module execute(
     output      [31:0]  exe_result2,
     output      [31:0]  exe_result_push,
     output      [4:0]   exe_result_signals,
-    
+
+    // PR-2b.4l (iter 103): integer EFLAGS write-back lane out of execute_fpu
+    // for FCOMI / FCOMIP / FUCOMI / FUCOMIP.  exe_fpu_eflags_value packs
+    // {ZF, PF, CF} (cmp_cc[3], cmp_cc[2], cmp_cc[0]); exe_fpu_eflags_we is
+    // a 1-cycle pulse asserted in S_RETIRE when the op did NOT trap.  w_load
+    // fires on the same cycle in the no-trap case, so write.v's standard
+    // exe_result-style latch captures both signals correctly.
+    output      [2:0]   exe_fpu_eflags_value,
+    output              exe_fpu_eflags_we,
+
+    // PR-2b.5a (iter 113): FSTP m80fp raw-store lane out of execute_fpu.
+    // exe_fpu_store_data carries ST(0)'s verbatim 80-bit floatx80 value;
+    // exe_fpu_store_ready is a LEVEL signal held high S_COMPUTE..S_POP.
+    // Pure combinational pass-through (no w_load latch) so write.v can latch
+    // the payload the moment a_lat is valid, decoupled from the op-entry
+    // pipeline timing that would otherwise capture stale data.
+    output      [79:0]  exe_fpu_store_data,
+    output              exe_fpu_store_ready,
+
     output      [3:0]   exe_arith_index,
     
     output              exe_arith_sub_carry,
@@ -334,18 +357,50 @@ wire [5:0] fpu_exec_exc_flags_set;
 wire [3:0] fpu_cc_din;
 wire       fpu_cc_we;
 
-// PR-2b.3u (iter 52): integer EFLAGS write-back lane out of execute_fpu.
-// Pulsed for one cycle in S_RETIRE during FCOMI / FUCOMI / FCOMIP /
-// FUCOMIP retire (when no unmasked exception trapped).  Payload is
-// {ZF, PF, CF} derived from the shared cmp_cc classifier.  These
-// signals are currently UNCONSUMED — the integration with the integer
-// write stage (pipeline/write.v → pipeline/write_commands.v →
-// write_register.v's cflag/pflag/zflag latches) is deferred to the
-// iter that wires FCOMI into a CPU-level smoke (likely paired with
-// PR-2b.4 mem-form arith).  The unit TB execute_fpu_tb.v validates
-// them directly off u_execute_fpu.
+// PR-2b.3s (iter 50) declared fpu_top_din / fpu_top_we below the fpu_csr
+// instance, so the fpu_csr port connection had to keep tying them off to
+// 0/0 — see iter-70 diagnosis.  Hoist them here so iter-70 can route them
+// into the CSR's top lane and let FDECSTP/FINCSTP/FLD update SW.TOP.
+wire [2:0] fpu_top_din;
+wire       fpu_top_we;
+
+// PR-2b.3u (iter 52, consumers wired iter 103/104): integer EFLAGS
+// write-back lane out of execute_fpu.  Pulsed for one cycle in S_RETIRE
+// during FCOMI / FUCOMI / FCOMIP / FUCOMIP retire (when no unmasked
+// exception trapped).  Payload is {ZF, PF, CF} derived from the shared
+// cmp_cc classifier.  Wired through to write_register.v's cflag/pflag/
+// zflag override arms via exe_fpu_eflags_value/_we (assigned below).
 wire [2:0] fpu_eflags_value;
 wire       fpu_eflags_we;
+
+// PR-2b.4l (iter 104): the FPU's fpu_eflags_we is a 1-cycle pulse in
+// S_RETIRE, fired 4-6 cycles AFTER the integer pipeline retires the
+// FCOMI op (exe_ready=1 && fpu_busy=0 fires on the SAME edge the FPU
+// FSM enters S_FETCH_A; w_load samples this and moves FCOMI to write
+// stage one edge before the FPU has even computed cmp_cc).
+//
+// Iter-103 tried a sticky-latch here so the pulse would still be
+// visible at write.v's w_load — but that doesn't help: by the time the
+// pulse fires, the FCOMI has already moved to wr_register write-back
+// and the wr_* latches captured wr_fpu_eflags_we=0.  Iter-104 routes
+// the pulse DIRECTLY to write_register.v's cflag/pflag/zflag latches
+// as an OVERRIDE arm (`else if (fpu_pulse_we) flag <= fpu_pulse_val`);
+// the override fires on whatever cycle the FPU pulses, completely
+// decoupled from pipeline timing.
+//
+// These outputs are now pure combinational pass-through.
+assign exe_fpu_eflags_value = fpu_eflags_value;
+assign exe_fpu_eflags_we    = fpu_eflags_we;
+
+// PR-2b.5a (iter 113): FSTP m80 raw-store lane.  Driven by the execute_fpu
+// instance (.store_data / .store_ready) below; combinational pass-through to
+// the module port for pipeline.v -> write.v.  store_ready is a level held
+// high S_COMPUTE..S_POP so write.v latches a_lat regardless of which cycle
+// the write stage first observes it.
+wire [79:0] fpu_store_data;
+wire        fpu_store_ready;
+assign exe_fpu_store_data  = fpu_store_data;
+assign exe_fpu_store_ready = fpu_store_ready;
 
 wire exe_is_8bit_clear;
 
@@ -409,6 +464,9 @@ always @(posedge clk) begin if(rst_n == 1'b0) dst                      <= 32'd0;
 // uses the full 64).  Routed to u_execute_fpu's exe_mem_data port below.
 reg  [63:0] exe_fpu_mem_data;
 always @(posedge clk) begin if(rst_n == 1'b0) exe_fpu_mem_data         <= 64'd0;     else if(e_load) exe_fpu_mem_data         <= rd_read_data;            end
+// PR-2b.5g (iter 124): FLD m80fp high 16 bits, latched alongside the low 64.
+reg  [15:0] exe_fpu_mem_data_hi;
+always @(posedge clk) begin if(rst_n == 1'b0) exe_fpu_mem_data_hi      <= 16'd0;     else if(e_load) exe_fpu_mem_data_hi      <= rd_fpu_mem_data_hi;       end
 always @(posedge clk) begin if(rst_n == 1'b0) exe_address_effective    <= 32'd0;     else if(e_load) exe_address_effective    <= rd_address_effective;    end
 always @(posedge clk) begin if(rst_n == 1'b0) exe_eip_next_sum         <= 32'd0;     else if(e_load) exe_eip_next_sum         <= rd_eip_next_sum;         end
 
@@ -691,9 +749,15 @@ fpu_csr u_fpu_csr (
     .cc_we               (fpu_cc_we),
     .cc_din              (fpu_cc_din),
 
+    // PR-2b.3s (iter 50) wired FDECSTP/FINCSTP/FLD to drive
+    // top_din/top_we from execute_fpu, and the unit TB validated the path.
+    // But the execute.v fpu_csr instance kept the PR-2b.2d-era 0/0 tie-offs
+    // here — so FDECSTP/FINCSTP retired silently at pipeline-runtime, leaving
+    // SW.TOP at 0 across the iter-70 reg-form smoke (test 2 SW=0x0000 vs
+    // expected 0x3800).  Iter 70 routes top_din/top_we through.
     .top                 (),
-    .top_din             (3'b0),
-    .top_we              (1'b0),
+    .top_din             (fpu_top_din),
+    .top_we              (fpu_top_we),
 
     .sf_set              (1'b0),
 
@@ -722,8 +786,10 @@ wire [2:0]  fpu_rf_wr_idx;
 wire [79:0] fpu_rf_wr_data;
 wire [1:0]  fpu_rf_wr_tag;
 wire        fpu_rf_wr_en;
-wire [2:0]  fpu_top_din;
-wire        fpu_top_we;
+// iter 70: fpu_top_din / fpu_top_we hoisted to the top-of-file forward-
+// decl block (see ~line 341) so the fpu_csr instance further up can
+// consume them — Verilog's strict-decl-order would otherwise reject the
+// reference.
 wire        fpu_trigger_mf_fault;
 wire [2:0]  fpu_rf_rd_idx;
 wire [79:0] fpu_rf_rd_data;
@@ -764,6 +830,11 @@ execute_fpu u_execute_fpu (
     .exe_reset            (exe_reset),
     .exe_ready            (exe_ready),
 
+    // PR-2b/iter-87: FNINIT pulse drives execute_fpu's state-clear arm
+    // (symmetric with fpu_csr/.init at line 685 + fpu_regfile/.init at
+    // line 758).  See execute_fpu.v port comment + iter-86 trace.
+    .init                 (fpu_fninit_pulse),
+
     // Command stream
     .exe_cmd              (exe_cmd),
     .exe_cmdex            (exe_cmdex),
@@ -781,6 +852,7 @@ execute_fpu u_execute_fpu (
     .exe_is_mem_form      (1'b0),
     .exe_pop_after        (1'b0),
     .exe_mem_data         (exe_fpu_mem_data),
+    .exe_mem_data_hi      (exe_fpu_mem_data_hi),   // PR-2b.5g iter 124: FLD m80fp high 16 bits
     .exe_mem_fmt          (2'b00),
     .exe_mem_data_valid   (1'b0),
 
@@ -814,6 +886,9 @@ execute_fpu u_execute_fpu (
     .eflags_we            (fpu_eflags_we),
 
     .exe_trigger_mf_fault (fpu_trigger_mf_fault),
+
+    .store_data           (fpu_store_data),     // PR-2b.5a iter 113
+    .store_ready          (fpu_store_ready),    // PR-2b.5a iter 113
 
     // Regfile read port
     .rf_rd_idx            (fpu_rf_rd_idx),

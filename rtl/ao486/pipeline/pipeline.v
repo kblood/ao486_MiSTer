@@ -680,6 +680,9 @@ wire [3:0]  rd_debug_read;
 wire [31:0] src_wire;
 wire [31:0] dst_wire;
 wire [31:0] rd_address_effective;
+// PR-2b.5g (iter 124): FLD m80fp high 16 bits ({sign,exp}) from read.v's
+// 2-beat FSM, forwarded to execute.v (low 64 bits ride the read_data lane).
+wire [15:0] rd_fpu_mem_data_hi;
 
 read read_inst(
     .clk                (clk),
@@ -858,7 +861,8 @@ read read_inst(
     .rd_debug_read                 (rd_debug_read),                 //output [3:0]
     .src_wire                      (src_wire),                      //output [31:0]
     .dst_wire                      (dst_wire),                      //output [31:0]
-    .rd_address_effective          (rd_address_effective)           //output [31:0]
+    .rd_address_effective          (rd_address_effective),          //output [31:0]
+    .rd_fpu_mem_data_hi            (rd_fpu_mem_data_hi)             //output [15:0]  PR-2b.5g iter 124
 );
 
 //------------------------------------------------------------------------------
@@ -895,6 +899,13 @@ wire [31:0] exe_result;
 wire [31:0] exe_result2;
 wire [31:0] exe_result_push;
 wire [4:0]  exe_result_signals;
+
+// PR-2b.4l (iter 103): FCOMI/FUCOMI eflags writeback lane (execute → write).
+wire [2:0]  exe_fpu_eflags_value;
+wire        exe_fpu_eflags_we;
+// PR-2b.5a (iter 113): FSTP m80fp raw-store lane (execute → write).
+wire [79:0] exe_fpu_store_data;
+wire        exe_fpu_store_ready;
 wire [3:0]  exe_arith_index;
 wire        exe_arith_sub_carry;
 wire        exe_arith_add_carry;
@@ -1113,6 +1124,7 @@ execute execute_inst(
     // memory operand for m32/m64.  execute.v latches a snapshot on `e_load`
     // and forwards it to execute_fpu.v's `exe_mem_data` port (was tied 64'd0).
     .rd_read_data                  (read_data),                     //input [63:0]
+    .rd_fpu_mem_data_hi            (rd_fpu_mem_data_hi),            //input [15:0]  PR-2b.5g iter 124
 
     //exe pipeline
     .wr_busy                       (wr_busy),                       //input
@@ -1141,6 +1153,10 @@ execute execute_inst(
     .exe_result2                   (exe_result2),                   //output [31:0]
     .exe_result_push               (exe_result_push),               //output [31:0]
     .exe_result_signals            (exe_result_signals),            //output [4:0]
+    .exe_fpu_eflags_value          (exe_fpu_eflags_value),          //output [2:0]
+    .exe_fpu_eflags_we             (exe_fpu_eflags_we),             //output
+    .exe_fpu_store_data            (exe_fpu_store_data),            //output [79:0]  PR-2b.5a iter 113
+    .exe_fpu_store_ready           (exe_fpu_store_ready),           //output         PR-2b.5a iter 113
     .exe_arith_index               (exe_arith_index),               //output [3:0]
     .exe_arith_sub_carry           (exe_arith_sub_carry),           //output
     .exe_arith_add_carry           (exe_arith_add_carry),           //output
@@ -1403,6 +1419,10 @@ write write_inst(
     .exe_result2                   (exe_result2),                   //input [31:0]
     .exe_result_push               (exe_result_push),               //input [31:0]
     .exe_result_signals            (exe_result_signals),            //input [4:0]
+    .exe_fpu_eflags_value          (exe_fpu_eflags_value),          //input [2:0]
+    .exe_fpu_eflags_we             (exe_fpu_eflags_we),             //input
+    .exe_fpu_store_data            (exe_fpu_store_data),            //input [79:0]  PR-2b.5a iter 113
+    .exe_fpu_store_ready           (exe_fpu_store_ready),           //input         PR-2b.5a iter 113
     .exe_arith_index               (exe_arith_index),               //input [3:0]
     .exe_arith_sub_carry           (exe_arith_sub_carry),           //input
     .exe_arith_add_carry           (exe_arith_add_carry),           //input

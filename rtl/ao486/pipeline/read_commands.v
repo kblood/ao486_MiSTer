@@ -173,6 +173,16 @@ module read_commands(
     
     output              read_length_word,
     output              read_length_dword,
+    // PR-2b.4k iter 79: 8-byte (qword) user-mode read length for FPU mem-form
+    // m64 ops (FLD m64fp + future FADD/FSUB/FMUL/FDIV m64fp pipeline-runtime).
+    // The pre-iter-79 read.v read_length cascade defaulted to 4'd4 (32-bit)
+    // for any read_virtual that wasn't read_length_word; only the system-side
+    // paths (read_system_qword / read_system_descriptor) could fetch 8 bytes.
+    // Iter-78's pr2b4k_fld_smoke.lua TEST 5 (FLD m64 +1.0) returned SW=0x7800
+    // (Zero class) instead of 0x3C00 (Normal) because the m64 lane fetched
+    // only the low 32 bits of float64 +1.0 = 0x00000000.  This output drives
+    // a new arm in read.v's read_length cascade (added iter 79).
+    output              read_length_qword,
     
     input               read_for_rd_ready,
     input               write_virtual_check_ready,

@@ -359,6 +359,40 @@ wire cond_202 = dec_ready_modregrm_one   && decoder[7:0] == 8'hD8 && decoder[15:
 wire cond_203 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDC && decoder[15:14] != 2'b11 && decoder[13:11] == 3'd2; // FCOM  m64fp
 wire cond_204 = dec_ready_modregrm_one   && decoder[7:0] == 8'hD8 && decoder[15:14] != 2'b11 && decoder[13:11] == 3'd3; // FCOMP m32fp
 wire cond_205 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDC && decoder[15:14] != 2'b11 && decoder[13:11] == 3'd3; // FCOMP m64fp
+
+// PR-2b.4k (iter 75) — FLD m32fp (D9 /0 mod!=11) and FLD m64fp (DD /0 mod!=11).
+// Mem-form load to FPU stack; extends the D9 family beyond FNSTCW M16
+// (cond_147 = D9 /7 mem) and the D8/DC mem-form arith (cond_190..205).
+// Destination is implicit ST(new TOP) after TOP-- (push semantics).
+wire cond_206 = dec_ready_modregrm_one   && decoder[7:0] == 8'hD9 && decoder[15:14] != 2'b11 && decoder[13:11] == 3'd0; // FLD m32fp
+wire cond_207 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDD && decoder[15:14] != 2'b11 && decoder[13:11] == 3'd0; // FLD m64fp
+// PR-2b.4n (iter 112): FPU constant loads (D9 E8..EE), full-byte opcodes
+// like FCHS (cond_164).  Each pushes a hardcoded 80-bit constant.
+wire cond_208 = dec_ready_modregrm_one   && decoder[7:0] == 8'hD9 && decoder[15:8] == 8'hE8; // FLD1
+wire cond_209 = dec_ready_modregrm_one   && decoder[7:0] == 8'hD9 && decoder[15:8] == 8'hE9; // FLDL2T
+wire cond_210 = dec_ready_modregrm_one   && decoder[7:0] == 8'hD9 && decoder[15:8] == 8'hEA; // FLDL2E
+wire cond_211 = dec_ready_modregrm_one   && decoder[7:0] == 8'hD9 && decoder[15:8] == 8'hEB; // FLDPI
+wire cond_212 = dec_ready_modregrm_one   && decoder[7:0] == 8'hD9 && decoder[15:8] == 8'hEC; // FLDLG2
+wire cond_213 = dec_ready_modregrm_one   && decoder[7:0] == 8'hD9 && decoder[15:8] == 8'hED; // FLDLN2
+wire cond_214 = dec_ready_modregrm_one   && decoder[7:0] == 8'hD9 && decoder[15:8] == 8'hEE; // FLDZ
+// PR-2b.5a (iter 113): FSTP m80fp = DB /7 mem-form (mod != 11).  Same byte
+// layout as FNSTCW cond_147 (opcode in decoder[7:0], modrm in decoder[15:8],
+// reg field in decoder[13:11]).  Dispatched above cond_67 like the other
+// mem-form FPU ops so it wins before the legacy CMD_fpu stub.
+wire cond_215 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDB && decoder[13:11] == 3'b111 && decoder[15:14] != 2'b11; // FSTP m80fp
+wire cond_216 = dec_ready_modregrm_one   && decoder[7:0] == 8'hD9 && decoder[13:11] == 3'b011 && decoder[15:14] != 2'b11; // FSTP m32fp (D9 /3)
+wire cond_217 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDD && decoder[13:11] == 3'b011 && decoder[15:14] != 2'b11; // FSTP m64fp (DD /3)
+// PR-2b.5e (iter 118): FST m32fp (D9 /2) / FST m64fp (DD /2) — NO-POP store
+// variants.  Identical byte layout to FSTP except reg-field == 3'b010 (/2).
+// Same CMD_fpu_store_mem dispatch + narrowing converters + write FSM as FSTP;
+// the no-pop semantic is carried in execute_fpu (is_fst_m32/m64 NOT added to
+// pop_after_now), so ST(0) is retained after the store.
+wire cond_218 = dec_ready_modregrm_one   && decoder[7:0] == 8'hD9 && decoder[13:11] == 3'b010 && decoder[15:14] != 2'b11; // FST m32fp (D9 /2)
+wire cond_219 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDD && decoder[13:11] == 3'b010 && decoder[15:14] != 2'b11; // FST m64fp (DD /2)
+// PR-2b.5g (iter 124): FLD m80fp = DB /5 mem-form (mod != 11).  DB /5 reg-form
+// is FUCOMI (cond_187, gated mod==11), so the mem-form is free.  Routes to
+// CMD_fpu_load_mem / CMDEX_FLD_M80 — the raw 80-bit load twin of FSTP m80.
+wire cond_220 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDB && decoder[13:11] == 3'b101 && decoder[15:14] != 2'b11; // FLD m80fp (DB /5)
 //======================================================== saves
 //======================================================== always
 //======================================================== sets
@@ -482,6 +516,27 @@ assign dec_cmd =
     (cond_203 && ~cond_4)? ( `CMD_fpu_arith_mem) :
     (cond_204 && ~cond_4)? ( `CMD_fpu_arith_mem) :
     (cond_205 && ~cond_4)? ( `CMD_fpu_arith_mem) :
+    // PR-2b.4k (iter 75): FLD m32fp / m64fp dispatch into the new
+    // CMD_fpu_load_mem namespace.  Sits BELOW cond_192..205 (mem-form
+    // arith/cmp) and ABOVE cond_67 (reg-form catch-all) — mem-form
+    // FLD must win before cond_67 sweeps it into the legacy stub.
+    (cond_206 && ~cond_4)? ( `CMD_fpu_load_mem) :
+    (cond_207 && ~cond_4)? ( `CMD_fpu_load_mem) :
+    (cond_220 && ~cond_4)? ( `CMD_fpu_load_mem) :  // PR-2b.5g iter 124: FLD m80fp
+    // PR-2b.4n (iter 112): FPU constant loads dispatch above the cond_67
+    // reg-form catch-all so they win before the legacy CMD_fpu stub.
+    (cond_208 && ~cond_4)? ( `CMD_fpu_const) :
+    (cond_209 && ~cond_4)? ( `CMD_fpu_const) :
+    (cond_210 && ~cond_4)? ( `CMD_fpu_const) :
+    (cond_211 && ~cond_4)? ( `CMD_fpu_const) :
+    (cond_212 && ~cond_4)? ( `CMD_fpu_const) :
+    (cond_213 && ~cond_4)? ( `CMD_fpu_const) :
+    (cond_214 && ~cond_4)? ( `CMD_fpu_const) :
+    (cond_215 && ~cond_4)? ( `CMD_fpu_store_mem) :  // PR-2b.5a iter 113: FSTP m80fp
+    (cond_216 && ~cond_4)? ( `CMD_fpu_store_mem) :  // PR-2b.5c iter 116: FSTP m32fp
+    (cond_217 && ~cond_4)? ( `CMD_fpu_store_mem) :  // PR-2b.5d iter 117: FSTP m64fp
+    (cond_218 && ~cond_4)? ( `CMD_fpu_store_mem) :  // PR-2b.5e iter 118: FST m32fp
+    (cond_219 && ~cond_4)? ( `CMD_fpu_store_mem) :  // PR-2b.5e iter 118: FST m64fp
     // PR-2b.4i (iter 60): cond_67 reg-form catch-all relocated here, BELOW
     // cond_144..205, so reg-form D8..DF + modregrm_one falls back to the
     // legacy CMD_fpu / CMDEX_ESC_STEP_0 stub ONLY when no more-specific
@@ -911,6 +966,25 @@ assign consume_modregrm_one =
     (cond_203 && ~cond_4)? (`TRUE) :
     (cond_204 && ~cond_4)? (`TRUE) :
     (cond_205 && ~cond_4)? (`TRUE) :
+    // PR-2b.4k (iter 75): FLD m32fp / m64fp also consume the modregrm
+    // byte (memory addressing form).
+    (cond_206 && ~cond_4)? (`TRUE) :
+    (cond_207 && ~cond_4)? (`TRUE) :
+    (cond_220 && ~cond_4)? (`TRUE) :  // PR-2b.5g iter 124: FLD m80fp consumes the modregrm
+    // PR-2b.4n (iter 112): FPU constant loads consume their second byte
+    // (E8..EE) like FCHS (D9 E0); assert consume_modregrm_one.
+    (cond_208 && ~cond_4)? (`TRUE) :
+    (cond_209 && ~cond_4)? (`TRUE) :
+    (cond_210 && ~cond_4)? (`TRUE) :
+    (cond_211 && ~cond_4)? (`TRUE) :
+    (cond_212 && ~cond_4)? (`TRUE) :
+    (cond_213 && ~cond_4)? (`TRUE) :
+    (cond_214 && ~cond_4)? (`TRUE) :
+    (cond_215 && ~cond_4)? (`TRUE) :  // PR-2b.5a iter 113: FSTP m80fp consumes the modrm
+    (cond_216 && ~cond_4)? (`TRUE) :  // PR-2b.5c iter 116: FSTP m32fp consumes the modrm
+    (cond_217 && ~cond_4)? (`TRUE) :  // PR-2b.5d iter 117: FSTP m64fp consumes the modrm
+    (cond_218 && ~cond_4)? (`TRUE) :  // PR-2b.5e iter 118: FST m32fp consumes the modrm
+    (cond_219 && ~cond_4)? (`TRUE) :  // PR-2b.5e iter 118: FST m64fp consumes the modrm
     // PR-2b.4i (iter 60): cond_67 reg-form catch-all relocated here so
     // un-implemented reg-form D8..DF + modregrm_one still asserts
     // consume_modregrm_one (advancing the decoder past the instruction)
@@ -1103,6 +1177,24 @@ assign dec_cmdex =
     (cond_203 && ~cond_4)? ( `CMDEX_FCOM_M64) :
     (cond_204 && ~cond_4)? ( `CMDEX_FCOMP_M32) :
     (cond_205 && ~cond_4)? ( `CMDEX_FCOMP_M64) :
+    // PR-2b.4k (iter 75): FLD m32fp / m64fp CMDEX selection.
+    (cond_206 && ~cond_4)? ( `CMDEX_FLD_M32) :
+    (cond_207 && ~cond_4)? ( `CMDEX_FLD_M64) :
+    (cond_220 && ~cond_4)? ( `CMDEX_FLD_M80) :  // PR-2b.5g iter 124: FLD m80fp
+    // PR-2b.4n (iter 112): FPU constant-load CMDEX selection (drives the
+    // execute_fpu constant-ROM mux).
+    (cond_208 && ~cond_4)? ( `CMDEX_FLD1) :
+    (cond_209 && ~cond_4)? ( `CMDEX_FLDL2T) :
+    (cond_210 && ~cond_4)? ( `CMDEX_FLDL2E) :
+    (cond_211 && ~cond_4)? ( `CMDEX_FLDPI) :
+    (cond_212 && ~cond_4)? ( `CMDEX_FLDLG2) :
+    (cond_213 && ~cond_4)? ( `CMDEX_FLDLN2) :
+    (cond_214 && ~cond_4)? ( `CMDEX_FLDZ) :
+    (cond_215 && ~cond_4)? ( `CMDEX_FSTP_M80) :  // PR-2b.5a iter 113: FSTP m80fp
+    (cond_216 && ~cond_4)? ( `CMDEX_FSTP_M32) :  // PR-2b.5c iter 116: FSTP m32fp
+    (cond_217 && ~cond_4)? ( `CMDEX_FSTP_M64) :  // PR-2b.5d iter 117: FSTP m64fp
+    (cond_218 && ~cond_4)? ( `CMDEX_FST_M32) :   // PR-2b.5e iter 118: FST m32fp
+    (cond_219 && ~cond_4)? ( `CMDEX_FST_M64) :   // PR-2b.5e iter 118: FST m64fp
     // PR-2b.4i (iter 60): cond_67's CMDEX_ESC_STEP_0 fallback for any
     // reg-form D8..DF not caught by cond_144..205.
     (cond_67 && ~cond_4)? ( `CMDEX_ESC_STEP_0) :

@@ -212,7 +212,12 @@ module read(
     output      [3:0]   rd_debug_read,
     output      [31:0]  src_wire,
     output      [31:0]  dst_wire,
-    output      [31:0]  rd_address_effective
+    output      [31:0]  rd_address_effective,
+
+    // PR-2b.5g (iter 124): FLD m80fp high 16 bits ({sign,exp}) captured by the
+    // read.v 2-beat FSM at beat 0 (word @ addr+8).  The low 64 bits ride the
+    // existing read_data/rd_read_data lane at e_load (beat 1 = qword @ addr+0).
+    output      [15:0]  rd_fpu_mem_data_hi
 );
 
 //------------------------------------------------------------------------------
@@ -351,6 +356,9 @@ wire read_rmw_system_dword;
 
 wire read_length_word;
 wire read_length_dword;
+// PR-2b.4k iter 79: 8-byte user-mode fetch lane for FPU mem-form m64 ops.
+// See autogen/read_commands.v and pipeline/read_commands.v comment blocks.
+wire read_length_qword;
 
 wire rd_src_is_memory;
 wire rd_src_is_io;
@@ -543,12 +551,60 @@ assign read_rmw  = read_rmw_virtual || read_rmw_system_dword;
 assign read_lock = rd_prefix_group_1_lock;
 
 
+// PR-2b.5g (iter 124): FLD m80fp 2-beat read FSM.  A floatx80 is 10 bytes but
+// the read DATA bus is 64-bit end-to-end, so we issue 2 beats and reassemble:
+//   step 0: word  (2 B) @ addr+8 -> {sign,exp} high16, latched in fld_m80_hi
+//            and exported via rd_fpu_mem_data_hi.
+//   step 1: qword (8 B) @ addr+0 -> mantissa[63:0] low64.  This is the LAST
+//            beat, so its data rides the existing read_data -> rd_read_data ->
+//            exe_fpu_mem_data lane (latched on e_load=rd_ready) — no new 64-bit
+//            wire needed.  execute_fpu reassembles {hi16, lo64} into ST(0).
+// Mirrors write.v's FSTP m80 step FSM.  The autogen cond_281 rd_waiting arm
+// (cond_3 && ~cond_9 && cond_5) holds the op until read_for_rd_ready, which we
+// override below to fire only after step 1.  read_address/read_length/read_do/
+// read_for_rd_ready are all conditioned on is_fld_m80_op so the normal single-
+// beat read path is byte-for-byte unchanged for every other op.
+wire is_fld_m80_op = (rd_cmd == `CMD_fpu_load_mem) && (rd_cmdex == `CMDEX_FLD_M80);
+wire fld_m80_beat_done = read_done && ~(read_page_fault) && ~(read_ac_fault);
+reg        fld_m80_step;      // 0 = word@+8 (hi16) ; 1 = qword@+0 (lo64)
+reg [15:0] fld_m80_hi;        // {sign,exp} captured at step 0
+reg        fld_m80_complete;  // both beats done — drops read_do
+
+always @(posedge clk) begin
+    if(rst_n == 1'b0) begin
+        fld_m80_step     <= 1'b0;
+        fld_m80_hi       <= 16'd0;
+        fld_m80_complete <= 1'b0;
+    end
+    // Fresh per-op state: rd_ready ends the op (also clears the fetch-buffer
+    // leak hazard — see [[pipeline-fetch-buffer-leak-memory-read-avalon]]);
+    // rd_reset flushes.
+    else if(rd_ready || rd_reset) begin
+        fld_m80_step     <= 1'b0;
+        fld_m80_hi       <= 16'd0;
+        fld_m80_complete <= 1'b0;
+    end
+    else if(is_fld_m80_op && fld_m80_beat_done) begin
+        if(fld_m80_step == 1'b0) begin
+            fld_m80_hi   <= read_data[15:0];   // beat 0: {sign,exp}
+            fld_m80_step <= 1'b1;
+        end
+        else begin
+            fld_m80_complete <= 1'b1;          // beat 1 done — qword rides read_data
+        end
+    end
+end
+
+assign rd_fpu_mem_data_hi = fld_m80_hi;
+
 assign read_address =
+    (is_fld_m80_op)?                        (rd_seg_linear + (fld_m80_step == 1'b0 ? 32'd8 : 32'd0)) :  // beat0 @+8, beat1 @+0
     (read_rmw_virtual || read_virtual)?     rd_seg_linear :
     (read_system_descriptor)?               rd_descriptor_offset :
                                             rd_system_linear; //used by read_rmw_system_dword, read_system_dword,read_system_word,read_system_qword
 
 assign read_length =
+    (is_fld_m80_op)?            (fld_m80_step == 1'b0 ? 4'd2 : 4'd8) :  // beat0 word, beat1 qword
     read_system_word?           4'd2 :
     read_system_dword?          4'd4 :
     read_system_qword?          4'd8 :
@@ -557,6 +613,11 @@ assign read_length =
     rd_is_8bit?                 4'd1 :
     read_length_word?           4'd2 :
     read_length_dword?          4'd4 :
+    // PR-2b.4k iter 79: 8-byte qword fetch for FPU mem-form m64 ops.
+    // Placed AFTER read_length_dword (so dword-explicit arms still win
+    // priority) and BEFORE the rd_operand_16bit/4'd4 fallback (so the
+    // default doesn't shadow the qword request).
+    read_length_qword?          4'd8 :
     rd_operand_16bit?           4'd2 :
                                 4'd4;
 
@@ -566,13 +627,22 @@ always @(posedge clk) begin
     else if(read_done && ~(read_page_fault) && ~(read_ac_fault))    rd_one_mem_read <= `TRUE;
 end
 
-assign read_do = 
+// PR-2b.5g (iter 124): FLD m80fp keeps read_do asserted across BOTH beats
+// (gated by ~fld_m80_complete instead of ~rd_one_mem_read, which latches after
+// beat 0 and would otherwise stop the second beat).  All other ops keep the
+// original single-beat ~rd_one_mem_read gate untouched.
+assign read_do =
     ~(rd_reset) &&
-    ((rd_address_effective_ready && (read_rmw_virtual || read_virtual)) || memory_read_system) &&
-    ~(rd_one_mem_read) && ~(read_page_fault) && ~(read_ac_fault) &&
-    ~(rd_seg_gp_fault_init) && ~(rd_seg_gp_fault) && ~(rd_descriptor_gp_fault) && ~(rd_seg_ss_fault_init) && ~(rd_seg_ss_fault) && ~(rd_io_allow_fault) && ~(rd_ss_esp_from_tss_fault);
-        
-assign read_for_rd_ready = rd_one_mem_read || (read_done && ~(read_page_fault) && ~(read_ac_fault));
+    ~(read_page_fault) && ~(read_ac_fault) &&
+    ~(rd_seg_gp_fault_init) && ~(rd_seg_gp_fault) && ~(rd_descriptor_gp_fault) && ~(rd_seg_ss_fault_init) && ~(rd_seg_ss_fault) && ~(rd_io_allow_fault) && ~(rd_ss_esp_from_tss_fault) &&
+    ( (is_fld_m80_op)?
+        (rd_address_effective_ready && read_virtual && ~(fld_m80_complete)) :
+        ( ((rd_address_effective_ready && (read_rmw_virtual || read_virtual)) || memory_read_system) && ~(rd_one_mem_read) ) );
+
+// PR-2b.5g (iter 124): FLD m80fp signals ready only when beat 1 (the qword)
+// completes, so the autogen cond_281 hold spans both beats.
+assign read_for_rd_ready = (is_fld_m80_op)? (fld_m80_beat_done && fld_m80_step == 1'b1)
+                                          : (rd_one_mem_read || (read_done && ~(read_page_fault) && ~(read_ac_fault)));
 
 assign read_4 = read_data[31:0];
 assign read_8 = read_data;
@@ -916,6 +986,7 @@ read_commands read_commands_inst(
     
     .read_length_word                   (read_length_word),                     //output
     .read_length_dword                  (read_length_dword),                    //output
+    .read_length_qword                  (read_length_qword),                    //output    PR-2b.4k iter 79
     
     .read_for_rd_ready                  (read_for_rd_ready),                    //input
     .write_virtual_check_ready          (write_virtual_check_ready),            //input
@@ -1042,7 +1113,5 @@ read_mutex read_mutex_inst(
 
     .rd_address_waiting             (rd_address_waiting)            //output
 );
-
-//------------------------------------------------------------------------------
 
 endmodule
