@@ -601,6 +601,14 @@
 // SNaN / Inf*2^-Inf / 0*2^+Inf.
 `define CMDEX_FSCALE          4'd5
 
+// PR-2b.5q (iter 131) — FXTRACT = D9 F4 : split ST(0) into its unbiased exponent
+// and its significand.  After the op ST(0)=significand (in [1,2), sign preserved)
+// and ST(1)=exponent (as a floatx80 integer); the significand is PUSHed.  Same
+// CMD_fpu_unary family, single operand, but writes TWO regfile slots and bumps
+// TOP via a new S_XTRACT2 state in execute_fpu.v.  Reports ZE on a zero source
+// (exponent = -Inf), DE on a denormal source, IE on an SNaN source.
+`define CMDEX_FXTRACT         4'd6
+
 // PR-2b.3o (iter 46) — x87 comparison ops on ST(0) vs ST(i): FCOM / FCOMP /
 // FUCOM / FUCOMP.  Read BOTH ST(0) and ST(i) via the existing fetch path;
 // classify result (much like FXAM but on the comparison outcome); pulse

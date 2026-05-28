@@ -408,6 +408,10 @@ wire cond_222 = dec_ready_modregrm_one   && decoder[7:0] == 8'hD9 && decoder[13:
 // dispatch family as FRNDINT (cond_221, D9 FC): CMD_fpu_unary / CMDEX_FSCALE,
 // consumes the ModRM byte; reads ST(0) and ST(1) inside execute_fpu.
 wire cond_223 = dec_ready_modregrm_one   && decoder[7:0] == 8'hD9 && decoder[15:8] == 8'hFD; // FSCALE (D9 FD)
+// PR-2b.5q (iter 131): FXTRACT = D9 F4 (reg-form, full ModRM byte).  Same
+// dispatch family as FRNDINT/FSCALE (CMD_fpu_unary / CMDEX_FXTRACT), consumes
+// the ModRM byte; reads ST(0), writes ST(0)+ST(1) and pushes inside execute_fpu.
+wire cond_224 = dec_ready_modregrm_one   && decoder[7:0] == 8'hD9 && decoder[15:8] == 8'hF4; // FXTRACT (D9 F4)
 //======================================================== saves
 //======================================================== always
 //======================================================== sets
@@ -493,6 +497,7 @@ assign dec_cmd =
     (cond_164 && ~cond_4)? ( `CMD_fpu_unary) :
     (cond_221 && ~cond_4)? ( `CMD_fpu_unary) :
     (cond_223 && ~cond_4)? ( `CMD_fpu_unary) :  // PR-2b.5p iter 130: FSCALE (D9 FD)
+    (cond_224 && ~cond_4)? ( `CMD_fpu_unary) :  // PR-2b.5q iter 131: FXTRACT (D9 F4)
     (cond_165 && ~cond_4)? ( `CMD_fpu_unary) :
     (cond_166 && ~cond_4)? ( `CMD_fpu_unary) :
     (cond_167 && ~cond_4)? ( `CMD_fpu_cmp) :
@@ -946,6 +951,7 @@ assign consume_modregrm_one =
     (cond_164 && ~cond_4)? (`TRUE) :
     (cond_221 && ~cond_4)? (`TRUE) :
     (cond_223 && ~cond_4)? (`TRUE) :  // PR-2b.5p iter 130: FSCALE consume_modregrm_one
+    (cond_224 && ~cond_4)? (`TRUE) :  // PR-2b.5q iter 131: FXTRACT consume_modregrm_one
     (cond_165 && ~cond_4)? (`TRUE) :
     (cond_166 && ~cond_4)? (`TRUE) :
     (cond_167 && ~cond_4)? (`TRUE) :
@@ -1160,6 +1166,7 @@ assign dec_cmdex =
     (cond_164 && ~cond_4)? ( `CMDEX_FCHS) :
     (cond_221 && ~cond_4)? ( `CMDEX_FRNDINT) :
     (cond_223 && ~cond_4)? ( `CMDEX_FSCALE) :  // PR-2b.5p iter 130: FSCALE (D9 FD)
+    (cond_224 && ~cond_4)? ( `CMDEX_FXTRACT) :  // PR-2b.5q iter 131: FXTRACT (D9 F4)
     (cond_165 && ~cond_4)? ( `CMDEX_FABS) :
     (cond_166 && ~cond_4)? ( `CMDEX_FXAM) :
     (cond_167 && ~cond_4)? ( `CMDEX_FCOM) :

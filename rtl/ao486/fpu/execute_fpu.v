@@ -419,6 +419,14 @@ module execute_fpu (
     // existing S_FETCH_B path latches ST(1) into b_lat.
     wire is_fscale         = (exe_cmd  == `CMD_fpu_unary) &&
                              (exe_cmdex == `CMDEX_FSCALE);
+    // PR-2b.5q (iter 131): FXTRACT — split ST(0) into exponent (-> ST(0)) and
+    // significand (PUSHed, becomes new ST(0); old result shifts to ST(1)).  Same
+    // CMD_fpu_unary family, kept OUT of is_unary_now/is_control_op_now: it writes
+    // TWO regfile slots and pushes the stack via a new S_XTRACT2 state, and can
+    // raise ZE (zero source) / DE (denormal) / IE (SNaN).  Single operand (ST(0)),
+    // so no src_lat override needed — unlike FSCALE.
+    wire is_fxtract        = (exe_cmd  == `CMD_fpu_unary) &&
+                             (exe_cmdex == `CMDEX_FXTRACT);
 
     // PR-2b.3o (iter 46): comparison ops on ST(0) vs ST(i).  Dispatched via
     // the new `CMD_fpu_cmp` (7'd120).  Both operands are read via the
@@ -667,6 +675,7 @@ module execute_fpu (
                             is_unary_now | is_cmp_now |
                             is_frndint |                              // PR-2b.5n iter 127
                             is_fscale |                               // PR-2b.5p iter 130
+                            is_fxtract |                              // PR-2b.5q iter 131
                             is_ffree | is_fnop | is_fdecstp | is_fincstp |
                             is_fcmov_now;
     // Control-op predicate: ops whose result is a regfile-data move,
@@ -769,11 +778,16 @@ module execute_fpu (
         S_FXCH2   = 4'd7,   // PR-2b.3k: second leg of FXCH swap — writes
                             // ST(i) := old ST(0) (data + tag).  fpu_done
                             // pulses here.  TOP unchanged.
-        S_POP2    = 4'd8;   // PR-2b.3q: second leg of double-pop (FCOMPP /
+        S_POP2    = 4'd8,   // PR-2b.3q: second leg of double-pop (FCOMPP /
                             // FUCOMPP).  Mirrors S_POP — clears the tag at
                             // ST(1) at op start (= (top_lat + 1) & 7) and
                             // bumps TOP to top_lat + 2.  fpu_done pulses
                             // here instead of S_POP for double-pop ops.
+        S_XTRACT2 = 4'd9;   // PR-2b.5q (iter 131): second leg of FXTRACT.
+                            // S_RETIRE writes the exponent to ST(0) (no TOP
+                            // change); S_XTRACT2 writes the significand to
+                            // abs_new_top and pulses top_we (top_din =
+                            // top_lat - 1) to PUSH.  fpu_done pulses here.
 
     reg [3:0]  state;
 
@@ -884,6 +898,13 @@ module execute_fpu (
     // net decl-order rule); driven by the instance further below.
     wire [79:0] scale_z;
     wire        scale_pe, scale_ue, scale_oe, scale_de, scale_ie;
+    // PR-2b.5q (iter 131): FXTRACT significand + exponent + flags from
+    // floatx80_extract.  Declared ahead of the flags_lat / rf_wr_data blocks
+    // (procedural-net decl-order rule); driven by the instance further below.
+    // extract_sig -> new ST(0) (S_XTRACT2 write); extract_exp -> ST(0) at
+    // S_RETIRE (becomes ST(1) after the push).
+    wire [79:0] extract_sig, extract_exp;
+    wire        extract_ze, extract_de, extract_ie;
     // PR-2b.3n: unary control-op latches.  Captured at S_IDLE→S_FETCH_A.
     // FCHS/FABS override rf_wr_data with a bit-79-toggled / bit-79-cleared
     // copy of a_lat; FXAM suppresses rf_wr_en and pulses cc_we instead.
@@ -894,6 +915,7 @@ module execute_fpu (
     reg        is_fxam_lat;
     reg        is_frndint_lat;   // PR-2b.5n (iter 127)
     reg        is_fscale_lat;    // PR-2b.5p (iter 130)
+    reg        is_fxtract_lat;   // PR-2b.5q (iter 131)
     // PR-2b.3o: cmp-family latches.  is_cmp_lat covers all four ops and
     // is used to (a) gate rf_wr_en off (no data writeback), (b) drive
     // cc_we in S_RETIRE, (c) override flags_lat with the cmp-only IE
@@ -1083,6 +1105,7 @@ module execute_fpu (
             is_fxam_lat     <= 1'b0;
             is_frndint_lat  <= 1'b0;    // PR-2b.5n iter 127
             is_fscale_lat   <= 1'b0;    // PR-2b.5p iter 130
+            is_fxtract_lat  <= 1'b0;    // PR-2b.5q iter 131
             is_cmp_lat      <= 1'b0;
             is_fucom_lat    <= 1'b0;
             is_cmpi_lat     <= 1'b0;
@@ -1135,6 +1158,7 @@ module execute_fpu (
                         is_fxam_lat    <= is_fxam;
                         is_frndint_lat <= is_frndint;   // PR-2b.5n iter 127
                         is_fscale_lat  <= is_fscale;    // PR-2b.5p iter 130
+                        is_fxtract_lat <= is_fxtract;   // PR-2b.5q iter 131
                         is_cmp_lat     <= is_cmp_now;
                         is_fucom_lat   <= is_cmp_unord_now;
                         is_cmpi_lat    <= is_cmpi_now;
@@ -1218,6 +1242,11 @@ module execute_fpu (
                                        // scale.  Must precede the 6'd0 control-op arm (is_fscale_lat
                                        // is NOT in that OR-list, so omitting this drops to flags_pre).
                                        is_fscale_lat ? {scale_pe, scale_ue, scale_oe, 1'b0, scale_de, scale_ie} :
+                                       // PR-2b.5q (iter 131): FXTRACT flags.  {PE,UE,OE,ZE,DE,IE} =
+                                       // {0,0,0,ze,de,ie}; PE/UE/OE never arise from a split.  ZE on a
+                                       // zero source (exponent = -Inf).  Must precede the 6'd0 arm
+                                       // (is_fxtract_lat is NOT in that OR-list).
+                                       is_fxtract_lat ? {3'b0, extract_ze, extract_de, extract_ie} :
                                        (is_fxch_lat | is_fld_lat | is_fst_lat |
                                         is_fstp_m80_lat |                       // PR-2b.5a iter 113: verbatim 80-bit store, no exceptions
                                         is_fld_m80_lat |                        // PR-2b.5g iter 124: verbatim 80-bit load, no exceptions (even on SNaN)
@@ -1256,6 +1285,12 @@ module execute_fpu (
                 S_RETIRE: begin
                     if (is_fxch_lat)
                         state <= S_FXCH2;
+                    // PR-2b.5q (iter 131): FXTRACT writes the exponent to ST(0)
+                    // this cycle, then S_XTRACT2 pushes the significand into the
+                    // new ST(0).  Gate on ~es_now so an unmasked ZE/DE/IE
+                    // suppresses BOTH writes (consistent with the pop gate).
+                    else if (is_fxtract_lat && ~es_now)
+                        state <= S_XTRACT2;
                     else if (pop_after_lat && ~es_now)
                         state <= S_POP;
                     else
@@ -1284,6 +1319,15 @@ module execute_fpu (
                 // top_din = top_lat + 2 driving the final TOP advance.
                 // fpu_done pulses here.
                 S_POP2: begin
+                    state <= S_IDLE;
+                end
+
+                // S_XTRACT2 (PR-2b.5q iter 131): second leg of FXTRACT.  The
+                // significand was written to abs_new_top and top_we pulsed
+                // (top_din = top_lat - 1) in the Outputs block this cycle,
+                // completing the PUSH.  fpu_done pulses here.  TOP is now
+                // top_lat - 1.
+                S_XTRACT2: begin
                     state <= S_IDLE;
                 end
 
@@ -1419,11 +1463,16 @@ module execute_fpu (
     // TOP++; the op isn't retired until the second tag-clear has also
     // landed).  The ~pop_twice_lat gate on the S_POP arm prevents
     // double-fire; the S_POP2 arm covers FCOMPP / FUCOMPP exclusively.
+    // PR-2b.5q (iter 131): FXTRACT retires at S_XTRACT2 (after the push), so its
+    // fpu_done is deferred off S_RETIRE the same way the pop ops' is.  If FXTRACT
+    // trapped (es_now), S_XTRACT2 is skipped and S_RETIRE is terminal again.
     assign fpu_done = (state == S_POP2) ||
                       ((state == S_POP) && ~pop_twice_lat) ||
                       (state == S_FXCH2) ||
+                      (state == S_XTRACT2) ||
                       ((state == S_RETIRE) && !is_fxch_lat
-                                           && !(pop_after_lat && ~es_now));
+                                           && !(pop_after_lat && ~es_now)
+                                           && !(is_fxtract_lat && ~es_now));
 
     // PR-2b.5c (iter 116): FSTP m32 narrowing converter.  Fed combinationally by
     // a_lat (ST(0), latched at S_FETCH_B); the RTNE-rounded float32 rides
@@ -1479,6 +1528,18 @@ module execute_fpu (
         .de (scale_de),
         .ie (scale_ie)
     );
+    // PR-2b.5q (iter 131): FXTRACT.  Single operand a = ST(0) (a_lat, stable
+    // from S_FETCH_B through S_XTRACT2 — no S_COMPUTE/b_lat timing mux needed,
+    // unlike FSCALE).  extract_exp -> ST(0) at S_RETIRE; extract_sig -> the
+    // pushed new ST(0) at S_XTRACT2.
+    floatx80_extract u_floatx80_extract (
+        .a     (a_lat),
+        .sig_z (extract_sig),
+        .exp_z (extract_exp),
+        .ze    (extract_ze),
+        .de    (extract_de),
+        .ie    (extract_ie)
+    );
 
     // PR-2b.5a (iter 113): FSTP m80 raw-store outputs.  store_data is the
     // verbatim ST(0) value (a_lat, latched at S_FETCH_B); store_ready holds
@@ -1530,6 +1591,7 @@ module execute_fpu (
     // masking is needed.
     assign top_din              = (state == S_POP)  ? (top_lat + 3'd1) :
                                   (state == S_POP2) ? (top_lat + 3'd2) :
+                                  (state == S_XTRACT2) ? abs_new_top   :  // PR-2b.5q iter 131: FXTRACT push (top_lat-1)
                                   (is_fld_lat |
                                    is_fld_mem_lat |
                                    is_fld_m80_lat |                       // PR-2b.5g iter 124
@@ -1539,6 +1601,7 @@ module execute_fpu (
                                                       top_lat;          // unused otherwise
     assign top_we               = (state == S_POP) ||
                                   (state == S_POP2) ||
+                                  (state == S_XTRACT2) ||                 // PR-2b.5q iter 131: FXTRACT push
                                   ((state == S_RETIRE) && (is_fld_lat |
                                                            is_fld_mem_lat |    // PR-2b.4k iter 77
                                                            is_fld_m80_lat |    // PR-2b.5g iter 124
@@ -1572,6 +1635,9 @@ module execute_fpu (
     assign rf_wr_idx  = (state == S_POP)    ? abs_st0     :
                         (state == S_POP2)   ? abs_st1     :
                         (state == S_FXCH2)  ? abs_stsrc   :
+                        (state == S_XTRACT2)? abs_new_top :   // PR-2b.5q iter 131: significand -> pushed ST(0)
+                                                              // (S_RETIRE writes the exponent to ST(0) via the
+                                                              // abs_st0 fall-through below)
                         is_fxch_lat         ? abs_st0     :
                         (is_fld_lat |
                          is_fld_mem_lat |
@@ -1586,7 +1652,10 @@ module execute_fpu (
     wire [79:0] fchs_result = { ~a_lat[79], a_lat[78:0] };
     wire [79:0] fabs_result = {  1'b0,      a_lat[78:0] };
 
-    assign rf_wr_data = (state == S_FXCH2) ? a_lat :
+    assign rf_wr_data = (state == S_XTRACT2) ? extract_sig :  // PR-2b.5q iter 131: significand -> pushed ST(0)
+                                                              // (guard first: is_fxtract_lat is still true here, but
+                                                              //  the exponent arm below must only fire at S_RETIRE)
+                        (state == S_FXCH2) ? a_lat :
                         is_fxch_lat        ? b_lat :
                         is_fld_lat         ? b_lat :          // old ST(i) data (reg-form)
                         is_fld_mem_lat     ? b_lat :          // PR-2b.4k iter 77: converted mem_z (S_COMPUTE sets b_lat=mem_z under is_mem_form_lat)
@@ -1597,6 +1666,7 @@ module execute_fpu (
                         is_fabs_lat        ? fabs_result :    // FABS: clear bit79 of ST(0)
                         is_frndint_lat     ? rndint_z :       // PR-2b.5n iter 127: rounded ST(0)
                         is_fscale_lat      ? scale_z :        // PR-2b.5p iter 130: scaled ST(0)
+                        is_fxtract_lat     ? extract_exp :    // PR-2b.5q iter 131: exponent -> ST(0) at S_RETIRE
                         is_ffree_lat       ? b_lat :          // PR-2b.3r FFREE: preserve ST(i) data
                         is_fcmov_lat       ? b_lat :          // PR-2b.3t FCMOV taken: ST(0) <- ST(i)
                                              z_lat;
@@ -1635,8 +1705,19 @@ module execute_fpu (
     wire [1:0] fscale_tag = (scale_z[78:0] == 79'd0)       ? 2'b01 :  // Zero
                             (scale_z[78:64] == 15'h7FFF)   ? 2'b10 :  // NaN/Inf
                                                              2'b00;   // Valid
+    // PR-2b.5q (iter 131): FXTRACT result tags.  significand is in [1,2) (Valid),
+    // +/-0 (Zero, for a zero source), or NaN/Inf (Special).  exponent is an integer
+    // float (Valid), +0.0 (Zero, for a power-of-two source where e==0), or +/-Inf
+    // (Special, for zero/Inf source).
+    wire [1:0] extract_sig_tag = (extract_sig[78:0] == 79'd0)     ? 2'b01 :  // Zero
+                                 (extract_sig[78:64] == 15'h7FFF) ? 2'b10 :  // NaN/Inf
+                                                                    2'b00;   // Valid
+    wire [1:0] extract_exp_tag = (extract_exp[78:0] == 79'd0)     ? 2'b01 :  // Zero
+                                 (extract_exp[78:64] == 15'h7FFF) ? 2'b10 :  // -Inf/+Inf
+                                                                    2'b00;   // Valid
     assign rf_wr_tag  = (state == S_POP)    ? 2'b11         :  // Empty
                         (state == S_POP2)   ? 2'b11         :  // PR-2b.3q: Empty (second pop)
+                        (state == S_XTRACT2)? extract_sig_tag :  // PR-2b.5q iter 131: significand tag (guard first)
                         (state == S_FXCH2)  ? st0_tag_lat   :  // FXCH tag swap
                         is_fxch_lat         ? stsrc_tag_lat :  // first FXCH write
                         is_fld_lat          ? stsrc_tag_lat :  // copy ST(i) tag (reg-form FLD)
@@ -1647,6 +1728,7 @@ module execute_fpu (
                         (is_fchs_lat | is_fabs_lat) ? st0_tag_lat :  // FCHS/FABS: preserve ST(0) tag
                         is_frndint_lat      ? frndint_tag   :  // PR-2b.5n iter 127: classify rounded result
                         is_fscale_lat       ? fscale_tag    :  // PR-2b.5p iter 130: classify scaled result
+                        is_fxtract_lat      ? extract_exp_tag :// PR-2b.5q iter 131: exponent tag at S_RETIRE
                         is_ffree_lat        ? 2'b11         :  // PR-2b.3r FFREE: Empty
                         is_fcmov_lat        ? stsrc_tag_lat :  // PR-2b.3t FCMOV taken: copy ST(i) tag
                                               2'b00;           // Valid (arith)
@@ -1675,7 +1757,8 @@ module execute_fpu (
                                             && (~is_fcmov_lat | fcmov_taken_lat)) ||
                         (state == S_POP) ||
                         (state == S_POP2) ||    // PR-2b.3q: second tag-Empty write
-                        (state == S_FXCH2);
+                        (state == S_FXCH2) ||
+                        (state == S_XTRACT2);   // PR-2b.5q iter 131: significand push write
 
     //--------------------------------------------------------------------
     // PR-2b.3n: FXAM classification on a_lat.  Intel SDM Vol 1 §8.3.5 /
