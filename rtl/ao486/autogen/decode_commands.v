@@ -404,6 +404,10 @@ wire cond_221 = dec_ready_modregrm_one   && decoder[7:0] == 8'hD9 && decoder[15:
 // 214, gated on full-byte decoder[15:8]==E8..EE), so the mem-form is free.
 // Routes to CMD_fpu / CMDEX_FLDCW_M16 — handled at execute.v, not execute_fpu.
 wire cond_222 = dec_ready_modregrm_one   && decoder[7:0] == 8'hD9 && decoder[13:11] == 3'b101 && decoder[15:14] != 2'b11; // FLDCW m16 (D9 /5)
+// PR-2b.5p (iter 130): FSCALE = D9 FD (reg-form, full ModRM byte).  Same
+// dispatch family as FRNDINT (cond_221, D9 FC): CMD_fpu_unary / CMDEX_FSCALE,
+// consumes the ModRM byte; reads ST(0) and ST(1) inside execute_fpu.
+wire cond_223 = dec_ready_modregrm_one   && decoder[7:0] == 8'hD9 && decoder[15:8] == 8'hFD; // FSCALE (D9 FD)
 //======================================================== saves
 //======================================================== always
 //======================================================== sets
@@ -488,6 +492,7 @@ assign dec_cmd =
     (cond_163 && ~cond_4)? ( `CMD_fpu_arith) :
     (cond_164 && ~cond_4)? ( `CMD_fpu_unary) :
     (cond_221 && ~cond_4)? ( `CMD_fpu_unary) :
+    (cond_223 && ~cond_4)? ( `CMD_fpu_unary) :  // PR-2b.5p iter 130: FSCALE (D9 FD)
     (cond_165 && ~cond_4)? ( `CMD_fpu_unary) :
     (cond_166 && ~cond_4)? ( `CMD_fpu_unary) :
     (cond_167 && ~cond_4)? ( `CMD_fpu_cmp) :
@@ -940,6 +945,7 @@ assign consume_modregrm_one =
     (cond_163 && ~cond_4)? (`TRUE) :
     (cond_164 && ~cond_4)? (`TRUE) :
     (cond_221 && ~cond_4)? (`TRUE) :
+    (cond_223 && ~cond_4)? (`TRUE) :  // PR-2b.5p iter 130: FSCALE consume_modregrm_one
     (cond_165 && ~cond_4)? (`TRUE) :
     (cond_166 && ~cond_4)? (`TRUE) :
     (cond_167 && ~cond_4)? (`TRUE) :
@@ -1153,6 +1159,7 @@ assign dec_cmdex =
     (cond_163 && ~cond_4)? ( `CMDEX_FSTP_STi) :
     (cond_164 && ~cond_4)? ( `CMDEX_FCHS) :
     (cond_221 && ~cond_4)? ( `CMDEX_FRNDINT) :
+    (cond_223 && ~cond_4)? ( `CMDEX_FSCALE) :  // PR-2b.5p iter 130: FSCALE (D9 FD)
     (cond_165 && ~cond_4)? ( `CMDEX_FABS) :
     (cond_166 && ~cond_4)? ( `CMDEX_FXAM) :
     (cond_167 && ~cond_4)? ( `CMDEX_FCOM) :

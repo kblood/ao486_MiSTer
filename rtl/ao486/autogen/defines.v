@@ -593,6 +593,14 @@
 // denormal operand / IE on SNaN.
 `define CMDEX_FRNDINT         4'd4
 
+// PR-2b.5p (iter 130) — FSCALE = D9 FD : ST(0) <- ST(0) * 2^trunc(ST(1)).  Same
+// dispatch family as FRNDINT (CMD_fpu_unary, register-only, writes ST(0), no
+// pop) but reads TWO operands — execute_fpu.v forces the ST(i) source index to
+// ST(1) and feeds ST(0)/ST(1) into the new floatx80_scale primitive.  Reports
+// OE/UE/PE on out-of-range results, DE on a denormal scale operand, IE on
+// SNaN / Inf*2^-Inf / 0*2^+Inf.
+`define CMDEX_FSCALE          4'd5
+
 // PR-2b.3o (iter 46) — x87 comparison ops on ST(0) vs ST(i): FCOM / FCOMP /
 // FUCOM / FUCOMP.  Read BOTH ST(0) and ST(i) via the existing fetch path;
 // classify result (much like FXAM but on the comparison outcome); pulse

@@ -411,6 +411,14 @@ module execute_fpu (
     // the floatx80_round_to_int primitive, not a 1-cycle bit move.
     wire is_frndint        = (exe_cmd  == `CMD_fpu_unary) &&
                              (exe_cmdex == `CMDEX_FRNDINT);
+    // PR-2b.5p (iter 130): FSCALE — ST(0) <- ST(0) * 2^trunc(ST(1)).  Same
+    // CMD_fpu_unary family as FRNDINT, kept OUT of is_unary_now/is_control_op_now
+    // because it produces real OE/UE/PE/DE/IE flags and a softfloat-style result
+    // via the floatx80_scale primitive.  Unlike the other unary ops it reads a
+    // SECOND operand (ST(1)): src_lat is forced to 1 at op-start (below) so the
+    // existing S_FETCH_B path latches ST(1) into b_lat.
+    wire is_fscale         = (exe_cmd  == `CMD_fpu_unary) &&
+                             (exe_cmdex == `CMDEX_FSCALE);
 
     // PR-2b.3o (iter 46): comparison ops on ST(0) vs ST(i).  Dispatched via
     // the new `CMD_fpu_cmp` (7'd120).  Both operands are read via the
@@ -658,6 +666,7 @@ module execute_fpu (
                             is_fst_m32 | is_fst_m64 |                 // PR-2b.5e iter 118 (no-pop)
                             is_unary_now | is_cmp_now |
                             is_frndint |                              // PR-2b.5n iter 127
+                            is_fscale |                               // PR-2b.5p iter 130
                             is_ffree | is_fnop | is_fdecstp | is_fincstp |
                             is_fcmov_now;
     // Control-op predicate: ops whose result is a regfile-data move,
@@ -870,6 +879,11 @@ module execute_fpu (
     // (procedural-net decl-order rule); driven by the instance further below.
     wire [79:0] rndint_z;
     wire        rndint_pe, rndint_de, rndint_ie;
+    // PR-2b.5p (iter 130): FSCALE result + flags from floatx80_scale.  Declared
+    // ahead of the flags_lat / rf_wr_data blocks that consume them (procedural-
+    // net decl-order rule); driven by the instance further below.
+    wire [79:0] scale_z;
+    wire        scale_pe, scale_ue, scale_oe, scale_de, scale_ie;
     // PR-2b.3n: unary control-op latches.  Captured at S_IDLE→S_FETCH_A.
     // FCHS/FABS override rf_wr_data with a bit-79-toggled / bit-79-cleared
     // copy of a_lat; FXAM suppresses rf_wr_en and pulses cc_we instead.
@@ -879,6 +893,7 @@ module execute_fpu (
     reg        is_fabs_lat;
     reg        is_fxam_lat;
     reg        is_frndint_lat;   // PR-2b.5n (iter 127)
+    reg        is_fscale_lat;    // PR-2b.5p (iter 130)
     // PR-2b.3o: cmp-family latches.  is_cmp_lat covers all four ops and
     // is used to (a) gate rf_wr_en off (no data writeback), (b) drive
     // cc_we in S_RETIRE, (c) override flags_lat with the cmp-only IE
@@ -1067,6 +1082,7 @@ module execute_fpu (
             is_fabs_lat     <= 1'b0;
             is_fxam_lat     <= 1'b0;
             is_frndint_lat  <= 1'b0;    // PR-2b.5n iter 127
+            is_fscale_lat   <= 1'b0;    // PR-2b.5p iter 130
             is_cmp_lat      <= 1'b0;
             is_fucom_lat    <= 1'b0;
             is_cmpi_lat     <= 1'b0;
@@ -1090,7 +1106,11 @@ module execute_fpu (
                     if (op_active) begin
                         state          <= S_FETCH_A;
                         top_lat        <= sw_in[13:11];
-                        src_lat        <= exe_modregrm_rm_3b;
+                        // PR-2b.5p (iter 130): FSCALE has no operand-encoding ModRM
+                        // (it's D9 FD, rm=101) — its second operand is implicitly
+                        // ST(1).  Force src_lat=1 so S_FETCH_B latches ST(1) into
+                        // b_lat; all other ops take the modrm.rm source index.
+                        src_lat        <= is_fscale ? 3'd1 : exe_modregrm_rm_3b;
                         kind_lat       <= kind_now;
                         reverse_lat    <= reverse_now;
                         dst_is_sti_lat <= dst_is_sti_now;
@@ -1114,6 +1134,7 @@ module execute_fpu (
                         is_fabs_lat    <= is_fabs;
                         is_fxam_lat    <= is_fxam;
                         is_frndint_lat <= is_frndint;   // PR-2b.5n iter 127
+                        is_fscale_lat  <= is_fscale;    // PR-2b.5p iter 130
                         is_cmp_lat     <= is_cmp_now;
                         is_fucom_lat   <= is_cmp_unord_now;
                         is_cmpi_lat    <= is_cmpi_now;
@@ -1192,6 +1213,11 @@ module execute_fpu (
                                        // Must precede the 6'd0 control-op arm (is_frndint_lat is NOT
                                        // in that OR-list, so omitting this would drop to flags_pre).
                                        is_frndint_lat ? {rndint_pe, 1'b0, 1'b0, 1'b0, rndint_de, rndint_ie} :
+                                       // PR-2b.5p (iter 130): FSCALE flags.  {PE,UE,OE,ZE,DE,IE} =
+                                       // {pe,ue,oe,0,de,ie}; ZE never arises from a power-of-two
+                                       // scale.  Must precede the 6'd0 control-op arm (is_fscale_lat
+                                       // is NOT in that OR-list, so omitting this drops to flags_pre).
+                                       is_fscale_lat ? {scale_pe, scale_ue, scale_oe, 1'b0, scale_de, scale_ie} :
                                        (is_fxch_lat | is_fld_lat | is_fst_lat |
                                         is_fstp_m80_lat |                       // PR-2b.5a iter 113: verbatim 80-bit store, no exceptions
                                         is_fld_m80_lat |                        // PR-2b.5g iter 124: verbatim 80-bit load, no exceptions (even on SNaN)
@@ -1437,6 +1463,22 @@ module execute_fpu (
         .de (rndint_de),
         .ie (rndint_ie)
     );
+    // PR-2b.5p (iter 130): FSCALE.  a = ST(0) (a_lat, latched at S_FETCH_B).
+    // b = ST(1): live rf_rd_data DURING S_COMPUTE (when flags_lat latches), the
+    // registered b_lat AFTERWARD (when scale_z feeds rf_wr_data/tag at S_RETIRE)
+    // — the SAME timing mux the arith primitives use (see arith_b above).  ST(1)
+    // is only on rf_rd_data during S_COMPUTE (src_lat=1 → rd_idx=abs_st1 in
+    // S_FETCH_B); using b_lat alone would latch flags from a stale operand.
+    floatx80_scale u_floatx80_scale (
+        .a  (a_lat),
+        .b  ((state == S_COMPUTE) ? rf_rd_data : b_lat),
+        .z  (scale_z),
+        .pe (scale_pe),
+        .ue (scale_ue),
+        .oe (scale_oe),
+        .de (scale_de),
+        .ie (scale_ie)
+    );
 
     // PR-2b.5a (iter 113): FSTP m80 raw-store outputs.  store_data is the
     // verbatim ST(0) value (a_lat, latched at S_FETCH_B); store_ready holds
@@ -1554,6 +1596,7 @@ module execute_fpu (
                         is_fchs_lat        ? fchs_result :    // FCHS: ~bit79 of ST(0)
                         is_fabs_lat        ? fabs_result :    // FABS: clear bit79 of ST(0)
                         is_frndint_lat     ? rndint_z :       // PR-2b.5n iter 127: rounded ST(0)
+                        is_fscale_lat      ? scale_z :        // PR-2b.5p iter 130: scaled ST(0)
                         is_ffree_lat       ? b_lat :          // PR-2b.3r FFREE: preserve ST(i) data
                         is_fcmov_lat       ? b_lat :          // PR-2b.3t FCMOV taken: ST(0) <- ST(i)
                                              z_lat;
@@ -1585,6 +1628,13 @@ module execute_fpu (
     wire [1:0] frndint_tag = (rndint_z[78:0] == 79'd0)     ? 2'b01 :  // Zero
                              (rndint_z[78:64] == 15'h7FFF) ? 2'b10 :  // NaN/Inf
                                                              2'b00;   // Valid
+    // PR-2b.5p (iter 130): FSCALE result tag.  Scaling yields a normal value
+    // (Valid), the underflow flush to +/-0 (Zero), or the overflow/Inf passthrough
+    // (Special).  Classified off scale_z (valid at S_RETIRE — b operand is b_lat
+    // by then via the timing mux on the primitive's b input).
+    wire [1:0] fscale_tag = (scale_z[78:0] == 79'd0)       ? 2'b01 :  // Zero
+                            (scale_z[78:64] == 15'h7FFF)   ? 2'b10 :  // NaN/Inf
+                                                             2'b00;   // Valid
     assign rf_wr_tag  = (state == S_POP)    ? 2'b11         :  // Empty
                         (state == S_POP2)   ? 2'b11         :  // PR-2b.3q: Empty (second pop)
                         (state == S_FXCH2)  ? st0_tag_lat   :  // FXCH tag swap
@@ -1596,6 +1646,7 @@ module execute_fpu (
                         is_fst_lat          ? st0_tag_lat   :  // FST/FSTP: copy ST(0) tag
                         (is_fchs_lat | is_fabs_lat) ? st0_tag_lat :  // FCHS/FABS: preserve ST(0) tag
                         is_frndint_lat      ? frndint_tag   :  // PR-2b.5n iter 127: classify rounded result
+                        is_fscale_lat       ? fscale_tag    :  // PR-2b.5p iter 130: classify scaled result
                         is_ffree_lat        ? 2'b11         :  // PR-2b.3r FFREE: Empty
                         is_fcmov_lat        ? stsrc_tag_lat :  // PR-2b.3t FCMOV taken: copy ST(i) tag
                                               2'b00;           // Valid (arith)
