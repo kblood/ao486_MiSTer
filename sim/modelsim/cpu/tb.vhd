@@ -67,7 +67,29 @@ begin
 
    clk   <= not clk after 5 ns;
    rst   <= not rst_n;
-   
+
+   -- iter 83: sim-time watchdog (REVISED iter 86 after iter-85 measurement).
+   -- The existing sentinel-write exit at DDRAM_OUT_WE (0xCAFEBABE@0x1F0)
+   -- only fires on CLEAN smoke completion.  Any uncaught #MF / spurious
+   -- exception / hung op silently spins the sim in the listing's
+   -- `jmp infinite_loop` tail with no termination signal — iter 78 ran
+   -- 4h, iter 82 ran 8.5h, iter 85 ran ~10 min before external kill.
+   -- 5 ms sim-time at 100 MHz = 500k cycles.  A clean smoke finishes in
+   -- well under 1 ms sim-time (iter 80 PR-2b.4k FLD smoke = 16170 ns;
+   -- iter 82 reached TEST 7 at ~600us; iter 84 isolation = 15240 ns).
+   -- ITER-85 MEASUREMENT: ~1.67 us sim-time per sec wall-clock for AO486
+   -- cpu/ TB with FPU + L2 + cpu_export.  100 ms sim-time = ~16.7 hours
+   -- wall-clock — useless as a wall-clock cap.  5 ms sim-time ≈ 50 min
+   -- wall-clock — useful cap with 5x headroom over even iter-82's full
+   -- 8-test trap-spin.  See [[feedback-watchdog-simtime-vs-walltime]].
+   process
+   begin
+      wait for 1 ms;
+      assert false
+         report "iter-86 sim-time watchdog: 1 ms elapsed without smoke sentinel; likely #MF, hung op, or infinite_loop without 0xCAFEBABE@0x1F0 commit"
+         severity failure;
+   end process;
+
    process
       variable idlecnt  : integer := 0;
    begin
@@ -332,10 +354,39 @@ begin
                DDRAM_OUT_DOUT_READY <= '0';
             end if;
             
-            --if (DDRAM_OUT_WE = '1') then
-            --   data(address + 1) := to_integer(unsigned(DDRAM_OUT_DIN(31 downto  0)));
-            --   data(address + 0) := to_integer(unsigned(DDRAM_OUT_DIN(63 downto 32)));
-            --end if;
+            if (DDRAM_OUT_WE = '1') then
+               address := to_integer(unsigned(DDRAM_OUT_ADDR)) / 4;
+               -- Byte-enabled write: read-modify-write each 32-bit half so
+               -- BE-disabled bytes retain their prior value.  DDRAM_OUT_BE
+               -- maps one bit per byte of the 64-bit DDRAM_OUT_DIN.
+               readmodifywrite := std_logic_vector(to_signed(data(address + 0), 32));
+               if DDRAM_OUT_BE(0) = '1' then readmodifywrite(7  downto  0) := DDRAM_OUT_DIN( 7 downto  0); end if;
+               if DDRAM_OUT_BE(1) = '1' then readmodifywrite(15 downto  8) := DDRAM_OUT_DIN(15 downto  8); end if;
+               if DDRAM_OUT_BE(2) = '1' then readmodifywrite(23 downto 16) := DDRAM_OUT_DIN(23 downto 16); end if;
+               if DDRAM_OUT_BE(3) = '1' then readmodifywrite(31 downto 24) := DDRAM_OUT_DIN(31 downto 24); end if;
+               data(address + 0) := to_integer(signed(readmodifywrite));
+               readmodifywrite := std_logic_vector(to_signed(data(address + 1), 32));
+               if DDRAM_OUT_BE(4) = '1' then readmodifywrite(7  downto  0) := DDRAM_OUT_DIN(39 downto 32); end if;
+               if DDRAM_OUT_BE(5) = '1' then readmodifywrite(15 downto  8) := DDRAM_OUT_DIN(47 downto 40); end if;
+               if DDRAM_OUT_BE(6) = '1' then readmodifywrite(23 downto 16) := DDRAM_OUT_DIN(55 downto 48); end if;
+               if DDRAM_OUT_BE(7) = '1' then readmodifywrite(31 downto 24) := DDRAM_OUT_DIN(63 downto 56); end if;
+               data(address + 1) := to_integer(signed(readmodifywrite));
+               -- PR-2b.4k iter 80: smoke auto-terminate sentinel.  Any 32-bit
+               -- write of 0xCAFEBABE to byte address 0x1F0 (chosen outside
+               -- the existing smoke result buffer 0x100-0x10F and source
+               -- data buffer 0x120-0x137; also <0xFFFF per
+               -- feedback_smoke_listings_real_mode_segment_ivt) signals
+               -- "all tests complete" and triggers a clean exit, capping
+               -- vsim wall-clock at the actual smoke duration rather than
+               -- letting it spin in the listing's infinite_loop tail
+               -- forever (4 hours in iter 78).  The address+magic combo
+               -- is specific enough that an accidental match is negligible.
+               if (unsigned(DDRAM_OUT_ADDR) = to_unsigned(16#1F0#, 28)) and
+                  (DDRAM_OUT_BE(3 downto 0) = "1111") and
+                  (DDRAM_OUT_DIN(31 downto 0) = X"CAFEBABE") then
+                  assert false report "PR-2b.4k smoke sentinel 0xCAFEBABE@0x1F0 detected; clean exit" severity failure;
+               end if;
+            end if;
          end if;
          
          wait until rising_edge(clk);
