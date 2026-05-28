@@ -621,6 +621,14 @@
 `define CMDEX_FPREM           4'd7
 `define CMDEX_FPREM1          4'd8
 
+// PR-2b.5t (iter 137) — FSQRT = D9 FA : ST(0) <- sqrt(ST(0)).  Same dispatch
+// family as FRNDINT (CMD_fpu_unary, register-only, writes ST(0) no-pop, single
+// operand — NO src_lat override) but flows through a dedicated is_fsqrt lane in
+// execute_fpu.v that feeds the new floatx80_sqrt primitive.  Reports PE on an
+// inexact root / DE on a denormal operand / IE on a negative (non-zero) operand
+// or an SNaN.  -0 returns -0, +Inf returns +Inf, +0 returns +0.
+`define CMDEX_FSQRT           4'd9
+
 // PR-2b.3o (iter 46) — x87 comparison ops on ST(0) vs ST(i): FCOM / FCOMP /
 // FUCOM / FUCOMP.  Read BOTH ST(0) and ST(i) via the existing fetch path;
 // classify result (much like FXAM but on the comparison outcome); pulse
