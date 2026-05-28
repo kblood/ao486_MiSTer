@@ -405,6 +405,12 @@ module execute_fpu (
     wire is_fxam           = (exe_cmd  == `CMD_fpu_unary) &&
                              (exe_cmdex == `CMDEX_FXAM);
     wire is_unary_now      = is_fchs | is_fabs | is_fxam;
+    // PR-2b.5n (iter 127): FRNDINT — round ST(0) to integer per CW[11:10].
+    // Same CMD_fpu_unary family but kept OUT of is_unary_now/is_control_op_now
+    // because it produces real PE/DE/IE flags and a softfloat-style result via
+    // the floatx80_round_to_int primitive, not a 1-cycle bit move.
+    wire is_frndint        = (exe_cmd  == `CMD_fpu_unary) &&
+                             (exe_cmdex == `CMDEX_FRNDINT);
 
     // PR-2b.3o (iter 46): comparison ops on ST(0) vs ST(i).  Dispatched via
     // the new `CMD_fpu_cmp` (7'd120).  Both operands are read via the
@@ -651,6 +657,7 @@ module execute_fpu (
                             is_fstp_m32 | is_fstp_m64 |               // PR-2b.5c/5d iter 116/117
                             is_fst_m32 | is_fst_m64 |                 // PR-2b.5e iter 118 (no-pop)
                             is_unary_now | is_cmp_now |
+                            is_frndint |                              // PR-2b.5n iter 127
                             is_ffree | is_fnop | is_fdecstp | is_fincstp |
                             is_fcmov_now;
     // Control-op predicate: ops whose result is a regfile-data move,
@@ -858,6 +865,11 @@ module execute_fpu (
     // first.  Driven by the floatx80_to_float32/64 instances further below.
     wire       f32_pe, f32_oe, f32_ue, f32_ie;
     wire       f64_pe, f64_oe, f64_ue, f64_ie;
+    // PR-2b.5n (iter 127): FRNDINT result + flags from floatx80_round_to_int.
+    // Declared ahead of the flags_lat / rf_wr_data blocks that consume them
+    // (procedural-net decl-order rule); driven by the instance further below.
+    wire [79:0] rndint_z;
+    wire        rndint_pe, rndint_de, rndint_ie;
     // PR-2b.3n: unary control-op latches.  Captured at S_IDLE→S_FETCH_A.
     // FCHS/FABS override rf_wr_data with a bit-79-toggled / bit-79-cleared
     // copy of a_lat; FXAM suppresses rf_wr_en and pulses cc_we instead.
@@ -866,6 +878,7 @@ module execute_fpu (
     reg        is_fchs_lat;
     reg        is_fabs_lat;
     reg        is_fxam_lat;
+    reg        is_frndint_lat;   // PR-2b.5n (iter 127)
     // PR-2b.3o: cmp-family latches.  is_cmp_lat covers all four ops and
     // is used to (a) gate rf_wr_en off (no data writeback), (b) drive
     // cc_we in S_RETIRE, (c) override flags_lat with the cmp-only IE
@@ -1053,6 +1066,7 @@ module execute_fpu (
             is_fchs_lat     <= 1'b0;
             is_fabs_lat     <= 1'b0;
             is_fxam_lat     <= 1'b0;
+            is_frndint_lat  <= 1'b0;    // PR-2b.5n iter 127
             is_cmp_lat      <= 1'b0;
             is_fucom_lat    <= 1'b0;
             is_cmpi_lat     <= 1'b0;
@@ -1099,6 +1113,7 @@ module execute_fpu (
                         is_fchs_lat    <= is_fchs;
                         is_fabs_lat    <= is_fabs;
                         is_fxam_lat    <= is_fxam;
+                        is_frndint_lat <= is_frndint;   // PR-2b.5n iter 127
                         is_cmp_lat     <= is_cmp_now;
                         is_fucom_lat   <= is_cmp_unord_now;
                         is_cmpi_lat    <= is_cmpi_now;
@@ -1172,6 +1187,11 @@ module execute_fpu (
                                        // Must precede the 6'd0 control-op arm below.
                                        (is_fstp_m32_lat | is_fst_m32_lat) ? {f32_pe, f32_ue, f32_oe, 1'b0, 1'b0, f32_ie} :
                                        (is_fstp_m64_lat | is_fst_m64_lat) ? {f64_pe, f64_ue, f64_oe, 1'b0, 1'b0, f64_ie} :
+                                       // PR-2b.5n (iter 127): FRNDINT flags.  {PE,UE,OE,ZE,DE,IE} =
+                                       // {pe,0,0,0,de,ie}; OE/UE/ZE never arise from round-to-int.
+                                       // Must precede the 6'd0 control-op arm (is_frndint_lat is NOT
+                                       // in that OR-list, so omitting this would drop to flags_pre).
+                                       is_frndint_lat ? {rndint_pe, 1'b0, 1'b0, 1'b0, rndint_de, rndint_ie} :
                                        (is_fxch_lat | is_fld_lat | is_fst_lat |
                                         is_fstp_m80_lat |                       // PR-2b.5a iter 113: verbatim 80-bit store, no exceptions
                                         is_fld_m80_lat |                        // PR-2b.5g iter 124: verbatim 80-bit load, no exceptions (even on SNaN)
@@ -1405,6 +1425,18 @@ module execute_fpu (
         .ue (f64_ue),
         .ie (f64_ie)
     );
+    // PR-2b.5n (iter 127): FRNDINT round-to-integer.  Fed by a_lat (ST(0),
+    // latched at S_FETCH_B) and the live rounding-control field cw[11:10];
+    // rndint_z drives rf_wr_data and rndint_pe/de/ie drive flags_lat when
+    // is_frndint_lat.  Combinational, like the narrowing converters above.
+    floatx80_round_to_int u_floatx80_round_to_int (
+        .a  (a_lat),
+        .rc (cw[11:10]),
+        .z  (rndint_z),
+        .pe (rndint_pe),
+        .de (rndint_de),
+        .ie (rndint_ie)
+    );
 
     // PR-2b.5a (iter 113): FSTP m80 raw-store outputs.  store_data is the
     // verbatim ST(0) value (a_lat, latched at S_FETCH_B); store_ready holds
@@ -1521,6 +1553,7 @@ module execute_fpu (
                         is_fst_lat         ? a_lat :          // FST/FSTP: ST(0) data
                         is_fchs_lat        ? fchs_result :    // FCHS: ~bit79 of ST(0)
                         is_fabs_lat        ? fabs_result :    // FABS: clear bit79 of ST(0)
+                        is_frndint_lat     ? rndint_z :       // PR-2b.5n iter 127: rounded ST(0)
                         is_ffree_lat       ? b_lat :          // PR-2b.3r FFREE: preserve ST(i) data
                         is_fcmov_lat       ? b_lat :          // PR-2b.3t FCMOV taken: ST(0) <- ST(i)
                                              z_lat;
@@ -1546,6 +1579,12 @@ module execute_fpu (
                              (b_lat[78:64] == 15'h7FFF)    ? 2'b10 :  // NaN/Inf
                              (b_lat[78:64] == 15'h0)       ? 2'b10 :  // denormal/pseudo-denormal -> Special
                                                              2'b00;   // Valid
+    // PR-2b.5n (iter 127): FRNDINT result tag.  Round-to-int yields an integer
+    // (Valid), +/-0 (Zero), or a NaN/Inf passthrough (Special) — never a
+    // denormal, so no exp==0 nonzero-sig case to handle.
+    wire [1:0] frndint_tag = (rndint_z[78:0] == 79'd0)     ? 2'b01 :  // Zero
+                             (rndint_z[78:64] == 15'h7FFF) ? 2'b10 :  // NaN/Inf
+                                                             2'b00;   // Valid
     assign rf_wr_tag  = (state == S_POP)    ? 2'b11         :  // Empty
                         (state == S_POP2)   ? 2'b11         :  // PR-2b.3q: Empty (second pop)
                         (state == S_FXCH2)  ? st0_tag_lat   :  // FXCH tag swap
@@ -1556,6 +1595,7 @@ module execute_fpu (
                         is_fconst_lat       ? fconst_tag_lat:  // PR-2b.4n iter 112: precomputed (Zero/Valid)
                         is_fst_lat          ? st0_tag_lat   :  // FST/FSTP: copy ST(0) tag
                         (is_fchs_lat | is_fabs_lat) ? st0_tag_lat :  // FCHS/FABS: preserve ST(0) tag
+                        is_frndint_lat      ? frndint_tag   :  // PR-2b.5n iter 127: classify rounded result
                         is_ffree_lat        ? 2'b11         :  // PR-2b.3r FFREE: Empty
                         is_fcmov_lat        ? stsrc_tag_lat :  // PR-2b.3t FCMOV taken: copy ST(i) tag
                                               2'b00;           // Valid (arith)

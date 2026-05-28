@@ -580,6 +580,13 @@
 // FCHS/FABS/FXAM (CMD_fpu_unary) but flows through is_cmp_now in
 // execute_fpu.v so the cmp lane (cc_we + flags_lat IE override) engages.
 `define CMDEX_FTST            4'd3
+// PR-2b.5n (iter 127) — FRNDINT = D9 FC : round ST(0) to an integer per the
+// current rounding-control field CW[11:10].  Same dispatch family as
+// FCHS/FABS (CMD_fpu_unary, register-only, writes ST(0), no pop), but flows
+// through a dedicated is_frndint lane in execute_fpu.v that feeds the new
+// floatx80_round_to_int primitive and reports PE on inexact / DE on a
+// denormal operand / IE on SNaN.
+`define CMDEX_FRNDINT         4'd4
 
 // PR-2b.3o (iter 46) — x87 comparison ops on ST(0) vs ST(i): FCOM / FCOMP /
 // FUCOM / FUCOMP.  Read BOTH ST(0) and ST(i) via the existing fetch path;

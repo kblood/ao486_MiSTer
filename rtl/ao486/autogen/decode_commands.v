@@ -393,6 +393,10 @@ wire cond_219 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDD && decoder[13:
 // is FUCOMI (cond_187, gated mod==11), so the mem-form is free.  Routes to
 // CMD_fpu_load_mem / CMDEX_FLD_M80 — the raw 80-bit load twin of FSTP m80.
 wire cond_220 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDB && decoder[13:11] == 3'b101 && decoder[15:14] != 2'b11; // FLD m80fp (DB /5)
+// PR-2b.5n (iter 127): FRNDINT = D9 FC (reg-form, full ModRM byte).  Same
+// dispatch family as FCHS (cond_164, D9 E0): CMD_fpu_unary / CMDEX_FRNDINT,
+// consumes the ModRM byte, no source operand beyond ST(0).
+wire cond_221 = dec_ready_modregrm_one   && decoder[7:0] == 8'hD9 && decoder[15:8] == 8'hFC; // FRNDINT (D9 FC)
 //======================================================== saves
 //======================================================== always
 //======================================================== sets
@@ -475,6 +479,7 @@ assign dec_cmd =
     (cond_162 && ~cond_4)? ( `CMD_fpu_arith) :
     (cond_163 && ~cond_4)? ( `CMD_fpu_arith) :
     (cond_164 && ~cond_4)? ( `CMD_fpu_unary) :
+    (cond_221 && ~cond_4)? ( `CMD_fpu_unary) :
     (cond_165 && ~cond_4)? ( `CMD_fpu_unary) :
     (cond_166 && ~cond_4)? ( `CMD_fpu_unary) :
     (cond_167 && ~cond_4)? ( `CMD_fpu_cmp) :
@@ -925,6 +930,7 @@ assign consume_modregrm_one =
     (cond_162 && ~cond_4)? (`TRUE) :
     (cond_163 && ~cond_4)? (`TRUE) :
     (cond_164 && ~cond_4)? (`TRUE) :
+    (cond_221 && ~cond_4)? (`TRUE) :
     (cond_165 && ~cond_4)? (`TRUE) :
     (cond_166 && ~cond_4)? (`TRUE) :
     (cond_167 && ~cond_4)? (`TRUE) :
@@ -1136,6 +1142,7 @@ assign dec_cmdex =
     (cond_162 && ~cond_4)? ( `CMDEX_FST_STi) :
     (cond_163 && ~cond_4)? ( `CMDEX_FSTP_STi) :
     (cond_164 && ~cond_4)? ( `CMDEX_FCHS) :
+    (cond_221 && ~cond_4)? ( `CMDEX_FRNDINT) :
     (cond_165 && ~cond_4)? ( `CMDEX_FABS) :
     (cond_166 && ~cond_4)? ( `CMDEX_FXAM) :
     (cond_167 && ~cond_4)? ( `CMDEX_FCOM) :
