@@ -427,6 +427,18 @@ module execute_fpu (
     // so no src_lat override needed — unlike FSCALE.
     wire is_fxtract        = (exe_cmd  == `CMD_fpu_unary) &&
                              (exe_cmdex == `CMDEX_FXTRACT);
+    // PR-2b.5r (iter 135): FPREM (D9 F8, RTZ quotient) / FPREM1 (D9 F5, RTNE
+    // quotient) — ST(0) <- ST(0) mod ST(1).  Same CMD_fpu_unary family as FSCALE,
+    // kept OUT of is_unary_now/is_control_op_now (it produces real PE/UE/IE flags
+    // and a softfloat-style result via floatx80_remainder).  Reads a SECOND operand
+    // (ST(1)): src_lat forced to 1 at op-start so S_FETCH_B latches ST(1) into b_lat.
+    // Writes ST(0) no-pop; drives the SW condition codes via the existing FXAM/cmp
+    // cc_we path (NOT the EFLAGS path — no direct write_register override).
+    wire is_fprem          = (exe_cmd  == `CMD_fpu_unary) &&
+                             (exe_cmdex == `CMDEX_FPREM);
+    wire is_fprem1         = (exe_cmd  == `CMD_fpu_unary) &&
+                             (exe_cmdex == `CMDEX_FPREM1);
+    wire is_fprem_any      = is_fprem | is_fprem1;
 
     // PR-2b.3o (iter 46): comparison ops on ST(0) vs ST(i).  Dispatched via
     // the new `CMD_fpu_cmp` (7'd120).  Both operands are read via the
@@ -676,6 +688,7 @@ module execute_fpu (
                             is_frndint |                              // PR-2b.5n iter 127
                             is_fscale |                               // PR-2b.5p iter 130
                             is_fxtract |                              // PR-2b.5q iter 131
+                            is_fprem_any |                            // PR-2b.5r iter 135
                             is_ffree | is_fnop | is_fdecstp | is_fincstp |
                             is_fcmov_now;
     // Control-op predicate: ops whose result is a regfile-data move,
@@ -905,6 +918,15 @@ module execute_fpu (
     // S_RETIRE (becomes ST(1) after the push).
     wire [79:0] extract_sig, extract_exp;
     wire        extract_ze, extract_de, extract_ie;
+    // PR-2b.5r (iter 135): FPREM/FPREM1 result + quotient/C2 + flags from
+    // floatx80_remainder.  Declared ahead of the flags_lat / cc_din / rf_wr_data
+    // blocks that consume them (procedural-net decl-order rule); driven by the
+    // instance further below.  rem_quotient[2:0] -> {C0=q[2],C3=q[1],C1=q[0]},
+    // rem_incomplete -> C2; rem_flags = {PE,UE,OE,ZE,DE,IE}.
+    wire [79:0] rem_z;
+    wire [2:0]  rem_quotient;
+    wire        rem_incomplete;
+    wire [5:0]  rem_flags;
     // PR-2b.3n: unary control-op latches.  Captured at S_IDLE→S_FETCH_A.
     // FCHS/FABS override rf_wr_data with a bit-79-toggled / bit-79-cleared
     // copy of a_lat; FXAM suppresses rf_wr_en and pulses cc_we instead.
@@ -916,6 +938,9 @@ module execute_fpu (
     reg        is_frndint_lat;   // PR-2b.5n (iter 127)
     reg        is_fscale_lat;    // PR-2b.5p (iter 130)
     reg        is_fxtract_lat;   // PR-2b.5q (iter 131)
+    reg        is_fprem_lat;     // PR-2b.5r (iter 135)
+    reg        is_fprem1_lat;    // PR-2b.5r (iter 135)
+    wire       is_fprem_any_lat = is_fprem_lat | is_fprem1_lat;  // PR-2b.5r iter 135
     // PR-2b.3o: cmp-family latches.  is_cmp_lat covers all four ops and
     // is used to (a) gate rf_wr_en off (no data writeback), (b) drive
     // cc_we in S_RETIRE, (c) override flags_lat with the cmp-only IE
@@ -1106,6 +1131,8 @@ module execute_fpu (
             is_frndint_lat  <= 1'b0;    // PR-2b.5n iter 127
             is_fscale_lat   <= 1'b0;    // PR-2b.5p iter 130
             is_fxtract_lat  <= 1'b0;    // PR-2b.5q iter 131
+            is_fprem_lat    <= 1'b0;    // PR-2b.5r iter 135
+            is_fprem1_lat   <= 1'b0;    // PR-2b.5r iter 135
             is_cmp_lat      <= 1'b0;
             is_fucom_lat    <= 1'b0;
             is_cmpi_lat     <= 1'b0;
@@ -1133,7 +1160,9 @@ module execute_fpu (
                         // (it's D9 FD, rm=101) — its second operand is implicitly
                         // ST(1).  Force src_lat=1 so S_FETCH_B latches ST(1) into
                         // b_lat; all other ops take the modrm.rm source index.
-                        src_lat        <= is_fscale ? 3'd1 : exe_modregrm_rm_3b;
+                        // PR-2b.5r (iter 135): FPREM/FPREM1 likewise read the implicit
+                        // ST(1) divisor — same src_lat=1 override (the FSCALE trap).
+                        src_lat        <= (is_fscale | is_fprem_any) ? 3'd1 : exe_modregrm_rm_3b;
                         kind_lat       <= kind_now;
                         reverse_lat    <= reverse_now;
                         dst_is_sti_lat <= dst_is_sti_now;
@@ -1159,6 +1188,8 @@ module execute_fpu (
                         is_frndint_lat <= is_frndint;   // PR-2b.5n iter 127
                         is_fscale_lat  <= is_fscale;    // PR-2b.5p iter 130
                         is_fxtract_lat <= is_fxtract;   // PR-2b.5q iter 131
+                        is_fprem_lat   <= is_fprem;     // PR-2b.5r iter 135
+                        is_fprem1_lat  <= is_fprem1;    // PR-2b.5r iter 135
                         is_cmp_lat     <= is_cmp_now;
                         is_fucom_lat   <= is_cmp_unord_now;
                         is_cmpi_lat    <= is_cmpi_now;
@@ -1247,6 +1278,11 @@ module execute_fpu (
                                        // zero source (exponent = -Inf).  Must precede the 6'd0 arm
                                        // (is_fxtract_lat is NOT in that OR-list).
                                        is_fxtract_lat ? {3'b0, extract_ze, extract_de, extract_ie} :
+                                       // PR-2b.5r (iter 135): FPREM/FPREM1 flags.  rem_flags is
+                                       // already {PE,UE,OE,ZE,DE,IE} (OE/ZE always 0; Slice-1 IE
+                                       // from the special-operand stub).  Must precede the 6'd0
+                                       // control-op arm (is_fprem*_lat are NOT in that OR-list).
+                                       is_fprem_any_lat ? rem_flags :
                                        (is_fxch_lat | is_fld_lat | is_fst_lat |
                                         is_fstp_m80_lat |                       // PR-2b.5a iter 113: verbatim 80-bit store, no exceptions
                                         is_fld_m80_lat |                        // PR-2b.5g iter 124: verbatim 80-bit load, no exceptions (even on SNaN)
@@ -1540,6 +1576,22 @@ module execute_fpu (
         .de    (extract_de),
         .ie    (extract_ie)
     );
+    // PR-2b.5r (iter 135): FPREM/FPREM1.  a = ST(0) (a_lat, latched at S_FETCH_B);
+    // b = ST(1).  Same two-source timing mux FSCALE uses: live rf_rd_data DURING
+    // S_COMPUTE (when flags_lat latches off the primitive), the registered b_lat
+    // afterward (when rem_z feeds rf_wr_data/tag at S_RETIRE).  ST(1) is only on
+    // rf_rd_data during S_COMPUTE (src_lat=1 -> rd_idx=abs_st1 in S_FETCH_B); using
+    // b_lat alone would latch flags off a stale operand.  rnd_nearest selects FPREM1
+    // (RTNE quotient) vs FPREM (RTZ).
+    floatx80_remainder u_floatx80_remainder (
+        .a           (a_lat),
+        .b           ((state == S_COMPUTE) ? rf_rd_data : b_lat),
+        .rnd_nearest (is_fprem1_lat),
+        .z           (rem_z),
+        .quotient    (rem_quotient),
+        .incomplete  (rem_incomplete),
+        .flags       (rem_flags)
+    );
 
     // PR-2b.5a (iter 113): FSTP m80 raw-store outputs.  store_data is the
     // verbatim ST(0) value (a_lat, latched at S_FETCH_B); store_ready holds
@@ -1667,6 +1719,7 @@ module execute_fpu (
                         is_frndint_lat     ? rndint_z :       // PR-2b.5n iter 127: rounded ST(0)
                         is_fscale_lat      ? scale_z :        // PR-2b.5p iter 130: scaled ST(0)
                         is_fxtract_lat     ? extract_exp :    // PR-2b.5q iter 131: exponent -> ST(0) at S_RETIRE
+                        is_fprem_any_lat   ? rem_z :          // PR-2b.5r iter 135: remainder -> ST(0) no-pop
                         is_ffree_lat       ? b_lat :          // PR-2b.3r FFREE: preserve ST(i) data
                         is_fcmov_lat       ? b_lat :          // PR-2b.3t FCMOV taken: ST(0) <- ST(i)
                                              z_lat;
@@ -1715,6 +1768,13 @@ module execute_fpu (
     wire [1:0] extract_exp_tag = (extract_exp[78:0] == 79'd0)     ? 2'b01 :  // Zero
                                  (extract_exp[78:64] == 15'h7FFF) ? 2'b10 :  // -Inf/+Inf
                                                                     2'b00;   // Valid
+    // PR-2b.5r (iter 135): FPREM/FPREM1 result tag.  The remainder is a finite
+    // value with |rem| <= |ST(1)|/2 (Valid), an exact +/-0 (Zero), or the Slice-1
+    // special-operand QNaN stub (Special).  Classified off rem_z (valid at S_RETIRE
+    // — b operand is b_lat by then via the primitive's timing mux).
+    wire [1:0] fprem_tag = (rem_z[78:0] == 79'd0)     ? 2'b01 :  // Zero
+                           (rem_z[78:64] == 15'h7FFF) ? 2'b10 :  // NaN/Inf
+                                                        2'b00;   // Valid
     assign rf_wr_tag  = (state == S_POP)    ? 2'b11         :  // Empty
                         (state == S_POP2)   ? 2'b11         :  // PR-2b.3q: Empty (second pop)
                         (state == S_XTRACT2)? extract_sig_tag :  // PR-2b.5q iter 131: significand tag (guard first)
@@ -1729,6 +1789,7 @@ module execute_fpu (
                         is_frndint_lat      ? frndint_tag   :  // PR-2b.5n iter 127: classify rounded result
                         is_fscale_lat       ? fscale_tag    :  // PR-2b.5p iter 130: classify scaled result
                         is_fxtract_lat      ? extract_exp_tag :// PR-2b.5q iter 131: exponent tag at S_RETIRE
+                        is_fprem_any_lat    ? fprem_tag     :  // PR-2b.5r iter 135: classify remainder result
                         is_ffree_lat        ? 2'b11         :  // PR-2b.3r FFREE: Empty
                         is_fcmov_lat        ? stsrc_tag_lat :  // PR-2b.3t FCMOV taken: copy ST(i) tag
                                               2'b00;           // Valid (arith)
@@ -1900,7 +1961,13 @@ module execute_fpu (
     // cmp_ie_now is forward-declared near the FSM (Gotcha #9); driven here.
     assign cmp_ie_now = is_fucom_lat ? cmp_any_snan : cmp_any_nan;
 
-    assign cc_din = is_cmp_lat ? cmp_cc : fxam_cc;
+    // PR-2b.5r (iter 135): FPREM/FPREM1 condition-code payload.  cc_din format is
+    // {C3, C2, C1, C0}; FPREM maps C0=q[2], C3=q[1], C1=q[0], C2=incomplete (per
+    // Intel SDM Vol 1 §8.3.8 / Bochs fpu_trans.cc).  This rides the existing SW
+    // cc_we path (NOT the EFLAGS path) — no direct write_register override needed.
+    wire [3:0] fprem_cc = {rem_quotient[1], rem_incomplete, rem_quotient[0], rem_quotient[2]};
+    assign cc_din = is_fprem_any_lat ? fprem_cc :
+                    is_cmp_lat       ? cmp_cc   : fxam_cc;
     // PR-2b.3u (iter 52): FCOMI family does NOT pulse cc_we — it writes
     // integer EFLAGS instead.  The SDM-mandated "clear C1 on FCOMI"
     // partial-write to the CSR is deferred (the CSR module would need
@@ -1909,7 +1976,10 @@ module execute_fpu (
     // CSR cc preservation across an FCOMI).  is_cmp_lat & ~is_cmpi_lat
     // keeps FCOM/FCOMP/FUCOM/FUCOMP/FCOMPP/FUCOMPP/FTST writing cc as
     // before; is_fxam_lat is independent and remains gating.
-    assign cc_we  = (state == S_RETIRE) && (is_fxam_lat | (is_cmp_lat & ~is_cmpi_lat));
+    // PR-2b.5r (iter 135): FPREM/FPREM1 also pulse cc_we at S_RETIRE to write the
+    // C0-C3 status codes.  Like FXAM (a CMD_fpu_unary single-dispatch op), the
+    // S_RETIRE pulse retires correctly for the SW path.
+    assign cc_we  = (state == S_RETIRE) && (is_fxam_lat | is_fprem_any_lat | (is_cmp_lat & ~is_cmpi_lat));
 
     //--------------------------------------------------------------------
     // PR-2b.3u (iter 52): integer EFLAGS write-back lane.  Pulsed in

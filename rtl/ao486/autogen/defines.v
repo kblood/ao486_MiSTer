@@ -609,6 +609,18 @@
 // (exponent = -Inf), DE on a denormal source, IE on an SNaN source.
 `define CMDEX_FXTRACT         4'd6
 
+// PR-2b.5r (iter 135) — FPREM = D9 F8 / FPREM1 = D9 F5 : partial remainder of
+// ST(0) / ST(1).  Same CMD_fpu_unary family as FSCALE (reads a SECOND implicit
+// operand ST(1), so execute_fpu.v forces src_lat=1) but writes ST(0) no-pop and
+// drives the SW condition codes C0/C1/C2/C3 via the existing cc_we path (the
+// FXAM/cmp lane) — NOT the EFLAGS path, so no direct write_register override is
+// needed.  FPREM uses round-to-zero quotient; FPREM1 uses round-to-nearest-even
+// (rnd_nearest = is_fprem1_lat).  C2=incomplete (expDiff>=64, re-issue to finish);
+// {C0,C3,C1} = quotient[2:0].  Reports PE/UE from the result pack; Slice-1 routes
+// NaN/Inf/b=0 to a QNaN+IE stub (faithful special-case + DE are Slice 2).
+`define CMDEX_FPREM           4'd7
+`define CMDEX_FPREM1          4'd8
+
 // PR-2b.3o (iter 46) — x87 comparison ops on ST(0) vs ST(i): FCOM / FCOMP /
 // FUCOM / FUCOMP.  Read BOTH ST(0) and ST(i) via the existing fetch path;
 // classify result (much like FXAM but on the comparison outcome); pulse
