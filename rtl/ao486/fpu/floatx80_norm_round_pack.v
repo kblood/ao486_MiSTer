@@ -31,11 +31,11 @@
 //   - Normal-range + exact-zero results fully implemented and unit-TB'd.
 //   - Overflow (zExp >= 0x7FFE) NOT handled: FPREM remainders satisfy |r| <= |b|
 //     so the exponent never overflows -- documented assumption, not a gap.
-//   - Subnormal/underflow (zExp <= 0): STUBBED -> flush to signed zero + raise
-//     UE (+PE if inexact).  Faithful denormal encoding via shift64ExtraRight-
-//     Jamming is deferred to Slice 2, where Bochs oracle vectors can verify it.
-//     The Slice-1 FPREM smoke produces only normal/zero remainders, so this
-//     branch is never exercised yet -- the stub is a marker, not a silent bug.
+//   - Subnormal/underflow (zExp <= 0): implemented in Slice 2 (iter 136) by
+//     delegating to the shared floatx80_pack_subn helper (shift64ExtraRight-
+//     Jamming(1 - zExp) + RTNE re-round + min-normal carry).  UE is raised
+//     unconditionally on a non-zero subnormal result, matching the four arith
+//     primitives' convention; PE comes from the re-round's round|sticky.
 
 `timescale 1ns / 1ps
 
@@ -96,16 +96,34 @@ module floatx80_norm_round_pack (
     wire signed [16:0] exp_fin = carry ? (n_exp + 17'sd1) : n_exp;
 
     //--------------------------------------------------------------------
-    // Result mux: zero > subnormal(stub) > normal.
+    // Subnormal / underflow pack (PR-2b.5s, iter 136).  Trigger on the
+    // PRE-round-carry exponent: Bochs roundAndPackFloatx80 enters the
+    // zExp<=0 branch on the un-incremented exponent, before the normal-path
+    // carry adjustment.  Delegates to the shared floatx80_pack_subn (the
+    // same helper the four arith primitives use): it does the
+    // shift64ExtraRightJamming(1 - zExp) + RTNE re-round + min-normal carry.
     //--------------------------------------------------------------------
-    wire subn = ~all_zero && (exp_fin <= $signed(17'sd0));
+    wire subn = ~all_zero && (n_exp <= $signed(17'sd0));
 
+    wire [79:0] z_subn;
+    wire        pe_subn;
+    floatx80_pack_subn u_subn_pack (
+        .sign      (sign),
+        .z_exp_pre (n_exp),
+        .sig_hi    (n_sig0),
+        .sig_lo    (n_sig1),
+        .z_subn    (z_subn),
+        .pe_subn   (pe_subn)
+    );
+
+    //--------------------------------------------------------------------
+    // Result mux: zero > subnormal > normal.
+    //--------------------------------------------------------------------
     wire [79:0] z_zero   = {sign, 79'd0};
-    wire [79:0] z_subn   = {sign, 79'd0};                 // Slice-2 stub: flush-to-zero
     wire [79:0] z_normal = {sign, exp_fin[14:0], sig0_fin};
 
-    assign z  = all_zero ? z_zero : subn ? z_subn : z_normal;
-    assign pe = all_zero ? 1'b0   : inexact;
+    assign z  = all_zero ? z_zero : subn ? z_subn  : z_normal;
+    assign pe = all_zero ? 1'b0   : subn ? pe_subn : inexact;
     assign ue = all_zero ? 1'b0   : subn;
 
 endmodule
