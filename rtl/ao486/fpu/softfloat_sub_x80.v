@@ -52,6 +52,13 @@ module softfloat_sub_x80 (
     input  wire        z_sign_in,
     input  wire [1:0]  precision,   // PR-2b.5u: PC = CW[9:8]; 11/01 = extended (inline)
     input  wire [1:0]  rc,          // PR-2b.5v: RC = CW[11:10]; 00=RNE (inline path)
+    // PR-2c.1 (iter 156): rounder hoisted to shared instance in execute_fpu.v.
+    output wire        pr_sign,
+    output wire signed [16:0] pr_exp,
+    output wire [63:0] pr_sig0,
+    output wire [63:0] pr_sig1,
+    input  wire [79:0] shared_round_z,
+    input  wire [5:0]  shared_round_flags,
     output wire [79:0] z,
     output wire [5:0]  flags        // {PE, UE, OE, ZE, DE, IE}
 );
@@ -333,18 +340,13 @@ module softfloat_sub_x80 (
     // regression).
     wire        is_pc_narrow = (precision == 2'b00) || (precision == 2'b10);
     wire        do_round     = (is_pc_narrow || (rc != 2'b00)) && ~result_zero;
-    wire [79:0] z_pc;
-    wire [5:0]  flags_pc;
-    floatx80_round_rc u_round_rc (
-        .rc         (rc),
-        .precision  (precision),
-        .sign       (z_sign_main),
-        .z_exp_pre  (z_exp_norm),
-        .z_sig0_pre (zs0_norm),
-        .z_sig1_pre (zs1_norm),
-        .z          (z_pc),
-        .flags      (flags_pc)
-    );
+    // PR-2c.1 (iter 156): export pre-rounder triple; shared rounder in execute_fpu.v.
+    assign pr_sign = z_sign_main;
+    assign pr_exp  = z_exp_norm;
+    assign pr_sig0 = zs0_norm;
+    assign pr_sig1 = zs1_norm;
+    wire [79:0] z_pc     = shared_round_z;
+    wire [5:0]  flags_pc = shared_round_flags;
     wire [79:0] z_normal_pc     = do_round ? z_pc : z_normal;
     wire [5:0]  flags_normal_pc = do_round
                                 ? (flags_pc | {4'd0, is_any_subn, 1'd0})

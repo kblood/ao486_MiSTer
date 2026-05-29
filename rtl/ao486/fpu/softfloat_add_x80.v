@@ -49,6 +49,15 @@ module softfloat_add_x80 (
     input  wire [79:0] b,
     input  wire [1:0]  precision,   // PR-2b.5u: PC = CW[9:8]; 11/01 = extended (inline)
     input  wire [1:0]  rc,          // PR-2b.5v: RC = CW[11:10]; 00=RNE (inline path)
+    // PR-2c.1 (iter 156): rounder hoisted to shared instance in execute_fpu.v.
+    // Pre-round triple exported to caller; rounded result fed back.  use_rounder
+    // mux stays here so the inline RNE/PC80 path is unchanged (zero regression).
+    output wire        pr_sign,
+    output wire signed [16:0] pr_exp,
+    output wire [63:0] pr_sig0,
+    output wire [63:0] pr_sig1,
+    input  wire [79:0] shared_round_z,
+    input  wire [5:0]  shared_round_flags,
     output wire [79:0] z,
     output wire [5:0]  flags        // {PE, UE, OE, ZE, DE, IE}
 );
@@ -385,18 +394,14 @@ module softfloat_add_x80 (
     // stays byte-identical → zero regression on the RNE oracle suites.
     wire        is_pc_narrow = (precision == 2'b00) || (precision == 2'b10);
     wire        use_rounder  = is_pc_narrow || (rc != 2'b00);
-    wire [79:0] z_pc;
-    wire [5:0]  flags_pc;
-    floatx80_round_rc u_round_rc (
-        .rc         (rc),
-        .precision  (precision),
-        .sign       (z_sign),
-        .z_exp_pre  (z_exp_pre),
-        .z_sig0_pre (z_sig0_pre),
-        .z_sig1_pre (z_sig1_pre),
-        .z          (z_pc),
-        .flags      (flags_pc)
-    );
+    // PR-2c.1 (iter 156): export pre-rounder triple; the shared rounder in
+    // execute_fpu.v computes the rounded result and routes it back.
+    assign pr_sign = z_sign;
+    assign pr_exp  = z_exp_pre;
+    assign pr_sig0 = z_sig0_pre;
+    assign pr_sig1 = z_sig1_pre;
+    wire [79:0] z_pc     = shared_round_z;
+    wire [5:0]  flags_pc = shared_round_flags;
     wire [79:0] z_normal_pc     = use_rounder ? z_pc : z_normal;
     wire [5:0]  flags_normal_pc = use_rounder
                                 ? (flags_pc | {4'd0, is_any_subn, 1'd0})

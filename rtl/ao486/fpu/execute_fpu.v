@@ -1737,45 +1737,133 @@ module execute_fpu (
     // PR-2b.5v (iter 150): directed rounding RC = CW[11:10] feeds the same
     // rounder.  rc=00 (RNE, FNINIT default) + PC=80 keeps the inline path so
     // default behaviour is byte-identical.
+    // PR-2c.1 (iter 156): the four primitives no longer instantiate their own
+    // floatx80_round_rc — they export a pre-rounder triple via pr_* ports and
+    // consume the shared rounder's result via shared_round_z/flags.  Saves
+    // ~3 of 4 ~1,075-ALUT copies ≈ ~3,200 ALUTs ≈ ~2,050 ALMs (4.9% of device,
+    // 31% of the iter-155 116% ALM overflow).
+    wire               pr_sign_add, pr_sign_sub, pr_sign_mul, pr_sign_div;
+    wire signed [16:0] pr_exp_add,  pr_exp_sub,  pr_exp_mul,  pr_exp_div;
+    wire        [63:0] pr_sig0_add, pr_sig0_sub, pr_sig0_mul, pr_sig0_div;
+    wire        [63:0] pr_sig1_add, pr_sig1_sub, pr_sig1_mul, pr_sig1_div;
+    wire        [79:0] shared_round_z;
+    wire        [5:0]  shared_round_flags;
+
     softfloat_add_x80 u_add (
-        .a         (op_a),
-        .b         (op_b),
-        .precision (cw[9:8]),
-        .rc        (cw[11:10]),
-        .z         (add_z),
-        .flags     (add_flags)
+        .a                  (op_a),
+        .b                  (op_b),
+        .precision          (cw[9:8]),
+        .rc                 (cw[11:10]),
+        .pr_sign            (pr_sign_add),
+        .pr_exp             (pr_exp_add),
+        .pr_sig0            (pr_sig0_add),
+        .pr_sig1            (pr_sig1_add),
+        .shared_round_z     (shared_round_z),
+        .shared_round_flags (shared_round_flags),
+        .z                  (add_z),
+        .flags              (add_flags)
     );
 
     softfloat_sub_x80 u_sub (
-        .a          (op_a),
-        .b          (op_b),
-        .z_sign_in  (op_a[79]),
-        .precision  (cw[9:8]),
-        .rc         (cw[11:10]),
-        .z          (sub_z),
-        .flags      (sub_flags)
+        .a                  (op_a),
+        .b                  (op_b),
+        .z_sign_in          (op_a[79]),
+        .precision          (cw[9:8]),
+        .rc                 (cw[11:10]),
+        .pr_sign            (pr_sign_sub),
+        .pr_exp             (pr_exp_sub),
+        .pr_sig0            (pr_sig0_sub),
+        .pr_sig1            (pr_sig1_sub),
+        .shared_round_z     (shared_round_z),
+        .shared_round_flags (shared_round_flags),
+        .z                  (sub_z),
+        .flags              (sub_flags)
     );
 
     softfloat_mul_x80 u_mul (
-        .a         (op_a),
-        .b         (op_b),
-        .precision (cw[9:8]),
-        .rc        (cw[11:10]),
-        .z         (mul_z),
-        .flags     (mul_flags)
+        .a                  (op_a),
+        .b                  (op_b),
+        .precision          (cw[9:8]),
+        .rc                 (cw[11:10]),
+        .pr_sign            (pr_sign_mul),
+        .pr_exp             (pr_exp_mul),
+        .pr_sig0            (pr_sig0_mul),
+        .pr_sig1            (pr_sig1_mul),
+        .shared_round_z     (shared_round_z),
+        .shared_round_flags (shared_round_flags),
+        .z                  (mul_z),
+        .flags              (mul_flags)
     );
 
     softfloat_div_x80 u_div (
-        .clk       (clk),
-        .rst       (~rst_n | exe_reset | init),  // mirror the FSM state-clear
-        .start     (div_start),
-        .a         (op_a),
-        .b         (op_b),
-        .precision (cw[9:8]),
-        .rc        (cw[11:10]),
-        .done      (div_done),
-        .z         (div_z),
-        .flags     (div_flags)
+        .clk                (clk),
+        .rst                (~rst_n | exe_reset | init),  // mirror the FSM state-clear
+        .start              (div_start),
+        .a                  (op_a),
+        .b                  (op_b),
+        .precision          (cw[9:8]),
+        .rc                 (cw[11:10]),
+        .pr_sign            (pr_sign_div),
+        .pr_exp             (pr_exp_div),
+        .pr_sig0            (pr_sig0_div),
+        .pr_sig1            (pr_sig1_div),
+        .shared_round_z     (shared_round_z),
+        .shared_round_flags (shared_round_flags),
+        .done               (div_done),
+        .z                  (div_z),
+        .flags              (div_flags)
+    );
+
+    // PR-2c.1 shared-rounder input mux.  Mirrors the sum_pre selection
+    // cascade exactly: KIND_DIV -> div, KIND_MUL -> mul, otherwise pick
+    // sub vs add via the use_sub_primitive heuristic (same-sign add ops
+    // route to sub when op signs differ).  This guarantees the rounder
+    // always sees the pre-round triple of the SAME primitive whose z is
+    // about to be selected by sum_pre.
+    wire arith_pick_sub = (op_a[79] ^ op_b[79]) ^ kind_lat[0];
+    reg               shared_pr_sign;
+    reg signed [16:0] shared_pr_exp;
+    reg        [63:0] shared_pr_sig0;
+    reg        [63:0] shared_pr_sig1;
+    always @* begin
+        case (kind_lat)
+            KIND_DIV: begin
+                shared_pr_sign = pr_sign_div;
+                shared_pr_exp  = pr_exp_div;
+                shared_pr_sig0 = pr_sig0_div;
+                shared_pr_sig1 = pr_sig1_div;
+            end
+            KIND_MUL: begin
+                shared_pr_sign = pr_sign_mul;
+                shared_pr_exp  = pr_exp_mul;
+                shared_pr_sig0 = pr_sig0_mul;
+                shared_pr_sig1 = pr_sig1_mul;
+            end
+            default: begin   // KIND_ADD or KIND_SUB
+                if (arith_pick_sub) begin
+                    shared_pr_sign = pr_sign_sub;
+                    shared_pr_exp  = pr_exp_sub;
+                    shared_pr_sig0 = pr_sig0_sub;
+                    shared_pr_sig1 = pr_sig1_sub;
+                end else begin
+                    shared_pr_sign = pr_sign_add;
+                    shared_pr_exp  = pr_exp_add;
+                    shared_pr_sig0 = pr_sig0_add;
+                    shared_pr_sig1 = pr_sig1_add;
+                end
+            end
+        endcase
+    end
+
+    floatx80_round_rc u_round_rc_shared (
+        .rc         (cw[11:10]),
+        .precision  (cw[9:8]),
+        .sign       (shared_pr_sign),
+        .z_exp_pre  (shared_pr_exp),
+        .z_sig0_pre (shared_pr_sig0),
+        .z_sig1_pre (shared_pr_sig1),
+        .z          (shared_round_z),
+        .flags      (shared_round_flags)
     );
 
     wire use_sub_primitive = (op_a[79] ^ op_b[79]) ^ kind_lat[0];
