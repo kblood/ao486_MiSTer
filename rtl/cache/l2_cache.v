@@ -45,7 +45,7 @@ module l2_cache #(parameter ADDRBITS = 24)
 
 
 // cache settings
-localparam LINES         = 128;
+localparam LINES         = 1024;
 localparam LINESIZE      = 8;
 localparam ASSOCIATIVITY = 4;	
 
@@ -623,6 +623,34 @@ generate
 			.wren_b(1'b0)
 		);
 	end
-endgenerate 
+endgenerate
+
+// PR-L1 (iter 105): L2 cache event probes — observability for L-track
+// pipeline-runtime baseline.  Sim-only; no functional change.  Five
+// event classes derived from state transitions:
+//   L2_HIT       — READONE → IDLE      (single-beat hit, ram_dout_ready=1)
+//   L2_HIT_BURST — READONE → READONE   (continuing-burst hit)
+//   L2_MISS      — READONE → FILLCACHE (no tag match, fetch from DDRAM)
+//   L2_FILL_DONE — FILLCACHE → READCACHE_OUT (line filled, cache_mux = victim/filled way)
+//   L2_WRITE     — WRITEONE → IDLE     (write-through commit; memory_we[way] set if write-hit)
+// Probe samples (state_prev, state) edge — exactly one event per
+// transition.  Per [[feedback-probe-before-endmodule-pattern]] canonical
+// "before endmodule" pattern; zero risk; easy removal.
+// synthesis translate_off
+reg [3:0] state_prev_dbg;
+always @(posedge CLK) state_prev_dbg <= state;
+always @(posedge CLK) begin
+    if (state_prev_dbg == READONE && state == IDLE)
+        $display("[%0t] L2_HIT       addr=%h way=%0d", $time, read_addr, cache_mux);
+    if (state_prev_dbg == READONE && state == READONE)
+        $display("[%0t] L2_HIT_BURST addr=%h way=%0d burst_left=%0d", $time, read_addr, cache_mux, burst_left);
+    if (state_prev_dbg == READONE && state == FILLCACHE)
+        $display("[%0t] L2_MISS      addr=%h", $time, read_addr);
+    if (state_prev_dbg == FILLCACHE && state == READCACHE_OUT)
+        $display("[%0t] L2_FILL_DONE addr=%h fill_way=%0d", $time, read_addr, cache_mux);
+    if (state_prev_dbg == WRITEONE && state == IDLE)
+        $display("[%0t] L2_WRITE     addr=%h memory_we=%b", $time, read_addr, memory_we);
+end
+// synthesis translate_on
 
 endmodule

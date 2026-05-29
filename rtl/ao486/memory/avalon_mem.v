@@ -256,6 +256,13 @@ always @(posedge clk) begin
                   state          <= STATE_READ;
                   counter        <= readburst_dword_length - 3'd1;
                   save_readburst <= readburst_dword_length;
+                  // PR2b4d-iter98 PROBE: log every read-burst start.
+                  // Captures address, len, dword-length (= burst count),
+                  // pre-counter, and the STALE bus_0/bus_1 from prior read.
+                  // Look for TEST-7's read window (FMUL m64 mem fetch).
+                  $display("[%0t] avalon_mem RSTART addr=%h len=%0d dwl=%0d cnt_init=%0d STALE bus_0=%h bus_1=%h",
+                           $time, readburst_address, readburst_length, readburst_dword_length,
+                           readburst_dword_length - 3'd1, bus_0, bus_1);
                end
                else if (readcode_do) begin
                   state   <= STATE_READ_CODE;
@@ -278,7 +285,18 @@ always @(posedge clk) begin
 		STATE_READ:
          if (avm_readdatavalid) begin
             counter <= counter - 3'd1;
-            if(!counter) state <= STATE_IDLE;
+            // PR2b4d-iter98 PROBE: log every read-burst beat capture.
+            // Tracks counter, save_readburst, incoming data, and which
+            // staging buffer it writes (bus_0 always, bus_1 conditional).
+            $display("[%0t] avalon_mem RBEAT counter=%0d srb=%0d data=%h bus_0_was=%h bus_1_was=%h write_bus_1=%0d",
+                     $time, counter, save_readburst, avm_readdata, bus_0, bus_1,
+                     (counter == 3'd2 || save_readburst == 2'd2));
+            if(!counter) begin
+               state <= STATE_IDLE;
+               // PR2b4d-iter98 PROBE: log final composed output at done.
+               $display("[%0t] avalon_mem RDONE addr_was=? final readburst_data=%h srb=%0d bus_0=%h bus_1=%h avm_rd=%h",
+                        $time, readburst_data, save_readburst, bus_0, bus_1, avm_readdata);
+            end
             else begin
                if(counter == 3'd2 || save_readburst == 2'd2) bus_1 <= avm_readdata;
                bus_0 <= avm_readdata;
