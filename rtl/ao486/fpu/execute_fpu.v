@@ -1752,6 +1752,25 @@ module execute_fpu (
     wire        [79:0] shared_subn_z;
     wire               shared_subn_pe;
 
+    // PR-2c.3 (iter 158): two shared floatx80_normalize instances feed
+    // add/sub/mul (which all normalize the SAME live op_a/op_b).  div keeps
+    // its own pair because it normalizes its internally-frozen a_reg/b_reg.
+    wire               norm_a_sign, norm_b_sign;
+    wire signed [16:0] norm_a_exp,  norm_b_exp;
+    wire        [63:0] norm_a_sig,  norm_b_sig;
+    floatx80_normalize u_norm_a_shared (
+        .a        (op_a),
+        .sign_out (norm_a_sign),
+        .exp_out  (norm_a_exp),
+        .sig_out  (norm_a_sig)
+    );
+    floatx80_normalize u_norm_b_shared (
+        .a        (op_b),
+        .sign_out (norm_b_sign),
+        .exp_out  (norm_b_exp),
+        .sig_out  (norm_b_sig)
+    );
+
     softfloat_add_x80 u_add (
         .a                  (op_a),
         .b                  (op_b),
@@ -1765,6 +1784,12 @@ module execute_fpu (
         .shared_round_flags (shared_round_flags),
         .shared_subn_z      (shared_subn_z),
         .shared_subn_pe     (shared_subn_pe),
+        .na_sign            (norm_a_sign),
+        .na_exp             (norm_a_exp),
+        .na_sig             (norm_a_sig),
+        .nb_sign            (norm_b_sign),
+        .nb_exp             (norm_b_exp),
+        .nb_sig             (norm_b_sig),
         .z                  (add_z),
         .flags              (add_flags)
     );
@@ -1783,6 +1808,12 @@ module execute_fpu (
         .shared_round_flags (shared_round_flags),
         .shared_subn_z      (shared_subn_z),
         .shared_subn_pe     (shared_subn_pe),
+        .na_sign            (norm_a_sign),
+        .na_exp             (norm_a_exp),
+        .na_sig             (norm_a_sig),
+        .nb_sign            (norm_b_sign),
+        .nb_exp             (norm_b_exp),
+        .nb_sig             (norm_b_sig),
         .z                  (sub_z),
         .flags              (sub_flags)
     );
@@ -1800,6 +1831,12 @@ module execute_fpu (
         .shared_round_flags (shared_round_flags),
         .shared_subn_z      (shared_subn_z),
         .shared_subn_pe     (shared_subn_pe),
+        .na_sign            (norm_a_sign),
+        .na_exp             (norm_a_exp),
+        .na_sig             (norm_a_sig),
+        .nb_sign            (norm_b_sign),
+        .nb_exp             (norm_b_exp),
+        .nb_sig             (norm_b_sig),
         .z                  (mul_z),
         .flags              (mul_flags)
     );

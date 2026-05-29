@@ -63,6 +63,15 @@ module softfloat_add_x80 (
     // port is needed; the subnormal result is routed back here.
     input  wire [79:0] shared_subn_z,
     input  wire        shared_subn_pe,
+    // PR-2c.3 (iter 158): floatx80_normalize(a)/(b) hoisted to two shared
+    // instances in execute_fpu.v (add/sub/mul share the SAME live op_a/op_b,
+    // so the normalized triples are identical across them).
+    input  wire               na_sign,
+    input  wire signed [16:0] na_exp,
+    input  wire        [63:0] na_sig,
+    input  wire               nb_sign,
+    input  wire signed [16:0] nb_exp,
+    input  wire        [63:0] nb_sig,
     output wire [79:0] z,
     output wire [5:0]  flags        // {PE, UE, OE, ZE, DE, IE}
 );
@@ -166,25 +175,13 @@ module softfloat_add_x80 (
     // negative post-normalize exps and any subsequent overflow into
     // 0x07FFF are observable.
     //--------------------------------------------------------------------
-    wire               a_sign;
-    wire signed [16:0] a_exp_s;
-    wire        [63:0] a_sig;
-    floatx80_normalize u_norm_a (
-        .a        (a),
-        .sign_out (a_sign),
-        .exp_out  (a_exp_s),
-        .sig_out  (a_sig)
-    );
-
-    wire               b_sign_unused;
-    wire signed [16:0] b_exp_s;
-    wire        [63:0] b_sig;
-    floatx80_normalize u_norm_b (
-        .a        (b),
-        .sign_out (b_sign_unused),
-        .exp_out  (b_exp_s),
-        .sig_out  (b_sig)
-    );
+    // PR-2c.3 (iter 158): normalized operands now from the two shared
+    // floatx80_normalize instances in execute_fpu.v.
+    wire               a_sign  = na_sign;
+    wire signed [16:0] a_exp_s = na_exp;
+    wire        [63:0] a_sig   = na_sig;
+    wire signed [16:0] b_exp_s = nb_exp;
+    wire        [63:0] b_sig   = nb_sig;
 
     // Same-sign path: sign of result equals sign of either input.
     wire        z_sign = a_sign;
