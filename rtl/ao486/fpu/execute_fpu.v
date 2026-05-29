@@ -317,7 +317,26 @@ module execute_fpu (
                              (exe_cmdex == `CMDEX_FLD_M32);
     wire is_fld_m64        = (exe_cmd  == `CMD_fpu_load_mem) &&
                              (exe_cmdex == `CMDEX_FLD_M64);
-    wire is_fld_mem        = is_fld_m32 | is_fld_m64;
+    // PR-2b.5v (iter 140): FILD m16/m32/m64 — signed-integer memory loads.
+    // Share the mem-form FLD push path 100% (TOP--, write new ST(0), classify
+    // the result tag) but route the operand through int_to_floatx80 instead of
+    // the float32/64 converters.  Folded into is_fld_mem below so all the
+    // is_fld_mem / is_fld_mem_lat plumbing (is_mem_form_now, is_op_active, the
+    // S_FETCH_A latch, the push machinery, the tag classify, the flags lane)
+    // engages unchanged; the ONLY divergence is the converter that produces
+    // mem_z, selected by is_fild_lat at the mem_z mux.  The integer conversion
+    // is exact (64-bit sig holds any 64-bit int), so FILD raises no exceptions
+    // (mem_de_flag/mem_ie_flag forced 0 for FILD).
+    wire is_fild_m16       = (exe_cmd  == `CMD_fpu_load_mem) &&
+                             (exe_cmdex == `CMDEX_FILD_M16);
+    wire is_fild_m32       = (exe_cmd  == `CMD_fpu_load_mem) &&
+                             (exe_cmdex == `CMDEX_FILD_M32);
+    wire is_fild_m64       = (exe_cmd  == `CMD_fpu_load_mem) &&
+                             (exe_cmdex == `CMDEX_FILD_M64);
+    wire is_fild_now       = is_fild_m16 | is_fild_m32 | is_fild_m64;
+    // int_to_floatx80 width selector: 0=m16, 1=m32, 2=m64.
+    wire [1:0] fild_width_now = is_fild_m64 ? 2'd2 : (is_fild_m32 ? 2'd1 : 2'd0);
+    wire is_fld_mem        = is_fld_m32 | is_fld_m64 | is_fild_now;
     // PR-2b.5g (iter 124): FLD m80fp — raw 80-bit load.  Kept OUT of is_fld_mem
     // (and is_mem_form_now) because there is NO converter: the bits ARE the
     // floatx80.  Its own latch routes the raw {hi16, lo64} straight to b_lat,
@@ -862,6 +881,13 @@ module execute_fpu (
     // (top_lat-1) but uses a different rf_wr_tag derivation (classification
     // of mem_z rather than copy of stsrc_tag_lat).
     reg        is_fld_mem_lat;
+    // PR-2b.5v (iter 140): FILD latch + integer-width selector.  is_fild_lat
+    // gates the mem_z mux onto int_to_floatx80 (instead of the float32/64
+    // converters) and forces mem_de_flag/mem_ie_flag = 0 (FILD is exception-
+    // free); fild_width_lat (0=m16/1=m32/2=m64) tells the primitive which
+    // sub-field of mem_data_lat to sign-extend.
+    reg        is_fild_lat;
+    reg [1:0]  fild_width_lat;
     // PR-2b.5g (iter 124): FLD m80fp latch + the captured high 16 bits.  The
     // low 64 bits arrive via the existing exe_mem_data -> mem_data_lat path
     // (FLD m80's last read beat is the qword); mem80_hi_lat holds {sign,exp}.
@@ -1128,6 +1154,8 @@ module execute_fpu (
             is_fxch_lat     <= 1'b0;
             is_fld_lat      <= 1'b0;
             is_fld_mem_lat  <= 1'b0;    // PR-2b.4k iter 77
+            is_fild_lat     <= 1'b0;    // PR-2b.5v iter 140
+            fild_width_lat  <= 2'd0;    // PR-2b.5v iter 140
             is_fld_m80_lat  <= 1'b0;    // PR-2b.5g iter 124
             mem80_hi_lat    <= 16'd0;   // PR-2b.5g iter 124
             is_fconst_lat   <= 1'b0;    // PR-2b.4n iter 112
@@ -1185,7 +1213,9 @@ module execute_fpu (
                         pop_twice_lat  <= pop_twice_now;
                         is_fxch_lat    <= is_fxch_sti;
                         is_fld_lat     <= is_fld_sti;
-                        is_fld_mem_lat <= is_fld_mem;    // PR-2b.4k iter 77
+                        is_fld_mem_lat <= is_fld_mem;    // PR-2b.4k iter 77 (now incl. FILD via is_fild_now)
+                        is_fild_lat    <= is_fild_now;   // PR-2b.5v iter 140
+                        fild_width_lat <= fild_width_now;// PR-2b.5v iter 140
                         is_fld_m80_lat <= is_fld_m80;    // PR-2b.5g iter 124
                         mem80_hi_lat   <= exe_mem_data_hi; // PR-2b.5g iter 124
                         is_fconst_lat  <= is_fconst;     // PR-2b.4n iter 112
@@ -1444,12 +1474,24 @@ module execute_fpu (
         .de (f64_to_x80_de),
         .ie (f64_to_x80_ie)
     );
+    // PR-2b.5v (iter 140): FILD integer converter, parallel to the f32/f64
+    // converters.  Runs combinationally off mem_data_lat; selected into mem_z
+    // by is_fild_lat below.  No de/ie outputs — the int->x80 conversion is
+    // exact and raises no exceptions.
+    wire [79:0] int_to_x80_z;
+    int_to_floatx80 u_int_to_x80 (
+        .a     (mem_data_lat),
+        .width (fild_width_lat),
+        .z     (int_to_x80_z)
+    );
     // mem_z / mem_de_flag / mem_ie_flag are forward-declared near the FSM's
     // forward-decl block (cmp_ie_now / sum_pre / etc) so the S_COMPUTE
     // always-block can read them before this mux.  Same Gotcha #9 pattern.
-    assign mem_z       = mem_fmt_lat[0] ? f64_to_x80_z  : f32_to_x80_z;
-    assign mem_de_flag = mem_fmt_lat[0] ? f64_to_x80_de : f32_to_x80_de;
-    assign mem_ie_flag = mem_fmt_lat[0] ? f64_to_x80_ie : f32_to_x80_ie;
+    // PR-2b.5v (iter 140): FILD takes priority — its int_to_x80_z replaces the
+    // float-converter output and forces DE/IE = 0 (FILD raises no exceptions).
+    assign mem_z       = is_fild_lat ? int_to_x80_z : (mem_fmt_lat[0] ? f64_to_x80_z  : f32_to_x80_z);
+    assign mem_de_flag = is_fild_lat ? 1'b0         : (mem_fmt_lat[0] ? f64_to_x80_de : f32_to_x80_de);
+    assign mem_ie_flag = is_fild_lat ? 1'b0         : (mem_fmt_lat[0] ? f64_to_x80_ie : f32_to_x80_ie);
 
     wire [79:0] arith_a = a_lat;
     // PR-2b.4d (iter 55): for mem-form, b is the converted mem operand

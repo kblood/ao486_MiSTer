@@ -421,6 +421,15 @@ wire cond_226 = dec_ready_modregrm_one   && decoder[7:0] == 8'hD9 && decoder[15:
 // family as FRNDINT (cond_221, D9 FC): CMD_fpu_unary / CMDEX_FSQRT, consumes the
 // ModRM byte, single source ST(0) (no src_lat override inside execute_fpu).
 wire cond_227 = dec_ready_modregrm_one   && decoder[7:0] == 8'hD9 && decoder[15:8] == 8'hFA; // FSQRT  (D9 FA)
+// PR-2b.5v (iter 140): FILD m32 (DB /0), FILD m16 (DF /0), FILD m64 (DF /5) —
+// signed-integer memory loads, mem-form (mod != 11).  Same byte layout as the
+// FLD m32/m64 mem-form loads (cond_206/207): opcode in decoder[7:0], modrm in
+// decoder[15:8], reg field decoder[13:11], mod decoder[15:14].  DB reg-form /0
+// is undefined and DF reg-form is FFREEP/FUCOMIP/FCOMIP (gated mod==11), so the
+// mem-forms are free.  All dispatch to CMD_fpu_load_mem; CMDEX selects width.
+wire cond_228 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDB && decoder[13:11] == 3'b000 && decoder[15:14] != 2'b11; // FILD m32 (DB /0)
+wire cond_229 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDF && decoder[13:11] == 3'b000 && decoder[15:14] != 2'b11; // FILD m16 (DF /0)
+wire cond_230 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDF && decoder[13:11] == 3'b101 && decoder[15:14] != 2'b11; // FILD m64 (DF /5)
 //======================================================== saves
 //======================================================== always
 //======================================================== sets
@@ -558,6 +567,9 @@ assign dec_cmd =
     (cond_206 && ~cond_4)? ( `CMD_fpu_load_mem) :
     (cond_207 && ~cond_4)? ( `CMD_fpu_load_mem) :
     (cond_220 && ~cond_4)? ( `CMD_fpu_load_mem) :  // PR-2b.5g iter 124: FLD m80fp
+    (cond_228 && ~cond_4)? ( `CMD_fpu_load_mem) :  // PR-2b.5v iter 140: FILD m32
+    (cond_229 && ~cond_4)? ( `CMD_fpu_load_mem) :  // PR-2b.5v iter 140: FILD m16
+    (cond_230 && ~cond_4)? ( `CMD_fpu_load_mem) :  // PR-2b.5v iter 140: FILD m64
     // PR-2b.4n (iter 112): FPU constant loads dispatch above the cond_67
     // reg-form catch-all so they win before the legacy CMD_fpu stub.
     (cond_208 && ~cond_4)? ( `CMD_fpu_const) :
@@ -1013,6 +1025,9 @@ assign consume_modregrm_one =
     (cond_206 && ~cond_4)? (`TRUE) :
     (cond_207 && ~cond_4)? (`TRUE) :
     (cond_220 && ~cond_4)? (`TRUE) :  // PR-2b.5g iter 124: FLD m80fp consumes the modregrm
+    (cond_228 && ~cond_4)? (`TRUE) :  // PR-2b.5v iter 140: FILD m32 consumes the modregrm
+    (cond_229 && ~cond_4)? (`TRUE) :  // PR-2b.5v iter 140: FILD m16 consumes the modregrm
+    (cond_230 && ~cond_4)? (`TRUE) :  // PR-2b.5v iter 140: FILD m64 consumes the modregrm
     // PR-2b.4n (iter 112): FPU constant loads consume their second byte
     // (E8..EE) like FCHS (D9 E0); assert consume_modregrm_one.
     (cond_208 && ~cond_4)? (`TRUE) :
@@ -1230,6 +1245,9 @@ assign dec_cmdex =
     (cond_206 && ~cond_4)? ( `CMDEX_FLD_M32) :
     (cond_207 && ~cond_4)? ( `CMDEX_FLD_M64) :
     (cond_220 && ~cond_4)? ( `CMDEX_FLD_M80) :  // PR-2b.5g iter 124: FLD m80fp
+    (cond_228 && ~cond_4)? ( `CMDEX_FILD_M32) : // PR-2b.5v iter 140: FILD m32
+    (cond_229 && ~cond_4)? ( `CMDEX_FILD_M16) : // PR-2b.5v iter 140: FILD m16
+    (cond_230 && ~cond_4)? ( `CMDEX_FILD_M64) : // PR-2b.5v iter 140: FILD m64
     // PR-2b.4n (iter 112): FPU constant-load CMDEX selection (drives the
     // execute_fpu constant-ROM mux).
     (cond_208 && ~cond_4)? ( `CMDEX_FLD1) :

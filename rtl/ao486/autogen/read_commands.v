@@ -358,6 +358,18 @@ wire cond_281 = rd_cmd == `CMD_fpu_load_mem && rd_cmdex == `CMDEX_FLD_M80;
 // mem-busy and not-yet-ready hazards.  CMD_fpu namespace (FNSTCW's twin), NOT
 // CMD_fpu_load_mem, so execute_fpu's stack FSM never sees it.
 wire cond_282 = rd_cmd == `CMD_fpu && rd_cmdex == `CMDEX_FLDCW_M16;
+// PR-2b.5v (iter 140): FILD m32/m16/m64 read-stage arms.  Same single-beat
+// mem-fetch trigger + rd_waiting hold as FLD m32/m64 (cond_261/262), differing
+// only in fetch LENGTH: FILD m32 = default 4-byte (no read_length arm, like
+// cond_261); FILD m16 = read_length_word (2 bytes, like FLDCW cond_282); FILD
+// m64 = read_length_qword (8 bytes, like FLD m64 cond_262).  The fetched
+// integer rides the standard read_data -> rd_read_data -> exe_fpu_mem_data lane
+// (right-aligned, zero-extended); execute_fpu's int_to_floatx80 re-derives the
+// signed value per width.  As with cond_261/262, rd_src_is_memory/rd_req_memory
+// stay deasserted (the FPU mem lane is orthogonal to the integer src lane).
+wire cond_283 = rd_cmd == `CMD_fpu_load_mem && rd_cmdex == `CMDEX_FILD_M32;
+wire cond_284 = rd_cmd == `CMD_fpu_load_mem && rd_cmdex == `CMDEX_FILD_M16;
+wire cond_285 = rd_cmd == `CMD_fpu_load_mem && rd_cmdex == `CMDEX_FILD_M64;
 // PR-2b.4d-g defensive read-stage plumbing (iter 81).
 // The existing PR-2b.4d-g mem-form arith ops (FADD/FSUB/FMUL/FDIV/FSUBR/
 // FDIVR/FCOM/FCOMP m32+m64 across 16 CMDEXes) landed via unit TBs that
@@ -644,6 +656,10 @@ assign read_virtual =
     (cond_281 && cond_3 && ~cond_9)? (`TRUE) :
     // PR-2b.5o (iter 129): FLDCW m16 mem-fetch trigger (single-beat 16-bit).
     (cond_282 && cond_3 && ~cond_9)? (`TRUE) :
+    // PR-2b.5v (iter 140): FILD m32/m16/m64 mem-fetch trigger (single-beat).
+    (cond_283 && cond_3 && ~cond_9)? (`TRUE) :
+    (cond_284 && cond_3 && ~cond_9)? (`TRUE) :
+    (cond_285 && cond_3 && ~cond_9)? (`TRUE) :
     // PR-2b.4d-g defensive plumbing (iter 81): catch-all for CMD_fpu_arith_mem
     // covering FADD/FSUB/FMUL/FDIV/FSUBR/FDIVR/FCOM/FCOMP m32+m64.
     (cond_263 && cond_3 && ~cond_9)? (`TRUE) :
@@ -1266,6 +1282,13 @@ assign rd_waiting =
     // PR-2b.5o (iter 129): FLDCW m16 — hold on mem-busy / until read ready.
     (cond_282 && cond_3 && cond_9)? (`TRUE) :
     (cond_282 && cond_3 && ~cond_9 && cond_5)? (`TRUE) :
+    // PR-2b.5v (iter 140): FILD m32/m16/m64 — hold on mem-busy / until read ready.
+    (cond_283 && cond_3 && cond_9)? (`TRUE) :
+    (cond_283 && cond_3 && ~cond_9 && cond_5)? (`TRUE) :
+    (cond_284 && cond_3 && cond_9)? (`TRUE) :
+    (cond_284 && cond_3 && ~cond_9 && cond_5)? (`TRUE) :
+    (cond_285 && cond_3 && cond_9)? (`TRUE) :
+    (cond_285 && cond_3 && ~cond_9 && cond_5)? (`TRUE) :
     // PR-2b.4d-g defensive plumbing (iter 81): rd_waiting arms for
     // CMD_fpu_arith_mem.  Same shape as FLD m32/m64 — mem-only, no
     // reg-form variant (D8/DC reg-form lives in CMD_fpu_arith).
@@ -1387,6 +1410,7 @@ assign read_length_word =
     (cond_246 && cond_247)? (`TRUE) :
     (cond_250 && cond_3)? (`TRUE) :
     (cond_282 && cond_3)? (`TRUE) :  // PR-2b.5o iter 129: FLDCW m16 = 2-byte fetch
+    (cond_284 && cond_3)? (`TRUE) :  // PR-2b.5v iter 140: FILD m16 = 2-byte fetch
     1'd0;
 assign address_xlat_transform =
     (cond_256)? (`TRUE) :
@@ -1612,4 +1636,5 @@ assign read_length_dword =
 assign read_length_qword =
     (cond_262 && cond_3 && ~cond_9)? (`TRUE) :
     (cond_264 && cond_3 && ~cond_9)? (`TRUE) :
+    (cond_285 && cond_3 && ~cond_9)? (`TRUE) :  // PR-2b.5v iter 140: FILD m64 = 8-byte fetch
     1'd0;

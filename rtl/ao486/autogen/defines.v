@@ -851,6 +851,15 @@
 // floatx80.  Needs a 2-beat read (word@addr+8 then qword@addr+0) since the
 // read DATA bus is 64-bit; the FSM lives in pipeline/read.v.
 `define CMDEX_FLD_M80         4'd2
+// PR-2b.5v (iter 140): FILD m16/m32/m64 (integer load) join the CMD_fpu_load_mem
+// namespace.  Signed-integer memory operand -> floatx80 (exact, no exceptions),
+// pushed onto the x87 stack via the same FLD push path.  execute_fpu derives the
+// integer width (16/32/64) from these CMDEX values and feeds the new
+// int_to_floatx80 primitive; the read stage picks the fetch length (word/dword/
+// qword) per width.  Encodings: FILD m32 = DB /0, FILD m16 = DF /0, FILD m64 = DF /5.
+`define CMDEX_FILD_M16        4'd3
+`define CMDEX_FILD_M32        4'd4
+`define CMDEX_FILD_M64        4'd5
 
 // PR-2b.4n (iter 112): FPU constant loads FLD1/FLDL2T/FLDL2E/FLDPI/
 // FLDLG2/FLDLN2/FLDZ (D9 E8..EE).  Each pushes a hardcoded 80-bit
