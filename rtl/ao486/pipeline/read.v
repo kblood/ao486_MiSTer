@@ -564,7 +564,10 @@ assign read_lock = rd_prefix_group_1_lock;
 // override below to fire only after step 1.  read_address/read_length/read_do/
 // read_for_rd_ready are all conditioned on is_fld_m80_op so the normal single-
 // beat read path is byte-for-byte unchanged for every other op.
-wire is_fld_m80_op = (rd_cmd == `CMD_fpu_load_mem) && (rd_cmdex == `CMDEX_FLD_M80);
+// PR-2b.5z (iter 152): FBLD m80 (packed-BCD load) reads the identical raw 80-bit
+// (10-byte) memory operand, so it shares this 2-beat FSM verbatim — the BCD->int
+// ->floatx80 conversion happens later in execute_fpu, not here.
+wire is_fld_m80_op = (rd_cmd == `CMD_fpu_load_mem) && ((rd_cmdex == `CMDEX_FLD_M80) || (rd_cmdex == `CMDEX_FBLD));
 wire fld_m80_beat_done = read_done && ~(read_page_fault) && ~(read_ac_fault);
 reg        fld_m80_step;      // 0 = word@+8 (hi16) ; 1 = qword@+0 (lo64)
 reg [15:0] fld_m80_hi;        // {sign,exp} captured at step 0

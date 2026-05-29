@@ -440,6 +440,14 @@ wire cond_232 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDB && decoder[13:
 wire cond_233 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDF && decoder[13:11] == 3'b010 && decoder[15:14] != 2'b11; // FIST  m16 (DF /2)
 wire cond_234 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDF && decoder[13:11] == 3'b011 && decoder[15:14] != 2'b11; // FISTP m16 (DF /3)
 wire cond_235 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDF && decoder[13:11] == 3'b111 && decoder[15:14] != 2'b11; // FISTP m64 (DF /7)
+// PR-2b.5z (iter 152): FBLD m80 (DF /4) + FBSTP m80 (DF /6) — packed-BCD load
+// and store, mem-form (mod != 11).  Same DF-group byte layout as FILD m16/FISTP
+// (opcode in decoder[7:0], modrm in decoder[15:8], reg field decoder[13:11], mod
+// decoder[15:14]).  reg-field /4 = FBLD -> CMD_fpu_load_mem, /6 = FBSTP ->
+// CMD_fpu_store_mem.  DF reg-form /4 and /6 are undefined, so the mem-forms are
+// free.  The 80-bit read/write reuse the FLD m80 / FSTP m80 multi-beat FSMs.
+wire cond_236 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDF && decoder[13:11] == 3'b100 && decoder[15:14] != 2'b11; // FBLD  m80 (DF /4)
+wire cond_237 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDF && decoder[13:11] == 3'b110 && decoder[15:14] != 2'b11; // FBSTP m80 (DF /6)
 //======================================================== saves
 //======================================================== always
 //======================================================== sets
@@ -580,6 +588,7 @@ assign dec_cmd =
     (cond_228 && ~cond_4)? ( `CMD_fpu_load_mem) :  // PR-2b.5v iter 140: FILD m32
     (cond_229 && ~cond_4)? ( `CMD_fpu_load_mem) :  // PR-2b.5v iter 140: FILD m16
     (cond_230 && ~cond_4)? ( `CMD_fpu_load_mem) :  // PR-2b.5v iter 140: FILD m64
+    (cond_236 && ~cond_4)? ( `CMD_fpu_load_mem) :  // PR-2b.5z iter 152: FBLD  m80
     // PR-2b.4n (iter 112): FPU constant loads dispatch above the cond_67
     // reg-form catch-all so they win before the legacy CMD_fpu stub.
     (cond_208 && ~cond_4)? ( `CMD_fpu_const) :
@@ -599,6 +608,7 @@ assign dec_cmd =
     (cond_233 && ~cond_4)? ( `CMD_fpu_store_mem) :  // PR-2b.5w iter 141: FIST  m16
     (cond_234 && ~cond_4)? ( `CMD_fpu_store_mem) :  // PR-2b.5w iter 141: FISTP m16
     (cond_235 && ~cond_4)? ( `CMD_fpu_store_mem) :  // PR-2b.5w iter 141: FISTP m64
+    (cond_237 && ~cond_4)? ( `CMD_fpu_store_mem) :  // PR-2b.5z iter 152: FBSTP m80
     // PR-2b.4i (iter 60): cond_67 reg-form catch-all relocated here, BELOW
     // cond_144..205, so reg-form D8..DF + modregrm_one falls back to the
     // legacy CMD_fpu / CMDEX_ESC_STEP_0 stub ONLY when no more-specific
@@ -1062,6 +1072,8 @@ assign consume_modregrm_one =
     (cond_233 && ~cond_4)? (`TRUE) :  // PR-2b.5w iter 141: FIST  m16 consumes the modrm
     (cond_234 && ~cond_4)? (`TRUE) :  // PR-2b.5w iter 141: FISTP m16 consumes the modrm
     (cond_235 && ~cond_4)? (`TRUE) :  // PR-2b.5w iter 141: FISTP m64 consumes the modrm
+    (cond_236 && ~cond_4)? (`TRUE) :  // PR-2b.5z iter 152: FBLD  m80 consumes the modrm
+    (cond_237 && ~cond_4)? (`TRUE) :  // PR-2b.5z iter 152: FBSTP m80 consumes the modrm
     // PR-2b.4i (iter 60): cond_67 reg-form catch-all relocated here so
     // un-implemented reg-form D8..DF + modregrm_one still asserts
     // consume_modregrm_one (advancing the decoder past the instruction)
@@ -1268,6 +1280,7 @@ assign dec_cmdex =
     (cond_228 && ~cond_4)? ( `CMDEX_FILD_M32) : // PR-2b.5v iter 140: FILD m32
     (cond_229 && ~cond_4)? ( `CMDEX_FILD_M16) : // PR-2b.5v iter 140: FILD m16
     (cond_230 && ~cond_4)? ( `CMDEX_FILD_M64) : // PR-2b.5v iter 140: FILD m64
+    (cond_236 && ~cond_4)? ( `CMDEX_FBLD) :      // PR-2b.5z iter 152: FBLD  m80
     // PR-2b.4n (iter 112): FPU constant-load CMDEX selection (drives the
     // execute_fpu constant-ROM mux).
     (cond_208 && ~cond_4)? ( `CMDEX_FLD1) :
@@ -1287,6 +1300,7 @@ assign dec_cmdex =
     (cond_233 && ~cond_4)? ( `CMDEX_FIST_M16) :  // PR-2b.5w iter 141: FIST  m16
     (cond_234 && ~cond_4)? ( `CMDEX_FISTP_M16) : // PR-2b.5w iter 141: FISTP m16
     (cond_235 && ~cond_4)? ( `CMDEX_FISTP_M64) : // PR-2b.5w iter 141: FISTP m64
+    (cond_237 && ~cond_4)? ( `CMDEX_FBSTP) :     // PR-2b.5z iter 152: FBSTP m80
     // PR-2b.4i (iter 60): cond_67's CMDEX_ESC_STEP_0 fallback for any
     // reg-form D8..DF not caught by cond_144..205.
     (cond_67 && ~cond_4)? ( `CMDEX_ESC_STEP_0) :

@@ -860,6 +860,12 @@
 `define CMDEX_FILD_M16        4'd3
 `define CMDEX_FILD_M32        4'd4
 `define CMDEX_FILD_M64        4'd5
+// PR-2b.5z (iter 152): FBLD m80 (DF /4) — packed-BCD load.  Reads the same raw
+// 80-bit (10-byte) memory operand as FLD m80 (2-beat read via the shared
+// is_fld_m80_op FSM in read.v), then converts the 18 packed-BCD digits ->
+// signed int64 (bcd_to_int64 + sign byte) -> floatx80 (int_to_floatx80, exact,
+// no exceptions) and pushes onto the x87 stack.  Same CMD_fpu_load_mem push path.
+`define CMDEX_FBLD            4'd6
 
 // PR-2b.4n (iter 112): FPU constant loads FLD1/FLDL2T/FLDL2E/FLDPI/
 // FLDLG2/FLDLN2/FLDZ (D9 E8..EE).  Each pushes a hardcoded 80-bit
@@ -903,3 +909,10 @@
 `define CMDEX_FIST_M32        4'd7
 `define CMDEX_FISTP_M32       4'd8
 `define CMDEX_FISTP_M64       4'd9
+// PR-2b.5z (iter 152): FBSTP m80 (DF /6) — packed-BCD store + pop.  Converts
+// ST(0) floatx80 -> signed int64 per CW.RC (floatx80_to_int, width=m64), takes
+// the magnitude, range-checks against 10^18-1 (-> #IA + packed-BCD indefinite
+// 0xFFFFC000000000000000 on overflow/NaN/Inf), else peels 18 BCD digits
+// (int64_to_bcd) + sign byte and writes 10 bytes via the SAME 3-step (4+4+2)
+// write FSM as FSTP m80 (shared is_fstp_m80_op in write.v), then pops.
+`define CMDEX_FBSTP           4'd10

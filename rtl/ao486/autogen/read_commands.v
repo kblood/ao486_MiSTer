@@ -349,7 +349,10 @@ wire cond_262 = rd_cmd == `CMD_fpu_load_mem && rd_cmdex == `CMDEX_FLD_M64;
 // read_length fully for is_fld_m80_op).  read_for_rd_ready is overridden in
 // read.v to fire only after beat 1, so the cond_5 (~read_for_rd_ready) hold
 // below naturally spans both beats.
-wire cond_281 = rd_cmd == `CMD_fpu_load_mem && rd_cmdex == `CMDEX_FLD_M80;
+// PR-2b.5z (iter 152): FBLD m80 reads the SAME raw 80-bit (10-byte) operand as
+// FLD m80 via the identical 2-beat FSM in read.v (is_fld_m80_op is broadened to
+// cover CMDEX_FBLD), so it shares this trigger + rd_waiting hold verbatim.
+wire cond_281 = rd_cmd == `CMD_fpu_load_mem && (rd_cmdex == `CMDEX_FLD_M80 || rd_cmdex == `CMDEX_FBLD);
 // PR-2b.5o (iter 129): FLDCW m16 read-stage arm.  Single-beat 16-bit memory
 // fetch (read_length_word -> 2 bytes); the loaded word rides the standard
 // read_data -> rd_read_data -> exe_fpu_mem_data lane (latched on e_load) and

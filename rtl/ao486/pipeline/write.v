@@ -736,7 +736,11 @@ assign write_rmw = write_rmw_virtual || write_rmw_system_dword;
 // (cond_279 && cond_1, cond_1 = wr_dst_is_memory && ~write_for_wr_ready) holds
 // the op in the write stage across all 3 writes — we report ready only when
 // step-2 completes, which is always AFTER a_lat was captured.
-wire is_fstp_m80_op = (wr_cmd == `CMD_fpu_store_mem) && (wr_cmdex == `CMDEX_FSTP_M80);
+// PR-2b.5z (iter 152): FBSTP m80 (packed-BCD store) writes the identical 10-byte
+// (4+4+2) payload via this same 3-step FSM — execute_fpu packs the BCD bytes (or
+// the packed-BCD indefinite) onto exe_fpu_store_data, so the write stage is width-
+// identical to FSTP m80.  Broaden is_fstp_m80_op to set max_step=2 + the 2-byte tail.
+wire is_fstp_m80_op = (wr_cmd == `CMD_fpu_store_mem) && ((wr_cmdex == `CMDEX_FSTP_M80) || (wr_cmdex == `CMDEX_FBSTP));
 // PR-2b.5c (iter 116): width-aware generalization.  is_fp_store_op = any
 // CMD_fpu_store_mem op; the per-op write-step count differs by width:
 //   m80 = 3 writes (4+4+2 B, steps 0..2);  m32 = 1 write (4 B, step 0);

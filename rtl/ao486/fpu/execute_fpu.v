@@ -344,6 +344,15 @@ module execute_fpu (
     // machinery (abs_new_top write, top_we/top_din) via is_fld_m80_lat below.
     wire is_fld_m80        = (exe_cmd  == `CMD_fpu_load_mem) &&
                              (exe_cmdex == `CMDEX_FLD_M80);
+    // PR-2b.5z (iter 152): FBLD m80 (DF /4) — packed-BCD load + push.  Reads the
+    // SAME raw 80-bit operand as FLD m80 (read.v's is_fld_m80_op covers it, so
+    // mem_data_lat = the low-8 BCD bytes and mem80_hi_lat = {sign-byte, 2 hi
+    // digits}), then converts the 18 packed digits -> signed int64 (bcd_to_int64
+    // + sign byte) -> floatx80 (int_to_floatx80, exact).  Kept OUT of is_fld_mem
+    // / is_mem_form (no float converter, no DE/IE) — its own b_lat arm assembles
+    // fbld_x80, then it joins the FLD push machinery (TOP--, classify, write).
+    wire is_fbld           = (exe_cmd  == `CMD_fpu_load_mem) &&
+                             (exe_cmdex == `CMDEX_FBLD);
     // PR-2b.4n (iter 112): FPU constant loads FLD1/FLDL2T/FLDL2E/FLDPI/
     // FLDLG2/FLDLN2/FLDZ (D9 E8..EE).  Each PUSHes a hardcoded 80-bit
     // constant onto the x87 stack; reuses the FLD push path exactly
@@ -429,6 +438,13 @@ module execute_fpu (
     wire is_fist_now       = is_fist_m16 | is_fistp_m16 | is_fist_m32 |
                              is_fistp_m32 | is_fistp_m64;
     wire is_fist_pop_now   = is_fistp_m16 | is_fistp_m32 | is_fistp_m64;
+    // PR-2b.5z (iter 152): FBSTP m80 (DF /6) — packed-BCD store + pop.  Converts
+    // ST(0) floatx80 -> signed int64 per CW.RC (floatx80_to_int, width=m64), takes
+    // the magnitude, and either stores 18 packed-BCD digits + sign byte (10 bytes
+    // via the FSTP m80 write FSM, shared in write.v) or — on |val| > 10^18-1 / NaN
+    // / Inf — raises #IA and stores the packed-BCD indefinite.  Always pops.
+    wire is_fbstp          = (exe_cmd  == `CMD_fpu_store_mem) &&
+                             (exe_cmdex == `CMDEX_FBSTP);
     wire [1:0] fist_width_now = (is_fist_m16 | is_fistp_m16) ? 2'd0 :
                                 (is_fist_m32 | is_fistp_m32) ? 2'd1 : 2'd2;
     // PR-2b.3n: unary control ops on ST(0).  Dispatched via the new
@@ -732,6 +748,7 @@ module execute_fpu (
                             is_fstp_m32 | is_fstp_m64 |               // PR-2b.5c/5d iter 116/117
                             is_fst_m32 | is_fst_m64 |                 // PR-2b.5e iter 118 (no-pop)
                             is_fist_now |                             // PR-2b.5w iter 141
+                            is_fbld | is_fbstp |                      // PR-2b.5z iter 152
                             is_unary_now | is_cmp_now |
                             is_frndint |                              // PR-2b.5n iter 127
                             is_fscale |                               // PR-2b.5p iter 130
@@ -815,7 +832,8 @@ module execute_fpu (
     wire pop_after_now  = is_arith_de | is_fstp_sti | is_cmp_pop_now |
                           is_fstp_m80 |                           // PR-2b.5a iter 113
                           is_fstp_m32 | is_fstp_m64 |             // PR-2b.5c/5d iter 116/117
-                          is_fist_pop_now;                        // PR-2b.5w iter 141 (FISTP only)
+                          is_fist_pop_now |                       // PR-2b.5w iter 141 (FISTP only)
+                          is_fbstp;                               // PR-2b.5z iter 152 (FBSTP always pops)
 
     wire op_active = exe_ready && is_op_active;
 
@@ -992,6 +1010,20 @@ module execute_fpu (
     // + fist_width_lat).  pop_after_now handles the /p variants at op-start.
     reg        is_fist_lat;
     reg [1:0]  fist_width_lat;
+    // PR-2b.5z (iter 152): FBLD / FBSTP latches + the packed-BCD converter nets.
+    // is_fbld_lat routes the b_lat assembly onto fbld_x80 (the BCD->int->floatx80
+    // result) and joins the FLD push machinery; is_fbstp_lat routes the store /
+    // pop / flags lanes like FISTP but with the 10-byte packed-BCD payload.  The
+    // converter result nets are declared HERE (ahead of the S_COMPUTE always block
+    // that reads fbld_x80 in b_lat and fbstp_flags in flags_lat) per the
+    // procedural-net decl-order rule; driven by the instances/assigns further below.
+    reg         is_fbld_lat;
+    reg         is_fbstp_lat;
+    wire [79:0] fbld_x80;            // FBLD: int_to_floatx80(signed BCD value)
+    wire [63:0] fbstp_save_z;        // FBSTP: floatx80_to_int(ST0, rc, m64) signed result
+    wire        fbstp_ie, fbstp_pe;  // FBSTP: converter #IA / inexact
+    wire [5:0]  fbstp_flags;         // FBSTP: {PE,UE,OE,ZE,DE,IE}
+    wire [79:0] fbstp_store_data;    // FBSTP: 10-byte packed BCD (or indefinite)
     // PR-2b.5f (iter 119): narrowing-store converter exception flags.  Declared
     // here (ahead of the flags_lat S_COMPUTE block that consumes them) because
     // ModelSim vlog requires nets used procedurally to be declared textually
@@ -1269,6 +1301,8 @@ module execute_fpu (
             is_fst_m64_lat  <= 1'b0;    // PR-2b.5e iter 118
             is_fist_lat     <= 1'b0;    // PR-2b.5w iter 141
             fist_width_lat  <= 2'd0;    // PR-2b.5w iter 141
+            is_fbld_lat     <= 1'b0;    // PR-2b.5z iter 152
+            is_fbstp_lat    <= 1'b0;    // PR-2b.5z iter 152
             is_fchs_lat     <= 1'b0;
             is_fabs_lat     <= 1'b0;
             is_fxam_lat     <= 1'b0;
@@ -1331,6 +1365,8 @@ module execute_fpu (
                         is_fst_m64_lat  <= is_fst_m64;   // PR-2b.5e iter 118
                         is_fist_lat     <= is_fist_now;     // PR-2b.5w iter 141
                         fist_width_lat  <= fist_width_now;  // PR-2b.5w iter 141
+                        is_fbld_lat     <= is_fbld;         // PR-2b.5z iter 152
+                        is_fbstp_lat    <= is_fbstp;        // PR-2b.5z iter 152
                         is_fchs_lat    <= is_fchs;
                         is_fabs_lat    <= is_fabs;
                         is_fxam_lat    <= is_fxam;
@@ -1388,7 +1424,8 @@ module execute_fpu (
                     // from the captured halves — no converter (the bits ARE the
                     // floatx80).  Takes priority over the m32/m64 mem_z path
                     // (is_mem_form_lat is 0 for FLD m80, but be explicit).
-                    b_lat           <= is_fld_m80_lat ? {mem80_hi_lat, mem_data_lat} :
+                    b_lat           <= is_fbld_lat    ? fbld_x80 :          // PR-2b.5z iter 152: BCD->int->floatx80
+                                       is_fld_m80_lat ? {mem80_hi_lat, mem_data_lat} :
                                        is_mem_form_lat ? mem_z : rf_rd_data;
                     stsrc_empty_lat <= (rf_rd_tag == 2'b11);
                     stsrc_tag_lat   <= rf_rd_tag;
@@ -1418,6 +1455,12 @@ module execute_fpu (
                                        // (inexact) arise from an integer store — no UE/OE/ZE, and FIST
                                        // does NOT raise DE on a denormal source (Bochs convention).
                                        is_fist_lat ? {fist_pe, 1'b0, 1'b0, 1'b0, 1'b0, fist_ie} :
+                                       // PR-2b.5z (iter 152): FBSTP flags.  {PE,UE,OE,ZE,DE,IE} =
+                                       // {pe & ~ia, 0,0,0,0, ia}; IA on out-of-range / NaN / Inf (stores
+                                       // packed-BCD indefinite), else PE on a rounded (inexact) integer.
+                                       // No UE/OE/ZE/DE from a packed-BCD store.  Must precede the 6'd0
+                                       // control-op arm (is_fbstp_lat is NOT in that OR-list).
+                                       is_fbstp_lat ? fbstp_flags :
                                        // PR-2b.5n (iter 127): FRNDINT flags.  {PE,UE,OE,ZE,DE,IE} =
                                        // {pe,0,0,0,de,ie}; OE/UE/ZE never arise from round-to-int.
                                        // Must precede the 6'd0 control-op arm (is_frndint_lat is NOT
@@ -1446,6 +1489,7 @@ module execute_fpu (
                                        (is_fxch_lat | is_fld_lat | is_fst_lat |
                                         is_fstp_m80_lat |                       // PR-2b.5a iter 113: verbatim 80-bit store, no exceptions
                                         is_fld_m80_lat |                        // PR-2b.5g iter 124: verbatim 80-bit load, no exceptions (even on SNaN)
+                                        is_fbld_lat |                           // PR-2b.5z iter 152: BCD load is exact (18 digits < 2^60), no exceptions
                                         is_fchs_lat | is_fabs_lat | is_fxam_lat |
                                         is_ffree_lat | is_fnop_lat |
                                         is_fdecstp_lat | is_fincstp_lat |
@@ -1809,6 +1853,44 @@ module execute_fpu (
         .ie    (fist_ie),
         .pe    (fist_pe)
     );
+    // PR-2b.5z (iter 152): FBLD m80 converter chain.  The 80-bit packed-BCD memory
+    // operand arrived via the shared FLD m80 2-beat read: mem_data_lat = bytes 0-7
+    // (digits 0..15), mem80_hi_lat = {byte9, byte8} where byte8 = {digit17,digit16}
+    // and byte9 bit15 = the sign.  Reassemble the 18-nibble magnitude, fold it to a
+    // 64-bit binary value (bcd_to_int64), apply the sign as two's complement, and
+    // widen to floatx80 (int_to_floatx80, width=m64).  Exact (18 digits < 10^18 <
+    // 2^60), so no exception flags.  Combinational; fbld_x80 feeds b_lat at S_COMPUTE.
+    wire [71:0] fbld_bcd  = {mem80_hi_lat[7:0], mem_data_lat[63:0]};
+    wire [63:0] fbld_val;
+    bcd_to_int64 u_bcd_to_int64 (.bcd(fbld_bcd), .val(fbld_val));
+    wire        fbld_sign = mem80_hi_lat[15];
+    wire [63:0] fbld_int  = fbld_sign ? (~fbld_val + 64'd1) : fbld_val;
+    int_to_floatx80 u_fbld_int_to_x80 (.a(fbld_int), .width(2'd2), .z(fbld_x80));
+    // PR-2b.5z (iter 152): FBSTP m80 converter chain.  Round ST(0) to a signed int64
+    // per CW.RC (floatx80_to_int, width=m64), take the magnitude, and range-check it
+    // against 10^18-1 (the largest 18-digit value).  On overflow / NaN / Inf
+    // (fbstp_ie from the converter, or fbstp_range_ovf) raise #IA and store the
+    // packed-BCD indefinite 0xFFFFC000000000000000; else peel 18 BCD digits
+    // (int64_to_bcd) and assemble {sign-byte, 2 hi digits, 16 lo digits}.  The
+    // sign byte takes ST(0)'s sign bit so -0 stores as a negative zero.  store_data
+    // maps [31:0]@+0 / [63:32]@+4 / [79:64]@+8 in write.v's 3-step (4+4+2) FSM.
+    floatx80_to_int u_fbstp_to_int (
+        .a     (a_lat),
+        .rc    (cw[11:10]),
+        .width (2'd2),
+        .z     (fbstp_save_z),
+        .ie    (fbstp_ie),
+        .pe    (fbstp_pe)
+    );
+    wire        fbstp_sign      = a_lat[79];
+    wire [63:0] fbstp_mag       = fbstp_save_z[63] ? (~fbstp_save_z + 64'd1) : fbstp_save_z;
+    wire        fbstp_range_ovf = (fbstp_mag > 64'd999999999999999999);  // > 10^18 - 1
+    wire        fbstp_ia        = fbstp_ie | fbstp_range_ovf;
+    wire [71:0] fbstp_bcd;
+    int64_to_bcd u_int64_to_bcd (.val(fbstp_mag[59:0]), .bcd(fbstp_bcd));
+    assign fbstp_store_data = fbstp_ia ? 80'hFFFFC000000000000000
+                                       : {fbstp_sign, 7'd0, fbstp_bcd};
+    assign fbstp_flags      = {(~fbstp_ia & fbstp_pe), 1'b0, 1'b0, 1'b0, 1'b0, fbstp_ia};
     // PR-2b.5n (iter 127): FRNDINT round-to-integer.  Fed by a_lat (ST(0),
     // latched at S_FETCH_B) and the live rounding-control field cw[11:10];
     // rndint_z drives rf_wr_data and rndint_pe/de/ie drive flags_lat when
@@ -1904,13 +1986,17 @@ module execute_fpu (
                          (is_fstp_m64_lat || is_fst_m64_lat) ? {16'd0, fstp_m64_z} :
                          // PR-2b.5w (iter 141): FIST/FISTP — the int rides the low
                          // bytes; write.v takes [15:0]/[31:0]/[63:0] per width.
-                         (is_fist_lat) ? {16'd0, fist_z} : a_lat;
+                         (is_fist_lat) ? {16'd0, fist_z} :
+                         // PR-2b.5z (iter 152): FBSTP — full 80-bit packed BCD (or
+                         // indefinite); write.v's m80 FSM emits all 10 bytes (4+4+2).
+                         (is_fbstp_lat) ? fbstp_store_data : a_lat;
     // PR-2b.5e (iter 118): FST m32/m64 share the window.  For the no-pop ops the
     // FSM never enters S_POP, but the latch in write.v fires during S_COMPUTE
     // (the write stage runs concurrently with the FPU FSM, retiring early), so
     // the S_RETIRE-and-earlier window suffices; the S_POP term is dead for FST.
     assign store_ready = (is_fstp_m80_lat || is_fstp_m32_lat || is_fstp_m64_lat ||
-                          is_fst_m32_lat  || is_fst_m64_lat  || is_fist_lat) &&
+                          is_fst_m32_lat  || is_fst_m64_lat  || is_fist_lat ||
+                          is_fbstp_lat) &&                       // PR-2b.5z iter 152
                          ((state == S_COMPUTE) || (state == S_POST) ||
                           (state == S_RETIRE)  || (state == S_POP));
 
@@ -1951,6 +2037,7 @@ module execute_fpu (
                                   (is_fld_lat |
                                    is_fld_mem_lat |
                                    is_fld_m80_lat |                       // PR-2b.5g iter 124
+                                   is_fbld_lat |                          // PR-2b.5z iter 152: BCD load push
                                    is_fconst_lat)   ? abs_new_top      :  // PR-2b.4k iter 77 / 4n iter 112
                                   is_fdecstp_lat    ? (top_lat - 3'd1) :
                                   is_fincstp_lat    ? (top_lat + 3'd1) :
@@ -1961,6 +2048,7 @@ module execute_fpu (
                                   ((state == S_RETIRE) && (is_fld_lat |
                                                            is_fld_mem_lat |    // PR-2b.4k iter 77
                                                            is_fld_m80_lat |    // PR-2b.5g iter 124
+                                                           is_fbld_lat |       // PR-2b.5z iter 152: BCD load push
                                                            is_fconst_lat |     // PR-2b.4n iter 112
                                                            is_fdecstp_lat |
                                                            is_fincstp_lat));
@@ -1998,6 +2086,7 @@ module execute_fpu (
                         (is_fld_lat |
                          is_fld_mem_lat |
                          is_fld_m80_lat |                      // PR-2b.5g iter 124: push dest
+                         is_fbld_lat |                         // PR-2b.5z iter 152: BCD load push dest
                          is_fconst_lat)     ? abs_new_top :   // PR-2b.4k iter 77 / 4n iter 112: push dest
                         dst_is_sti_lat      ? abs_stsrc   :   // arith-DE / FST / FSTP
                                               abs_st0;
@@ -2016,6 +2105,7 @@ module execute_fpu (
                         is_fld_lat         ? b_lat :          // old ST(i) data (reg-form)
                         is_fld_mem_lat     ? b_lat :          // PR-2b.4k iter 77: converted mem_z (S_COMPUTE sets b_lat=mem_z under is_mem_form_lat)
                         is_fld_m80_lat     ? b_lat :          // PR-2b.5g iter 124: raw {hi16, lo64} floatx80 (S_COMPUTE assembled it)
+                        is_fbld_lat        ? b_lat :          // PR-2b.5z iter 152: BCD->floatx80 (S_COMPUTE set b_lat=fbld_x80)
                         is_fconst_lat      ? fconst_lat :     // PR-2b.4n iter 112: hardcoded x87 constant
                         is_fst_lat         ? a_lat :          // FST/FSTP: ST(0) data
                         is_fchs_lat        ? fchs_result :    // FCHS: ~bit79 of ST(0)
@@ -2095,6 +2185,7 @@ module execute_fpu (
                         is_fld_lat          ? stsrc_tag_lat :  // copy ST(i) tag (reg-form FLD)
                         is_fld_mem_lat      ? fld_mem_tag   :  // PR-2b.4k iter 77: classify mem_z
                         is_fld_m80_lat      ? fld_m80_tag   :  // PR-2b.5g iter 124: classify raw floatx80
+                        is_fbld_lat         ? fld_m80_tag   :  // PR-2b.5z iter 152: classify BCD->floatx80 (Zero/Valid; never NaN/Inf/denormal)
                         is_fconst_lat       ? fconst_tag_lat:  // PR-2b.4n iter 112: precomputed (Zero/Valid)
                         is_fst_lat          ? st0_tag_lat   :  // FST/FSTP: copy ST(0) tag
                         (is_fchs_lat | is_fabs_lat) ? st0_tag_lat :  // FCHS/FABS: preserve ST(0) tag
@@ -2129,6 +2220,7 @@ module execute_fpu (
                                             && ~is_fst_m32_lat    // PR-2b.5e iter 118: dest is memory, no regfile data write
                                             && ~is_fst_m64_lat    // PR-2b.5e iter 118: dest is memory, no regfile data write
                                             && ~is_fist_lat       // PR-2b.5w iter 141: dest is memory, no regfile data write
+                                            && ~is_fbstp_lat      // PR-2b.5z iter 152: dest is memory, no regfile data write
                                             && (~is_fcmov_lat | fcmov_taken_lat)) ||
                         (state == S_POP) ||
                         (state == S_POP2) ||    // PR-2b.3q: second tag-Empty write
