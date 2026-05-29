@@ -861,7 +861,7 @@ module execute_fpu (
                             // 1-cycle S_COMPUTE->S_POST path.  This state is
                             // invisible to all outputs (they're gated on
                             // S_RETIRE/S_POP/S_FXCH2/S_POP2/S_XTRACT2).
-        S_REMWAIT = 4'd11;  // PR-2b.5x (iter 146, synth-unblock Slice 3b):
+        S_REMWAIT = 4'd11,  // PR-2b.5x (iter 146, synth-unblock Slice 3b):
                             // FPREM/FPREM1-only multi-cycle wait.  floatx80_remainder
                             // is now CLOCKED (Slice 3a, af075d3); for is_fprem_any_lat
                             // ops S_COMPUTE pulses rem_start (1 cyc) then parks here
@@ -873,6 +873,19 @@ module execute_fpu (
                             // the S_RETIRE arms reading them (rf_wr_data, fprem_tag,
                             // fprem_cc) stay valid.  Like S_DIVWAIT this state is
                             // invisible to all outputs (gated on S_RETIRE/S_POP/...).
+        S_SQRTWAIT = 4'd12; // PR-2b.5x (iter 149, synth-unblock Slice 4c):
+                            // FSQRT-only multi-cycle wait.  floatx80_sqrt is now
+                            // CLOCKED (Slice 4b, 9de3a7e) driving seq_isqrt_128; for
+                            // is_fsqrt_lat ops S_COMPUTE pulses sqrt_start (1 cyc) then
+                            // parks here until sqrt_done (~64 cyc for the computed-root
+                            // path, ~2 cyc for special/zero), where flags_lat gets
+                            // (re-)registered with the now-valid sqrt_flags and we
+                            // advance to S_POST.  sqrt_z HOLDS after sqrt_done, so the
+                            // S_RETIRE arms reading it (rf_wr_data, fsqrt_tag) stay
+                            // valid.  FSQRT is single-source unary (KIND_ADD, not the
+                            // KIND_DIV rail; is_fprem_any_lat=0) so div_start/rem_start
+                            // stay 0 — the three waits never overlap.  Like S_DIVWAIT
+                            // this state is invisible to all outputs.
 
     reg [3:0]  state;
 
@@ -1171,6 +1184,17 @@ module execute_fpu (
     wire        rem_start = (state == S_COMPUTE) && is_fprem_any_lat;
     wire        rem_done;
 
+    // PR-2b.5x (iter 149, synth-unblock Slice 4c): the floatx80_sqrt primitive is
+    // now CLOCKED (Slice 4b, 9de3a7e) driving seq_isqrt_128.  sqrt_start is a
+    // NATURAL 1-cycle pulse — high only during the single S_COMPUTE cycle an FSQRT
+    // op occupies before it parks in S_SQRTWAIT, so u_floatx80_sqrt (idle then)
+    // latches its a (a_lat) exactly once and never re-starts.  sqrt_done is
+    // forward-declared here (Gotcha #9) because the FSM's S_SQRTWAIT arm reads it
+    // above the instantiation that drives it.  FSQRT is KIND_ADD (not the KIND_DIV
+    // rail) and is_fprem_any_lat=0, so div_start/rem_start stay 0 for it.
+    wire        sqrt_start = (state == S_COMPUTE) && is_fsqrt_lat;
+    wire        sqrt_done;
+
     // PR-2b.3e: es_now / unmasked_flags forward-declared here because the
     // FSM's S_RETIRE→S_POP transition rule reads es_now (gating the pop
     // on ~es_now to honour SDM §8.1.5).  Without the forward declaration
@@ -1449,7 +1473,8 @@ module execute_fpu (
                     // overwritten in S_REMWAIT.  rem_start is high this cycle (and only
                     // this cycle).  Every other op keeps the 1-cycle S_COMPUTE->S_POST.
                     state           <= (kind_lat == KIND_DIV) ? S_DIVWAIT :
-                                       is_fprem_any_lat       ? S_REMWAIT : S_POST;
+                                       is_fprem_any_lat       ? S_REMWAIT :
+                                       is_fsqrt_lat           ? S_SQRTWAIT : S_POST;
                 end
 
                 // S_DIVWAIT (PR-2b.5x iter 144): hold while the clocked
@@ -1487,6 +1512,24 @@ module execute_fpu (
                 S_REMWAIT: begin
                     if (rem_done) begin
                         flags_lat <= rem_flags;
+                        state     <= S_POST;
+                    end
+                end
+
+                // S_SQRTWAIT (PR-2b.5x iter 149): hold while the clocked
+                // floatx80_sqrt runs.  sqrt_start was pulsed for the single
+                // S_COMPUTE cycle that preceded this state, so the primitive already
+                // froze its a (a_lat — a single source, no .b mux unlike FSCALE/
+                // FPREM).  On sqrt_done, sqrt_flags is valid and held; re-register
+                // flags_lat with it (the is_fsqrt_lat ? sqrt_flags arm of the
+                // S_COMPUTE cascade was STALE — the primitive only just latched a_lat
+                // that cycle).  sqrt_z also holds, so the S_RETIRE arms reading it
+                // (rf_wr_data, fsqrt_tag) stay valid.  FSQRT is reg-only (no mem-form
+                // DE/IE OR — unlike S_DIVWAIT).  fpu_busy stays high throughout
+                // (state != S_IDLE) so the pipeline stalls; no output fires here.
+                S_SQRTWAIT: begin
+                    if (sqrt_done) begin
+                        flags_lat <= sqrt_flags;
                         state     <= S_POST;
                     end
                 end
@@ -1829,11 +1872,20 @@ module execute_fpu (
     // PR-2b.5t (iter 137): FSQRT.  SINGLE operand a = ST(0) (a_lat, stable from
     // S_FETCH_B through S_RETIRE — no S_COMPUTE/b_lat timing mux, unlike FSCALE/
     // FPREM, because there is no second source).  sqrt_z drives rf_wr_data and
-    // sqrt_flags drives flags_lat when is_fsqrt_lat.  Combinational.
+    // sqrt_flags drives flags_lat when is_fsqrt_lat.
+    // PR-2b.5x (iter 149, synth-unblock Slice 4c): now CLOCKED (drives
+    // seq_isqrt_128).  clk/rst/start/done added; sqrt_start (1-cycle, S_COMPUTE
+    // only) latches a internally so .a only needs to be valid at that start edge —
+    // a_lat is stable from S_FETCH_B so no timing mux is needed (unlike FPREM's .b).
+    // rst mirrors the FSM state-clear.
     floatx80_sqrt u_floatx80_sqrt (
+        .clk   (clk),
+        .rst   (~rst_n | exe_reset | init),
+        .start (sqrt_start),
         .a     (a_lat),
         .z     (sqrt_z),
-        .flags (sqrt_flags)
+        .flags (sqrt_flags),
+        .done  (sqrt_done)
     );
 
     // PR-2b.5a (iter 113): FSTP m80 raw-store outputs.  store_data is the
