@@ -50,6 +50,7 @@ module softfloat_sub_x80 (
     input  wire [79:0] a,
     input  wire [79:0] b,
     input  wire        z_sign_in,
+    input  wire [1:0]  precision,   // PR-2b.5u: PC = CW[9:8]; 11/01 = extended (inline)
     output wire [79:0] z,
     output wire [5:0]  flags        // {PE, UE, OE, ZE, DE, IE}
 );
@@ -315,12 +316,38 @@ module softfloat_sub_x80 (
     // denormal.  Doesn't enter the override cascade arms.
     wire [5:0]  flags_normal_w_de = flags_normal | {4'd0, is_any_subn, 1'd0};
 
+    //--------------------------------------------------------------------
+    // PR-2b.5u (iter 139): precision-control (PC = CW[9:8]) narrowing.
+    // Same shared rounder, fed the UNROUNDED (z_sign_main, z_exp_norm,
+    // zs0_norm, zs1_norm) — the exact triple this primitive's inline
+    // rounder and floatx80_pack_subn already consume.  Gated on
+    // ~result_zero: an exact cancellation is already +0 and must keep its
+    // forced-positive zero encoding (not be re-rounded by the helper).
+    //--------------------------------------------------------------------
+    wire        is_pc_narrow = (precision == 2'b00) || (precision == 2'b10);
+    wire        do_pc        = is_pc_narrow && ~result_zero;
+    wire [79:0] z_pc;
+    wire [5:0]  flags_pc;
+    floatx80_round_pc u_round_pc (
+        .precision  (precision),
+        .sign       (z_sign_main),
+        .z_exp_pre  (z_exp_norm),
+        .z_sig0_pre (zs0_norm),
+        .z_sig1_pre (zs1_norm),
+        .z          (z_pc),
+        .flags      (flags_pc)
+    );
+    wire [79:0] z_normal_pc     = do_pc ? z_pc : z_normal;
+    wire [5:0]  flags_normal_pc = do_pc
+                                ? (flags_pc | {4'd0, is_any_subn, 1'd0})
+                                : flags_normal_w_de;
+
     // Override cascade: NaN > Inf > normal(+DE if denormal input).
     assign z     = is_any_nan ? z_nan
                  : is_any_inf ? z_inf
-                              : z_normal;
+                              : z_normal_pc;
     assign flags = is_any_nan ? flags_nan
                  : is_any_inf ? flags_inf
-                              : flags_normal_w_de;
+                              : flags_normal_pc;
 
 endmodule

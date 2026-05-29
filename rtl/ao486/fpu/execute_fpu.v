@@ -1465,33 +1465,42 @@ module execute_fpu (
     wire [79:0] op_b = reverse_lat ? arith_a : arith_b;
     // sum_pre / flags_pre are forward-declared above the FSM.
 
+    // PR-2b.5u (iter 139): precision-control field PC = CW[9:8] drives the
+    // four arith primitives' shared floatx80_round_pc narrowing path.  The
+    // live cw is already an input here (used for the RC/mask logic); CW[9:8]
+    // = 11 (extended, FNINIT default) keeps the inline PC=80 path so default
+    // behaviour is byte-identical.
     softfloat_add_x80 u_add (
-        .a     (op_a),
-        .b     (op_b),
-        .z     (add_z),
-        .flags (add_flags)
+        .a         (op_a),
+        .b         (op_b),
+        .precision (cw[9:8]),
+        .z         (add_z),
+        .flags     (add_flags)
     );
 
     softfloat_sub_x80 u_sub (
         .a          (op_a),
         .b          (op_b),
         .z_sign_in  (op_a[79]),
+        .precision  (cw[9:8]),
         .z          (sub_z),
         .flags      (sub_flags)
     );
 
     softfloat_mul_x80 u_mul (
-        .a     (op_a),
-        .b     (op_b),
-        .z     (mul_z),
-        .flags (mul_flags)
+        .a         (op_a),
+        .b         (op_b),
+        .precision (cw[9:8]),
+        .z         (mul_z),
+        .flags     (mul_flags)
     );
 
     softfloat_div_x80 u_div (
-        .a     (op_a),
-        .b     (op_b),
-        .z     (div_z),
-        .flags (div_flags)
+        .a         (op_a),
+        .b         (op_b),
+        .precision (cw[9:8]),
+        .z         (div_z),
+        .flags     (div_flags)
     );
 
     wire use_sub_primitive = (op_a[79] ^ op_b[79]) ^ kind_lat[0];

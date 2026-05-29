@@ -74,6 +74,7 @@
 module softfloat_div_x80 (
     input  wire [79:0] a,
     input  wire [79:0] b,
+    input  wire [1:0]  precision,   // PR-2b.5u: PC = CW[9:8]; 11/01 = extended (inline)
     output wire [79:0] z,
     output wire [5:0]  flags        // {PE, UE, OE, ZE, DE, IE}
 );
@@ -343,6 +344,33 @@ module softfloat_div_x80 (
     // PR-2b.3i: OR DE into normal-path flags when any input is denormal.
     wire [5:0]  flags_normal_w_de = flags_normal | {4'd0, is_any_subn, 1'd0};
 
+    //--------------------------------------------------------------------
+    // PR-2b.5u (iter 139): precision-control (PC = CW[9:8]) narrowing.
+    // Shared rounder fed the UNROUNDED (z_sign, z_exp_pre, zSig0, zSig1)
+    // — the same triple this primitive's inline rounder and
+    // floatx80_pack_subn consume.  Gated on ~ze_now & ~ie_now so the
+    // finite/0 (ZE→Inf) and 0/0 (IE→QNaN_INDEFINITE) special encodings are
+    // preserved; the helper still covers the genuine OE/UE finite-quotient
+    // cases.  PC=80 keeps z_normal byte-identical.
+    //--------------------------------------------------------------------
+    wire        is_pc_narrow = (precision == 2'b00) || (precision == 2'b10);
+    wire        do_pc        = is_pc_narrow && ~ze_now && ~ie_now;
+    wire [79:0] z_pc;
+    wire [5:0]  flags_pc;
+    floatx80_round_pc u_round_pc (
+        .precision  (precision),
+        .sign       (z_sign),
+        .z_exp_pre  (z_exp_pre),
+        .z_sig0_pre (zSig0),
+        .z_sig1_pre (zSig1),
+        .z          (z_pc),
+        .flags      (flags_pc)
+    );
+    wire [79:0] z_normal_pc     = do_pc ? z_pc : z_normal;
+    wire [5:0]  flags_normal_pc = do_pc
+                                ? (flags_pc | {4'd0, is_any_subn, 1'd0})
+                                : flags_normal_w_de;
+
     // Override cascade: NaN > Inf > Zero(partial) > normal(+DE if denormal).
     //   NaN/x          → z_nan        (beats Inf and ZE)
     //   Inf/x, x/Inf   → z_inf        (Inf/0 = Inf, not Inf+ZE)
@@ -351,10 +379,10 @@ module softfloat_div_x80 (
     assign z     = is_any_nan          ? z_nan
                  : is_any_inf          ? z_inf
                  : is_div_zero_override ? z_zero
-                                        : z_normal;
+                                        : z_normal_pc;
     assign flags = is_any_nan          ? flags_nan
                  : is_any_inf          ? flags_inf
                  : is_div_zero_override ? flags_zero
-                                        : flags_normal_w_de;
+                                        : flags_normal_pc;
 
 endmodule

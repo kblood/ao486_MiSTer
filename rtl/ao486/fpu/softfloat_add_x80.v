@@ -47,6 +47,7 @@
 module softfloat_add_x80 (
     input  wire [79:0] a,
     input  wire [79:0] b,
+    input  wire [1:0]  precision,   // PR-2b.5u: PC = CW[9:8]; 11/01 = extended (inline)
     output wire [79:0] z,
     output wire [5:0]  flags        // {PE, UE, OE, ZE, DE, IE}
 );
@@ -364,14 +365,41 @@ module softfloat_add_x80 (
     // emit their own flags per Bochs semantics.
     wire [5:0]  flags_normal_w_de = flags_normal | {4'd0, is_any_subn, 1'd0};
 
+    //--------------------------------------------------------------------
+    // PR-2b.5u (iter 139): precision-control (PC = CW[9:8]) narrowing.
+    // Feed the SAME pre-round triple (z_sign, z_exp_pre, z_sig0_pre,
+    // z_sig1_pre) that drives the inline RNE rounder into the shared
+    // floatx80_round_pc helper.  For PC=single/double it produces the
+    // bit-exact narrowed result (a SINGLE rounding at the PC point — no
+    // double-round).  PC=extended (11) and reserved (01) leave the inline
+    // z_normal byte-identical → zero regression on the oracle suites.  The
+    // helper owns PE/UE/OE; we OR in this primitive's DE-from-denormal lane.
+    //--------------------------------------------------------------------
+    wire        is_pc_narrow = (precision == 2'b00) || (precision == 2'b10);
+    wire [79:0] z_pc;
+    wire [5:0]  flags_pc;
+    floatx80_round_pc u_round_pc (
+        .precision  (precision),
+        .sign       (z_sign),
+        .z_exp_pre  (z_exp_pre),
+        .z_sig0_pre (z_sig0_pre),
+        .z_sig1_pre (z_sig1_pre),
+        .z          (z_pc),
+        .flags      (flags_pc)
+    );
+    wire [79:0] z_normal_pc     = is_pc_narrow ? z_pc : z_normal;
+    wire [5:0]  flags_normal_pc = is_pc_narrow
+                                ? (flags_pc | {4'd0, is_any_subn, 1'd0})
+                                : flags_normal_w_de;
+
     // Override cascade: NaN > Inf > Zero > normal(+DE if denormal input).
     assign z     = is_any_nan  ? z_nan
                  : is_any_inf  ? z_inf
                  : is_any_zero ? z_zero
-                               : z_normal;
+                               : z_normal_pc;
     assign flags = is_any_nan  ? flags_nan
                  : is_any_inf  ? flags_inf
                  : is_any_zero ? flags_zero
-                               : flags_normal_w_de;
+                               : flags_normal_pc;
 
 endmodule
