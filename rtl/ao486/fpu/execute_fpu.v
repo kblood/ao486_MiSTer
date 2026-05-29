@@ -1748,6 +1748,9 @@ module execute_fpu (
     wire        [63:0] pr_sig1_add, pr_sig1_sub, pr_sig1_mul, pr_sig1_div;
     wire        [79:0] shared_round_z;
     wire        [5:0]  shared_round_flags;
+    // PR-2c.2 (iter 157): shared subnormal-pack result + inexact bit.
+    wire        [79:0] shared_subn_z;
+    wire               shared_subn_pe;
 
     softfloat_add_x80 u_add (
         .a                  (op_a),
@@ -1760,6 +1763,8 @@ module execute_fpu (
         .pr_sig1            (pr_sig1_add),
         .shared_round_z     (shared_round_z),
         .shared_round_flags (shared_round_flags),
+        .shared_subn_z      (shared_subn_z),
+        .shared_subn_pe     (shared_subn_pe),
         .z                  (add_z),
         .flags              (add_flags)
     );
@@ -1776,6 +1781,8 @@ module execute_fpu (
         .pr_sig1            (pr_sig1_sub),
         .shared_round_z     (shared_round_z),
         .shared_round_flags (shared_round_flags),
+        .shared_subn_z      (shared_subn_z),
+        .shared_subn_pe     (shared_subn_pe),
         .z                  (sub_z),
         .flags              (sub_flags)
     );
@@ -1791,6 +1798,8 @@ module execute_fpu (
         .pr_sig1            (pr_sig1_mul),
         .shared_round_z     (shared_round_z),
         .shared_round_flags (shared_round_flags),
+        .shared_subn_z      (shared_subn_z),
+        .shared_subn_pe     (shared_subn_pe),
         .z                  (mul_z),
         .flags              (mul_flags)
     );
@@ -1809,6 +1818,8 @@ module execute_fpu (
         .pr_sig1            (pr_sig1_div),
         .shared_round_z     (shared_round_z),
         .shared_round_flags (shared_round_flags),
+        .shared_subn_z      (shared_subn_z),
+        .shared_subn_pe     (shared_subn_pe),
         .done               (div_done),
         .z                  (div_z),
         .flags              (div_flags)
@@ -1864,6 +1875,20 @@ module execute_fpu (
         .z_sig1_pre (shared_pr_sig1),
         .z          (shared_round_z),
         .flags      (shared_round_flags)
+    );
+
+    // PR-2c.2 (iter 157): shared subnormal-pack.  Consumes the SAME
+    // shared_pr_* triple as the rounder (every primitive fed pack_subn the
+    // identical pre-round triple it fed the rounder), so the same mux drives
+    // both.  The per-primitive ue_now gate stays inline; only the encoding
+    // helper is shared.
+    floatx80_pack_subn u_pack_subn_shared (
+        .sign      (shared_pr_sign),
+        .z_exp_pre (shared_pr_exp),
+        .sig_hi    (shared_pr_sig0),
+        .sig_lo    (shared_pr_sig1),
+        .z_subn    (shared_subn_z),
+        .pe_subn   (shared_subn_pe)
     );
 
     wire use_sub_primitive = (op_a[79] ^ op_b[79]) ^ kind_lat[0];

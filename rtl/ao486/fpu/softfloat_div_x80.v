@@ -94,6 +94,9 @@ module softfloat_div_x80 (
     output wire [63:0] pr_sig1,
     input  wire [79:0] shared_round_z,
     input  wire [5:0]  shared_round_flags,
+    // PR-2c.2 (iter 157): floatx80_pack_subn hoisted to execute_fpu.v too.
+    input  wire [79:0] shared_subn_z,
+    input  wire        shared_subn_pe,
     output reg         done,
     output wire [79:0] z,
     output wire [5:0]  flags        // {PE, UE, OE, ZE, DE, IE}
@@ -394,16 +397,9 @@ module softfloat_div_x80 (
     // take precedence over ue_now (so finite/0 and 0/0 keep their
     // existing special-case encodings).
     //--------------------------------------------------------------------
-    wire [79:0] z_subn;
-    wire        pe_subn;
-    floatx80_pack_subn u_pack_subn (
-        .sign      (z_sign),
-        .z_exp_pre (z_exp_pre),
-        .sig_hi    (zSig0),
-        .sig_lo    (zSig1),
-        .z_subn    (z_subn),
-        .pe_subn   (pe_subn)
-    );
+    // PR-2c.2 (iter 157): from the shared floatx80_pack_subn in execute_fpu.v.
+    wire [79:0] z_subn  = shared_subn_z;
+    wire        pe_subn = shared_subn_pe;
 
     wire [14:0] z_exp_normal = z_exp_norm[14:0];
     wire [14:0] z_exp_out    = (ze_now | oe_now | ie_now) ? 15'h7FFF : z_exp_normal;

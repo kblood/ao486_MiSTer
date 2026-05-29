@@ -58,6 +58,11 @@ module softfloat_add_x80 (
     output wire [63:0] pr_sig1,
     input  wire [79:0] shared_round_z,
     input  wire [5:0]  shared_round_flags,
+    // PR-2c.2 (iter 157): floatx80_pack_subn also hoisted to a shared instance
+    // in execute_fpu.v.  It consumes the SAME pr_* triple, so no new output
+    // port is needed; the subnormal result is routed back here.
+    input  wire [79:0] shared_subn_z,
+    input  wire        shared_subn_pe,
     output wire [79:0] z,
     output wire [5:0]  flags        // {PE, UE, OE, ZE, DE, IE}
 );
@@ -335,17 +340,10 @@ module softfloat_add_x80 (
     wire        ue_now       = (z_exp_final <= $signed(17'sd0)) &&
                                (z_sig0_final != 64'd0);
 
-    // PR-2b.3i cut 3: canonical subnormal-result encoding via shared helper.
-    wire [79:0] z_subn;
-    wire        pe_subn;
-    floatx80_pack_subn u_pack_subn (
-        .sign      (z_sign),
-        .z_exp_pre (z_exp_pre),
-        .sig_hi    (z_sig0_pre),
-        .sig_lo    (z_sig1_pre),
-        .z_subn    (z_subn),
-        .pe_subn   (pe_subn)
-    );
+    // PR-2c.2 (iter 157): subnormal-result encoding now from the shared
+    // floatx80_pack_subn in execute_fpu.v (fed the same pr_* triple).
+    wire [79:0] z_subn  = shared_subn_z;
+    wire        pe_subn = shared_subn_pe;
 
     wire [14:0] z_exp_pack   = z_exp_final[14:0];
     wire [79:0] z_normal     = oe_now

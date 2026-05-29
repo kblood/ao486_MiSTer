@@ -59,6 +59,9 @@ module softfloat_sub_x80 (
     output wire [63:0] pr_sig1,
     input  wire [79:0] shared_round_z,
     input  wire [5:0]  shared_round_flags,
+    // PR-2c.2 (iter 157): floatx80_pack_subn hoisted to execute_fpu.v too.
+    input  wire [79:0] shared_subn_z,
+    input  wire        shared_subn_pe,
     output wire [79:0] z,
     output wire [5:0]  flags        // {PE, UE, OE, ZE, DE, IE}
 );
@@ -284,16 +287,9 @@ module softfloat_sub_x80 (
     wire ue_now = (z_exp_final <= $signed(17'sd0)) && ~result_zero &&
                   (zs0_final != 64'd0);
 
-    wire [79:0] z_subn;
-    wire        pe_subn;
-    floatx80_pack_subn u_pack_subn (
-        .sign      (z_sign_main),
-        .z_exp_pre (z_exp_norm),
-        .sig_hi    (zs0_norm),
-        .sig_lo    (zs1_norm),
-        .z_subn    (z_subn),
-        .pe_subn   (pe_subn)
-    );
+    // PR-2c.2 (iter 157): from the shared floatx80_pack_subn in execute_fpu.v.
+    wire [79:0] z_subn  = shared_subn_z;
+    wire        pe_subn = shared_subn_pe;
 
     wire        z_sign_out  = result_zero ? 1'b0  : z_sign_main;
     wire [14:0] z_exp_pack  = z_exp_final[14:0];
