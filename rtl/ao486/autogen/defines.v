@@ -893,3 +893,13 @@
 `define CMDEX_FST_M32         4'd2
 `define CMDEX_FSTP_M64        4'd3
 `define CMDEX_FST_M64         4'd4
+// PR-2b.5w (iter 141): FIST/FISTP m16/m32/m64 — the INTEGER stores (convert
+// ST(0) floatx80 -> signed int per CW.RC, range-check -> #IA, then store).
+// Share CMD_fpu_store_mem (same store FSM in write.v as the float stores).
+// Encodings: FIST m32=DB /2, FISTP m32=DB /3, FIST m16=DF /2, FISTP m16=DF /3,
+// FISTP m64=DF /7 (FIST m64 is not an x87 encoding).  Converter = floatx80_to_int.
+`define CMDEX_FIST_M16        4'd5
+`define CMDEX_FISTP_M16       4'd6
+`define CMDEX_FIST_M32        4'd7
+`define CMDEX_FISTP_M32       4'd8
+`define CMDEX_FISTP_M64       4'd9

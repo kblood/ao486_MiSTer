@@ -430,6 +430,16 @@ wire cond_227 = dec_ready_modregrm_one   && decoder[7:0] == 8'hD9 && decoder[15:
 wire cond_228 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDB && decoder[13:11] == 3'b000 && decoder[15:14] != 2'b11; // FILD m32 (DB /0)
 wire cond_229 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDF && decoder[13:11] == 3'b000 && decoder[15:14] != 2'b11; // FILD m16 (DF /0)
 wire cond_230 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDF && decoder[13:11] == 3'b101 && decoder[15:14] != 2'b11; // FILD m64 (DF /5)
+// PR-2b.5w (iter 141): FIST/FISTP m16/m32/m64 — signed-integer memory STORES,
+// mem-form (mod != 11).  Dispatch to CMD_fpu_store_mem (same store FSM as the
+// float stores); CMDEX selects width + pop.  reg-field decoder[13:11] selects
+// the variant: /2=FIST, /3=FISTP, /7=FISTP m64.  DB and DF opcodes already host
+// FILD (cond_228..230); these are the disjoint reg-field cases.
+wire cond_231 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDB && decoder[13:11] == 3'b010 && decoder[15:14] != 2'b11; // FIST  m32 (DB /2)
+wire cond_232 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDB && decoder[13:11] == 3'b011 && decoder[15:14] != 2'b11; // FISTP m32 (DB /3)
+wire cond_233 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDF && decoder[13:11] == 3'b010 && decoder[15:14] != 2'b11; // FIST  m16 (DF /2)
+wire cond_234 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDF && decoder[13:11] == 3'b011 && decoder[15:14] != 2'b11; // FISTP m16 (DF /3)
+wire cond_235 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDF && decoder[13:11] == 3'b111 && decoder[15:14] != 2'b11; // FISTP m64 (DF /7)
 //======================================================== saves
 //======================================================== always
 //======================================================== sets
@@ -584,6 +594,11 @@ assign dec_cmd =
     (cond_217 && ~cond_4)? ( `CMD_fpu_store_mem) :  // PR-2b.5d iter 117: FSTP m64fp
     (cond_218 && ~cond_4)? ( `CMD_fpu_store_mem) :  // PR-2b.5e iter 118: FST m32fp
     (cond_219 && ~cond_4)? ( `CMD_fpu_store_mem) :  // PR-2b.5e iter 118: FST m64fp
+    (cond_231 && ~cond_4)? ( `CMD_fpu_store_mem) :  // PR-2b.5w iter 141: FIST  m32
+    (cond_232 && ~cond_4)? ( `CMD_fpu_store_mem) :  // PR-2b.5w iter 141: FISTP m32
+    (cond_233 && ~cond_4)? ( `CMD_fpu_store_mem) :  // PR-2b.5w iter 141: FIST  m16
+    (cond_234 && ~cond_4)? ( `CMD_fpu_store_mem) :  // PR-2b.5w iter 141: FISTP m16
+    (cond_235 && ~cond_4)? ( `CMD_fpu_store_mem) :  // PR-2b.5w iter 141: FISTP m64
     // PR-2b.4i (iter 60): cond_67 reg-form catch-all relocated here, BELOW
     // cond_144..205, so reg-form D8..DF + modregrm_one falls back to the
     // legacy CMD_fpu / CMDEX_ESC_STEP_0 stub ONLY when no more-specific
@@ -1042,6 +1057,11 @@ assign consume_modregrm_one =
     (cond_217 && ~cond_4)? (`TRUE) :  // PR-2b.5d iter 117: FSTP m64fp consumes the modrm
     (cond_218 && ~cond_4)? (`TRUE) :  // PR-2b.5e iter 118: FST m32fp consumes the modrm
     (cond_219 && ~cond_4)? (`TRUE) :  // PR-2b.5e iter 118: FST m64fp consumes the modrm
+    (cond_231 && ~cond_4)? (`TRUE) :  // PR-2b.5w iter 141: FIST  m32 consumes the modrm
+    (cond_232 && ~cond_4)? (`TRUE) :  // PR-2b.5w iter 141: FISTP m32 consumes the modrm
+    (cond_233 && ~cond_4)? (`TRUE) :  // PR-2b.5w iter 141: FIST  m16 consumes the modrm
+    (cond_234 && ~cond_4)? (`TRUE) :  // PR-2b.5w iter 141: FISTP m16 consumes the modrm
+    (cond_235 && ~cond_4)? (`TRUE) :  // PR-2b.5w iter 141: FISTP m64 consumes the modrm
     // PR-2b.4i (iter 60): cond_67 reg-form catch-all relocated here so
     // un-implemented reg-form D8..DF + modregrm_one still asserts
     // consume_modregrm_one (advancing the decoder past the instruction)
@@ -1262,6 +1282,11 @@ assign dec_cmdex =
     (cond_217 && ~cond_4)? ( `CMDEX_FSTP_M64) :  // PR-2b.5d iter 117: FSTP m64fp
     (cond_218 && ~cond_4)? ( `CMDEX_FST_M32) :   // PR-2b.5e iter 118: FST m32fp
     (cond_219 && ~cond_4)? ( `CMDEX_FST_M64) :   // PR-2b.5e iter 118: FST m64fp
+    (cond_231 && ~cond_4)? ( `CMDEX_FIST_M32) :  // PR-2b.5w iter 141: FIST  m32
+    (cond_232 && ~cond_4)? ( `CMDEX_FISTP_M32) : // PR-2b.5w iter 141: FISTP m32
+    (cond_233 && ~cond_4)? ( `CMDEX_FIST_M16) :  // PR-2b.5w iter 141: FIST  m16
+    (cond_234 && ~cond_4)? ( `CMDEX_FISTP_M16) : // PR-2b.5w iter 141: FISTP m16
+    (cond_235 && ~cond_4)? ( `CMDEX_FISTP_M64) : // PR-2b.5w iter 141: FISTP m64
     // PR-2b.4i (iter 60): cond_67's CMDEX_ESC_STEP_0 fallback for any
     // reg-form D8..DF not caught by cond_144..205.
     (cond_67 && ~cond_4)? ( `CMDEX_ESC_STEP_0) :

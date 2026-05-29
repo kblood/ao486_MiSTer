@@ -749,8 +749,13 @@ wire is_fstp_m64_op = is_fp_store_op && (wr_cmdex == `CMDEX_FSTP_M64);
 // PR-2b.5e (iter 118): FST m64 (no-pop) is the same 2-write width as FSTP m64;
 // FST m32 (CMDEX_FST_M32) falls through to the default 1-write m32 path.
 wire is_fst_m64_op  = is_fp_store_op && (wr_cmdex == `CMDEX_FST_M64);
+// PR-2b.5w (iter 141): FISTP m64 (8-byte int) = 2 writes like FSTP/FST m64.
+// FIST/FISTP m16 (2-byte int) = 1 write, but a 2-byte one (write_length below).
+wire is_fistp_m64_op = is_fp_store_op && (wr_cmdex == `CMDEX_FISTP_M64);
+wire is_fist_m16_op  = is_fp_store_op && ((wr_cmdex == `CMDEX_FIST_M16) ||
+                                          (wr_cmdex == `CMDEX_FISTP_M16));
 wire [1:0] fpu_store_max_step = is_fstp_m80_op ? 2'd2 :
-                                (is_fstp_m64_op || is_fst_m64_op) ? 2'd1 : 2'd0;  // m80=3 / m64=2 / m32=1 writes
+                                (is_fstp_m64_op || is_fst_m64_op || is_fistp_m64_op) ? 2'd1 : 2'd0;  // m80=3 / m64=2 / m32,m16=1 writes
 wire fstp_raw_done  = write_done && ~(write_page_fault) && ~(write_ac_fault);
 
 always @(posedge clk) begin
@@ -798,7 +803,9 @@ assign write_data =
                                                                                     result;
 
 assign write_length =
-    (is_fp_store_op)?           ( (is_fstp_m80_op && fpu_store_step == 2'd2)? 3'd2 : 3'd4 ) :  // m80: 4/4/2 ; m32: 4
+    (is_fp_store_op)?           ( (is_fstp_m80_op && fpu_store_step == 2'd2)? 3'd2 :  // m80: 4/4/2
+                                  (is_fist_m16_op)?                          3'd2 :  // m16: 2 (word)
+                                                                             3'd4 ) :  // m32/m64: 4 per step
     (write_stack_virtual || write_new_stack_virtual)?   wr_push_length :
     (write_system_touch)?       3'd1 :
     (write_system_busy_tss)?    3'd4 :

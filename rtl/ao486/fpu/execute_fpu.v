@@ -410,6 +410,27 @@ module execute_fpu (
                              (exe_cmdex == `CMDEX_FST_M32);
     wire is_fst_m64        = (exe_cmd  == `CMD_fpu_store_mem) &&
                              (exe_cmdex == `CMDEX_FST_M64);
+    // PR-2b.5w (iter 141): FIST/FISTP m16/m32/m64 — integer stores.  Identical
+    // routing to the narrowing float stores above (direct store_data/store_ready
+    // lane, suppress-regfile-data-write, flags via flags_lat) EXCEPT ST(0) is
+    // converted floatx80->signed-int (per CW.RC) by floatx80_to_int rather than a
+    // float narrowing converter.  The /p (pop) variants arm pop_after; FIST keeps
+    // ST(0).  Width selects the store byte-count (m16=2, m32=4, m64=8) in write.v.
+    wire is_fist_m16       = (exe_cmd  == `CMD_fpu_store_mem) &&
+                             (exe_cmdex == `CMDEX_FIST_M16);
+    wire is_fistp_m16      = (exe_cmd  == `CMD_fpu_store_mem) &&
+                             (exe_cmdex == `CMDEX_FISTP_M16);
+    wire is_fist_m32       = (exe_cmd  == `CMD_fpu_store_mem) &&
+                             (exe_cmdex == `CMDEX_FIST_M32);
+    wire is_fistp_m32      = (exe_cmd  == `CMD_fpu_store_mem) &&
+                             (exe_cmdex == `CMDEX_FISTP_M32);
+    wire is_fistp_m64      = (exe_cmd  == `CMD_fpu_store_mem) &&
+                             (exe_cmdex == `CMDEX_FISTP_M64);
+    wire is_fist_now       = is_fist_m16 | is_fistp_m16 | is_fist_m32 |
+                             is_fistp_m32 | is_fistp_m64;
+    wire is_fist_pop_now   = is_fistp_m16 | is_fistp_m32 | is_fistp_m64;
+    wire [1:0] fist_width_now = (is_fist_m16 | is_fistp_m16) ? 2'd0 :
+                                (is_fist_m32 | is_fistp_m32) ? 2'd1 : 2'd2;
     // PR-2b.3n: unary control ops on ST(0).  Dispatched via the new
     // `CMD_fpu_unary` (7'd119) so they get a fresh 4-bit CMDEX namespace
     // — the CMD_fpu_arith namespace is already FULL (see defines.v).
@@ -710,6 +731,7 @@ module execute_fpu (
                             is_fst_family | is_fstp_m80 |             // PR-2b.5a iter 113
                             is_fstp_m32 | is_fstp_m64 |               // PR-2b.5c/5d iter 116/117
                             is_fst_m32 | is_fst_m64 |                 // PR-2b.5e iter 118 (no-pop)
+                            is_fist_now |                             // PR-2b.5w iter 141
                             is_unary_now | is_cmp_now |
                             is_frndint |                              // PR-2b.5n iter 127
                             is_fscale |                               // PR-2b.5p iter 130
@@ -792,7 +814,8 @@ module execute_fpu (
     // other FSTP lane (store_data, store_ready, rf_wr_en suppress, flags_lat=0).
     wire pop_after_now  = is_arith_de | is_fstp_sti | is_cmp_pop_now |
                           is_fstp_m80 |                           // PR-2b.5a iter 113
-                          is_fstp_m32 | is_fstp_m64;              // PR-2b.5c/5d iter 116/117
+                          is_fstp_m32 | is_fstp_m64 |             // PR-2b.5c/5d iter 116/117
+                          is_fist_pop_now;                        // PR-2b.5w iter 141 (FISTP only)
 
     wire op_active = exe_ready && is_op_active;
 
@@ -929,12 +952,22 @@ module execute_fpu (
     // pop_after_now excludes is_fst_m32/m64.
     reg        is_fst_m32_lat;
     reg        is_fst_m64_lat;
+    // PR-2b.5w (iter 141): FIST/FISTP latch + width.  Same routing as the
+    // narrowing-store latches; the converter is floatx80_to_int (fed cw[11:10]
+    // + fist_width_lat).  pop_after_now handles the /p variants at op-start.
+    reg        is_fist_lat;
+    reg [1:0]  fist_width_lat;
     // PR-2b.5f (iter 119): narrowing-store converter exception flags.  Declared
     // here (ahead of the flags_lat S_COMPUTE block that consumes them) because
     // ModelSim vlog requires nets used procedurally to be declared textually
     // first.  Driven by the floatx80_to_float32/64 instances further below.
     wire       f32_pe, f32_oe, f32_ue, f32_ie;
     wire       f64_pe, f64_oe, f64_ue, f64_ie;
+    // PR-2b.5w (iter 141): FIST/FISTP result + flags from floatx80_to_int.
+    // Declared ahead of the flags_lat block (procedural-net decl-order rule);
+    // driven by the instance further below.  Only IE (#IA) and PE arise.
+    wire [63:0] fist_z;
+    wire        fist_ie, fist_pe;
     // PR-2b.5n (iter 127): FRNDINT result + flags from floatx80_round_to_int.
     // Declared ahead of the flags_lat / rf_wr_data blocks that consume them
     // (procedural-net decl-order rule); driven by the instance further below.
@@ -1167,6 +1200,8 @@ module execute_fpu (
             is_fstp_m64_lat <= 1'b0;    // PR-2b.5d iter 117
             is_fst_m32_lat  <= 1'b0;    // PR-2b.5e iter 118
             is_fst_m64_lat  <= 1'b0;    // PR-2b.5e iter 118
+            is_fist_lat     <= 1'b0;    // PR-2b.5w iter 141
+            fist_width_lat  <= 2'd0;    // PR-2b.5w iter 141
             is_fchs_lat     <= 1'b0;
             is_fabs_lat     <= 1'b0;
             is_fxam_lat     <= 1'b0;
@@ -1227,6 +1262,8 @@ module execute_fpu (
                         is_fstp_m64_lat <= is_fstp_m64;  // PR-2b.5d iter 117
                         is_fst_m32_lat  <= is_fst_m32;   // PR-2b.5e iter 118
                         is_fst_m64_lat  <= is_fst_m64;   // PR-2b.5e iter 118
+                        is_fist_lat     <= is_fist_now;     // PR-2b.5w iter 141
+                        fist_width_lat  <= fist_width_now;  // PR-2b.5w iter 141
                         is_fchs_lat    <= is_fchs;
                         is_fabs_lat    <= is_fabs;
                         is_fxam_lat    <= is_fxam;
@@ -1309,6 +1346,11 @@ module execute_fpu (
                                        // Must precede the 6'd0 control-op arm below.
                                        (is_fstp_m32_lat | is_fst_m32_lat) ? {f32_pe, f32_ue, f32_oe, 1'b0, 1'b0, f32_ie} :
                                        (is_fstp_m64_lat | is_fst_m64_lat) ? {f64_pe, f64_ue, f64_oe, 1'b0, 1'b0, f64_ie} :
+                                       // PR-2b.5w (iter 141): FIST/FISTP flags.  {PE,UE,OE,ZE,DE,IE} =
+                                       // {pe,0,0,0,0,ie}; only IE (#IA on out-of-range/NaN/Inf) and PE
+                                       // (inexact) arise from an integer store — no UE/OE/ZE, and FIST
+                                       // does NOT raise DE on a denormal source (Bochs convention).
+                                       is_fist_lat ? {fist_pe, 1'b0, 1'b0, 1'b0, 1'b0, fist_ie} :
                                        // PR-2b.5n (iter 127): FRNDINT flags.  {PE,UE,OE,ZE,DE,IE} =
                                        // {pe,0,0,0,de,ie}; OE/UE/ZE never arise from round-to-int.
                                        // Must precede the 6'd0 control-op arm (is_frndint_lat is NOT
@@ -1608,6 +1650,18 @@ module execute_fpu (
         .ue (f64_ue),
         .ie (f64_ie)
     );
+    // PR-2b.5w (iter 141): FIST/FISTP integer converter.  Fed by a_lat (ST(0),
+    // latched at S_FETCH_B), the live rounding-control field cw[11:10], and the
+    // latched width.  fist_z rides store_data (low width bytes), fist_ie/pe drive
+    // flags_lat when is_fist_lat.  Combinational, like the narrowing converters.
+    floatx80_to_int u_floatx80_to_int (
+        .a     (a_lat),
+        .rc    (cw[11:10]),
+        .width (fist_width_lat),
+        .z     (fist_z),
+        .ie    (fist_ie),
+        .pe    (fist_pe)
+    );
     // PR-2b.5n (iter 127): FRNDINT round-to-integer.  Fed by a_lat (ST(0),
     // latched at S_FETCH_B) and the live rounding-control field cw[11:10];
     // rndint_z drives rf_wr_data and rndint_pe/de/ie drive flags_lat when
@@ -1681,13 +1735,16 @@ module execute_fpu (
     // sequence retires the op.  PR-2b.5c: FSTP m32 substitutes the narrowed
     // float32 in [31:0] (write.v emits only step 0 for m32).  Both 0 otherwise.
     assign store_data  = (is_fstp_m32_lat || is_fst_m32_lat) ? {48'd0, fstp_m32_z} :
-                         (is_fstp_m64_lat || is_fst_m64_lat) ? {16'd0, fstp_m64_z} : a_lat;
+                         (is_fstp_m64_lat || is_fst_m64_lat) ? {16'd0, fstp_m64_z} :
+                         // PR-2b.5w (iter 141): FIST/FISTP — the int rides the low
+                         // bytes; write.v takes [15:0]/[31:0]/[63:0] per width.
+                         (is_fist_lat) ? {16'd0, fist_z} : a_lat;
     // PR-2b.5e (iter 118): FST m32/m64 share the window.  For the no-pop ops the
     // FSM never enters S_POP, but the latch in write.v fires during S_COMPUTE
     // (the write stage runs concurrently with the FPU FSM, retiring early), so
     // the S_RETIRE-and-earlier window suffices; the S_POP term is dead for FST.
     assign store_ready = (is_fstp_m80_lat || is_fstp_m32_lat || is_fstp_m64_lat ||
-                          is_fst_m32_lat  || is_fst_m64_lat) &&
+                          is_fst_m32_lat  || is_fst_m64_lat  || is_fist_lat) &&
                          ((state == S_COMPUTE) || (state == S_POST) ||
                           (state == S_RETIRE)  || (state == S_POP));
 
@@ -1905,6 +1962,7 @@ module execute_fpu (
                                             && ~is_fstp_m64_lat   // PR-2b.5d iter 117: dest is memory, no regfile data write
                                             && ~is_fst_m32_lat    // PR-2b.5e iter 118: dest is memory, no regfile data write
                                             && ~is_fst_m64_lat    // PR-2b.5e iter 118: dest is memory, no regfile data write
+                                            && ~is_fist_lat       // PR-2b.5w iter 141: dest is memory, no regfile data write
                                             && (~is_fcmov_lat | fcmov_taken_lat)) ||
                         (state == S_POP) ||
                         (state == S_POP2) ||    // PR-2b.3q: second tag-Empty write
