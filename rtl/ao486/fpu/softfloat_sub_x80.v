@@ -51,6 +51,7 @@ module softfloat_sub_x80 (
     input  wire [79:0] b,
     input  wire        z_sign_in,
     input  wire [1:0]  precision,   // PR-2b.5u: PC = CW[9:8]; 11/01 = extended (inline)
+    input  wire [1:0]  rc,          // PR-2b.5v: RC = CW[11:10]; 00=RNE (inline path)
     output wire [79:0] z,
     output wire [5:0]  flags        // {PE, UE, OE, ZE, DE, IE}
 );
@@ -324,11 +325,18 @@ module softfloat_sub_x80 (
     // ~result_zero: an exact cancellation is already +0 and must keep its
     // forced-positive zero encoding (not be re-rounded by the helper).
     //--------------------------------------------------------------------
+    // PR-2b.5v (iter 150): directed rounding (RC = CW[11:10]).  RC-aware
+    // rounder replaces the PC helper (byte-identical for rc=00, Slice 1).
+    // do_round preserves the ~result_zero gate (an exact cancellation stays
+    // forced-positive +0) and ORs the directed condition into the narrow-PC
+    // condition.  rc=00 & PC=80 → do_round=0 → inline z_normal (zero
+    // regression).
     wire        is_pc_narrow = (precision == 2'b00) || (precision == 2'b10);
-    wire        do_pc        = is_pc_narrow && ~result_zero;
+    wire        do_round     = (is_pc_narrow || (rc != 2'b00)) && ~result_zero;
     wire [79:0] z_pc;
     wire [5:0]  flags_pc;
-    floatx80_round_pc u_round_pc (
+    floatx80_round_rc u_round_rc (
+        .rc         (rc),
         .precision  (precision),
         .sign       (z_sign_main),
         .z_exp_pre  (z_exp_norm),
@@ -337,8 +345,8 @@ module softfloat_sub_x80 (
         .z          (z_pc),
         .flags      (flags_pc)
     );
-    wire [79:0] z_normal_pc     = do_pc ? z_pc : z_normal;
-    wire [5:0]  flags_normal_pc = do_pc
+    wire [79:0] z_normal_pc     = do_round ? z_pc : z_normal;
+    wire [5:0]  flags_normal_pc = do_round
                                 ? (flags_pc | {4'd0, is_any_subn, 1'd0})
                                 : flags_normal_w_de;
 

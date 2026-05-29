@@ -1687,14 +1687,17 @@ module execute_fpu (
     // sum_pre / flags_pre are forward-declared above the FSM.
 
     // PR-2b.5u (iter 139): precision-control field PC = CW[9:8] drives the
-    // four arith primitives' shared floatx80_round_pc narrowing path.  The
-    // live cw is already an input here (used for the RC/mask logic); CW[9:8]
-    // = 11 (extended, FNINIT default) keeps the inline PC=80 path so default
-    // behaviour is byte-identical.
+    // four arith primitives' shared rounder narrowing path.  The live cw is
+    // already an input here (used for the RC/mask logic); CW[9:8] = 11
+    // (extended, FNINIT default) keeps the inline PC=80 path.
+    // PR-2b.5v (iter 150): directed rounding RC = CW[11:10] feeds the same
+    // rounder.  rc=00 (RNE, FNINIT default) + PC=80 keeps the inline path so
+    // default behaviour is byte-identical.
     softfloat_add_x80 u_add (
         .a         (op_a),
         .b         (op_b),
         .precision (cw[9:8]),
+        .rc        (cw[11:10]),
         .z         (add_z),
         .flags     (add_flags)
     );
@@ -1704,6 +1707,7 @@ module execute_fpu (
         .b          (op_b),
         .z_sign_in  (op_a[79]),
         .precision  (cw[9:8]),
+        .rc         (cw[11:10]),
         .z          (sub_z),
         .flags      (sub_flags)
     );
@@ -1712,6 +1716,7 @@ module execute_fpu (
         .a         (op_a),
         .b         (op_b),
         .precision (cw[9:8]),
+        .rc        (cw[11:10]),
         .z         (mul_z),
         .flags     (mul_flags)
     );
@@ -1723,6 +1728,7 @@ module execute_fpu (
         .a         (op_a),
         .b         (op_b),
         .precision (cw[9:8]),
+        .rc        (cw[11:10]),
         .done      (div_done),
         .z         (div_z),
         .flags     (div_flags)

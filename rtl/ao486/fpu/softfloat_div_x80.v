@@ -86,6 +86,7 @@ module softfloat_div_x80 (
     input  wire [79:0] a,
     input  wire [79:0] b,
     input  wire [1:0]  precision,   // PR-2b.5u: PC = CW[9:8]; 11/01 = extended (inline)
+    input  wire [1:0]  rc,          // PR-2b.5v: RC = CW[11:10]; 00=RNE (inline path)
     output reg         done,
     output wire [79:0] z,
     output wire [5:0]  flags        // {PE, UE, OE, ZE, DE, IE}
@@ -445,11 +446,18 @@ module softfloat_div_x80 (
     // preserved; the helper still covers the genuine OE/UE finite-quotient
     // cases.  PC=80 keeps z_normal byte-identical.
     //--------------------------------------------------------------------
+    // PR-2b.5v (iter 150): directed rounding (RC = CW[11:10]).  RC-aware
+    // rounder replaces the PC helper (byte-identical for rc=00, Slice 1).
+    // do_round preserves the ~ze_now & ~ie_now gate (finite/0→Inf and
+    // 0/0→QNaN_INDEFINITE keep their special encodings) and ORs the directed
+    // condition into the narrow-PC condition.  rc=00 & PC=80 → do_round=0 →
+    // inline z_normal (zero regression).
     wire        is_pc_narrow = (precision == 2'b00) || (precision == 2'b10);
-    wire        do_pc        = is_pc_narrow && ~ze_now && ~ie_now;
+    wire        do_round     = (is_pc_narrow || (rc != 2'b00)) && ~ze_now && ~ie_now;
     wire [79:0] z_pc;
     wire [5:0]  flags_pc;
-    floatx80_round_pc u_round_pc (
+    floatx80_round_rc u_round_rc (
+        .rc         (rc),
         .precision  (precision),
         .sign       (z_sign),
         .z_exp_pre  (z_exp_pre),
@@ -458,8 +466,8 @@ module softfloat_div_x80 (
         .z          (z_pc),
         .flags      (flags_pc)
     );
-    wire [79:0] z_normal_pc     = do_pc ? z_pc : z_normal;
-    wire [5:0]  flags_normal_pc = do_pc
+    wire [79:0] z_normal_pc     = do_round ? z_pc : z_normal;
+    wire [5:0]  flags_normal_pc = do_round
                                 ? (flags_pc | {4'd0, is_any_subn, 1'd0})
                                 : flags_normal_w_de;
 

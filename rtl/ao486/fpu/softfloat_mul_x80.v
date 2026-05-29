@@ -51,6 +51,7 @@ module softfloat_mul_x80 (
     input  wire [79:0] a,
     input  wire [79:0] b,
     input  wire [1:0]  precision,   // PR-2b.5u: PC = CW[9:8]; 11/01 = extended (inline)
+    input  wire [1:0]  rc,          // PR-2b.5v: RC = CW[11:10]; 00=RNE (inline path)
     output wire [79:0] z,
     output wire [5:0]  flags        // {PE, UE, OE, ZE, DE, IE}
 );
@@ -263,10 +264,17 @@ module softfloat_mul_x80 (
     // floatx80_pack_subn consume.  No special gate (zero handled by the
     // is_any_zero cascade arm).  PC=80 keeps z_normal byte-identical.
     //--------------------------------------------------------------------
+    // PR-2b.5v (iter 150): directed rounding (RC = CW[11:10]).  RC-aware
+    // rounder replaces the PC helper (byte-identical for rc=00, Slice 1).
+    // No special gate (zero is a separate cascade arm).  use_rounder fires
+    // for any narrow PC OR any directed mode; rc=00 & PC=80 → 0 → inline
+    // z_normal (zero regression).
     wire        is_pc_narrow = (precision == 2'b00) || (precision == 2'b10);
+    wire        use_rounder  = is_pc_narrow || (rc != 2'b00);
     wire [79:0] z_pc;
     wire [5:0]  flags_pc;
-    floatx80_round_pc u_round_pc (
+    floatx80_round_rc u_round_rc (
+        .rc         (rc),
         .precision  (precision),
         .sign       (z_sign),
         .z_exp_pre  (z_exp_norm),
@@ -275,8 +283,8 @@ module softfloat_mul_x80 (
         .z          (z_pc),
         .flags      (flags_pc)
     );
-    wire [79:0] z_normal_pc     = is_pc_narrow ? z_pc : z_normal;
-    wire [5:0]  flags_normal_pc = is_pc_narrow
+    wire [79:0] z_normal_pc     = use_rounder ? z_pc : z_normal;
+    wire [5:0]  flags_normal_pc = use_rounder
                                 ? (flags_pc | {4'd0, is_any_subn, 1'd0})
                                 : flags_normal_w_de;
 

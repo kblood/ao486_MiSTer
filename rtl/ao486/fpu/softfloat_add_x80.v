@@ -48,6 +48,7 @@ module softfloat_add_x80 (
     input  wire [79:0] a,
     input  wire [79:0] b,
     input  wire [1:0]  precision,   // PR-2b.5u: PC = CW[9:8]; 11/01 = extended (inline)
+    input  wire [1:0]  rc,          // PR-2b.5v: RC = CW[11:10]; 00=RNE (inline path)
     output wire [79:0] z,
     output wire [5:0]  flags        // {PE, UE, OE, ZE, DE, IE}
 );
@@ -375,10 +376,19 @@ module softfloat_add_x80 (
     // z_normal byte-identical → zero regression on the oracle suites.  The
     // helper owns PE/UE/OE; we OR in this primitive's DE-from-denormal lane.
     //--------------------------------------------------------------------
+    // PR-2b.5v (iter 150): directed rounding (RC = CW[11:10]).  The RC-aware
+    // rounder is a strict superset of floatx80_round_pc — Slice-1-validated
+    // byte-identical for rc=00 (RNE) across PC32/PC64 — so it replaces the
+    // PC helper.  use_rounder fires for ANY narrow PC, OR for ANY directed
+    // mode at any PC (incl. PC=80, the primary RC case since FNINIT leaves
+    // PC=extended).  rc=00 & PC=80 keeps use_rounder=0 → inline z_normal
+    // stays byte-identical → zero regression on the RNE oracle suites.
     wire        is_pc_narrow = (precision == 2'b00) || (precision == 2'b10);
+    wire        use_rounder  = is_pc_narrow || (rc != 2'b00);
     wire [79:0] z_pc;
     wire [5:0]  flags_pc;
-    floatx80_round_pc u_round_pc (
+    floatx80_round_rc u_round_rc (
+        .rc         (rc),
         .precision  (precision),
         .sign       (z_sign),
         .z_exp_pre  (z_exp_pre),
@@ -387,8 +397,8 @@ module softfloat_add_x80 (
         .z          (z_pc),
         .flags      (flags_pc)
     );
-    wire [79:0] z_normal_pc     = is_pc_narrow ? z_pc : z_normal;
-    wire [5:0]  flags_normal_pc = is_pc_narrow
+    wire [79:0] z_normal_pc     = use_rounder ? z_pc : z_normal;
+    wire [5:0]  flags_normal_pc = use_rounder
                                 ? (flags_pc | {4'd0, is_any_subn, 1'd0})
                                 : flags_normal_w_de;
 
