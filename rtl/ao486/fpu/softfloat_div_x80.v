@@ -72,12 +72,34 @@
 `timescale 1ns / 1ps
 
 module softfloat_div_x80 (
+    // PR-2b.5x (iter 143, synth-unblock Slice 2a): clocked.  The two 128/64
+    // divides now run on the iter-142 sequential restoring divider
+    // (seq_divider_128_64) instead of native `/`/`%`.  start/done handshake:
+    //   start : 1-cycle pulse latches operands & begins the ~131-cycle compute.
+    //   done  : 1-cycle pulse the cycle z/flags are valid (they then hold).
+    // add/sub/mul stay combinational; this is the only multi-cycle primitive,
+    // and the only one that must expose this handshake so execute_fpu's
+    // S_COMPUTE can widen into a wait state (Slice 2b).
+    input  wire        clk,
+    input  wire        rst,
+    input  wire        start,
     input  wire [79:0] a,
     input  wire [79:0] b,
     input  wire [1:0]  precision,   // PR-2b.5u: PC = CW[9:8]; 11/01 = extended (inline)
+    output reg         done,
     output wire [79:0] z,
     output wire [5:0]  flags        // {PE, UE, OE, ZE, DE, IE}
 );
+
+    //--------------------------------------------------------------------
+    // PR-2b.5x: operands are FROZEN into a_reg/b_reg on `start` so the whole
+    // combinational fabric (normalize / special-case / round) sees stable
+    // inputs across the multi-cycle compute, even after the pipeline's LIVE
+    // op_b moves on.  Every classifier/normalizer below reads a_reg/b_reg
+    // (NOT the live a/b ports).  Written by the compute FSM in the divide
+    // section; declared here because the classifiers reference them.
+    //--------------------------------------------------------------------
+    reg [79:0] a_reg, b_reg;
 
     //--------------------------------------------------------------------
     // PR-2b.3f: NaN propagation override.  See floatx80_nan_handle.v.
@@ -87,8 +109,8 @@ module softfloat_div_x80 (
     wire [79:0] z_nan;
     wire [5:0]  flags_nan;
     floatx80_nan_handle u_nan (
-        .a           (a),
-        .b           (b),
+        .a           (a_reg),
+        .b           (b_reg),
         .is_nan_a    (),
         .is_nan_b    (),
         .is_any_nan  (is_any_nan),
@@ -108,8 +130,8 @@ module softfloat_div_x80 (
     //--------------------------------------------------------------------
     wire is_inf_a, is_inf_b, is_any_inf;
     floatx80_inf_handle u_inf (
-        .a          (a),
-        .b          (b),
+        .a          (a_reg),
+        .b          (b_reg),
         .is_inf_a   (is_inf_a),
         .is_inf_b   (is_inf_b),
         .is_any_inf (is_any_inf)
@@ -117,8 +139,8 @@ module softfloat_div_x80 (
     wire inf_div_inf = is_inf_a & is_inf_b;
     wire [79:0] z_inf =
         inf_div_inf ? {1'b1, 15'h7FFF, 64'hC000000000000000} :   // QNaN_INDEFINITE
-        is_inf_a    ? {a[79] ^ b[79], 15'h7FFF, 64'h8000000000000000} :  // ±Inf
-                      {a[79] ^ b[79], 15'h0000, 64'h0000000000000000};   // ±0
+        is_inf_a    ? {a_reg[79] ^ b_reg[79], 15'h7FFF, 64'h8000000000000000} :  // ±Inf
+                      {a_reg[79] ^ b_reg[79], 15'h0000, 64'h0000000000000000};   // ±0
     wire [5:0]  flags_inf = inf_div_inf ? 6'b000001 : 6'd0;
 
     //--------------------------------------------------------------------
@@ -130,8 +152,8 @@ module softfloat_div_x80 (
     //--------------------------------------------------------------------
     wire is_zero_a, is_zero_b, is_any_zero;
     floatx80_zero_handle u_zero (
-        .a           (a),
-        .b           (b),
+        .a           (a_reg),
+        .b           (b_reg),
         .is_zero_a   (is_zero_a),
         .is_zero_b   (is_zero_b),
         .is_any_zero (is_any_zero)
@@ -144,7 +166,7 @@ module softfloat_div_x80 (
     // emitted a bogus z_exp = ~0x7FFF encoded as +Inf without ZE — see
     // iter-37 walkthrough in iteration_log.md.
     wire is_div_zero_override = is_zero_a & ~is_zero_b;
-    wire [79:0] z_zero     = {a[79] ^ b[79], 79'd0};
+    wire [79:0] z_zero     = {a_reg[79] ^ b_reg[79], 79'd0};
     wire [5:0]  flags_zero = 6'd0;
 
     //--------------------------------------------------------------------
@@ -153,8 +175,8 @@ module softfloat_div_x80 (
     //--------------------------------------------------------------------
     wire is_subn_a, is_subn_b, is_any_subn;
     floatx80_subn_handle u_subn (
-        .a           (a),
-        .b           (b),
+        .a           (a_reg),
+        .b           (b_reg),
         .is_subn_a   (is_subn_a),
         .is_subn_b   (is_subn_b),
         .is_any_subn (is_any_subn)
@@ -172,7 +194,7 @@ module softfloat_div_x80 (
     wire signed [16:0] a_exp_s;
     wire        [63:0] a_sig;
     floatx80_normalize u_norm_a (
-        .a        (a),
+        .a        (a_reg),
         .sign_out (a_sign),
         .exp_out  (a_exp_s),
         .sig_out  (a_sig)
@@ -181,7 +203,7 @@ module softfloat_div_x80 (
     wire signed [16:0] b_exp_s;
     wire        [63:0] b_sig;
     floatx80_normalize u_norm_b (
-        .a        (b),
+        .a        (b_reg),
         .sign_out (b_sign),
         .exp_out  (b_exp_s),
         .sig_out  (b_sig)
@@ -218,28 +240,98 @@ module softfloat_div_x80 (
     wire signed [16:0] z_exp_pre = a_ge_b ? (z_exp_base + 17'sd1) : z_exp_base;
 
     //--------------------------------------------------------------------
-    // First divide: 128/64 → 64-bit quotient zSig0 + 64-bit remainder.
-    // After the pre-shift aSig < bSig so quotient fits in 64 bits.
+    // PR-2b.5x (iter 143, synth-unblock Slice 2a): the two 128/64 divides
+    // are now performed by a CLOCKED sequential restoring divider
+    // (seq_divider_128_64, iter-142 Slice 1), one instance REUSED across two
+    // passes (area-cheapest per design_synth_unblock.md):
+    //   pass 1 : num128_first       / b_sig -> zSig0     (quot) + rem_after
+    //   pass 2 : {rem_after,64'd0}   / b_sig -> zSig1_raw (quot) + r2 (sticky)
+    // den128's high half is always 0, so seq_divider gets the 64-bit b_sig
+    // directly.  The precondition num[127:64] < den holds for BOTH passes:
+    //   pass1: a_sig_eff < b_sig (a_sig_eff = a_sig or a_sig>>1, b_sig>=2^63);
+    //   pass2: rem_after < b_sig  (remainder of pass1).
+    // Everything else (normalize/special/round) stays combinational off the
+    // REGISTERED operands (a_reg/b_reg) and the REGISTERED quotients below;
+    // `done` pulses the cycle z/flags are valid.
     //--------------------------------------------------------------------
     wire [127:0] num128_first = {a_sig_eff, rem1_init};
-    wire [127:0] den128       = {64'd0, b_sig};
-    wire [127:0] q1_full      = num128_first / den128;
-    wire [127:0] r1_full      = num128_first % den128;
-    wire [63:0]  zSig0        = q1_full[63:0];
-    wire [63:0]  rem_after    = r1_full[63:0];   // r < bSig < 2^64
 
-    //--------------------------------------------------------------------
-    // Second divide: gives 64 more bits of quotient for round/sticky.
-    // Numerator is (rem_after << 64).  zSig1 then carries the next 64
-    // mantissa bits; sticky from this divide's remainder gets OR'd into
-    // zSig1's LSB to match Bochs's `zSig1 |= ((rem1 | rem2) != 0)`.
-    //--------------------------------------------------------------------
-    wire [127:0] num128_second = {rem_after, 64'd0};
-    wire [127:0] q2_full       = num128_second / den128;
-    wire [127:0] r2_full       = num128_second % den128;
-    wire [63:0]  zSig1_raw     = q2_full[63:0];
-    wire         sticky_pre    = |r2_full;
-    wire [63:0]  zSig1         = zSig1_raw | {63'd0, sticky_pre};
+    localparam D_IDLE   = 3'd0,
+               D_START1 = 3'd1,
+               D_PASS1  = 3'd2,
+               D_START2 = 3'd3,
+               D_PASS2  = 3'd4;
+    reg  [2:0]  dstate;
+    reg  [63:0] zSig0_q;       // pass-1 quotient
+    reg  [63:0] rem_after_q;   // pass-1 remainder (feeds pass-2 numerator)
+    reg  [63:0] zSig1_raw_q;   // pass-2 quotient
+    reg  [63:0] r2_q;          // pass-2 remainder (sticky source)
+
+    wire [127:0] div_num   = (dstate == D_START1) ? num128_first
+                                                  : {rem_after_q, 64'd0};
+    wire [63:0]  div_den   = b_sig;
+    wire         div_start = (dstate == D_START1) || (dstate == D_START2);
+    wire [63:0]  div_q, div_r;
+    wire         div_done;
+
+    seq_divider_128_64 u_seqdiv (
+        .clk       (clk),
+        .rst       (rst),
+        .start     (div_start),
+        .num       (div_num),
+        .den       (div_den),
+        .quotient  (div_q),
+        .remainder (div_r),
+        .done      (div_done),
+        .busy      ()
+    );
+
+    always @(posedge clk) begin
+        if (rst) begin
+            dstate      <= D_IDLE;
+            done        <= 1'b0;
+            a_reg       <= 80'd0;
+            b_reg       <= 80'd0;
+            zSig0_q     <= 64'd0;
+            rem_after_q <= 64'd0;
+            zSig1_raw_q <= 64'd0;
+            r2_q        <= 64'd0;
+        end else begin
+            done <= 1'b0;                         // default; pulsed below
+            case (dstate)
+                D_IDLE: if (start) begin
+                    a_reg  <= a;                 // freeze operands for the compute
+                    b_reg  <= b;
+                    dstate <= D_START1;
+                end
+                // a_reg/b_reg now settled -> num128_first valid; div_start is
+                // high this cycle so the divider latches pass 1.
+                D_START1: dstate <= D_PASS1;
+                D_PASS1: if (div_done) begin
+                    zSig0_q     <= div_q;
+                    rem_after_q <= div_r;
+                    dstate      <= D_START2;
+                end
+                // div_start high again -> divider latches pass 2.
+                D_START2: dstate <= D_PASS2;
+                D_PASS2: if (div_done) begin
+                    zSig1_raw_q <= div_q;
+                    r2_q        <= div_r;
+                    done        <= 1'b1;         // z/flags combinational-valid now
+                    dstate      <= D_IDLE;
+                end
+                default: dstate <= D_IDLE;
+            endcase
+        end
+    end
+
+    // Quotient/remainder aliases from the FSM-registered results.  zSig1
+    // carries the next 64 mantissa bits with the second-divide sticky OR'd
+    // into its LSB, matching Bochs's `zSig1 |= ((rem1 | rem2) != 0)`.
+    wire [63:0]  zSig0      = zSig0_q;
+    wire [63:0]  zSig1_raw  = zSig1_raw_q;
+    wire         sticky_pre = |r2_q;
+    wire [63:0]  zSig1      = zSig1_raw | {63'd0, sticky_pre};
 
     //--------------------------------------------------------------------
     // Round to nearest even (precision 80).  Round bit = zSig1[63];
