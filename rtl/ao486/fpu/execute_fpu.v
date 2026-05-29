@@ -846,11 +846,21 @@ module execute_fpu (
                             // ST(1) at op start (= (top_lat + 1) & 7) and
                             // bumps TOP to top_lat + 2.  fpu_done pulses
                             // here instead of S_POP for double-pop ops.
-        S_XTRACT2 = 4'd9;   // PR-2b.5q (iter 131): second leg of FXTRACT.
+        S_XTRACT2 = 4'd9,   // PR-2b.5q (iter 131): second leg of FXTRACT.
                             // S_RETIRE writes the exponent to ST(0) (no TOP
                             // change); S_XTRACT2 writes the significand to
                             // abs_new_top and pulses top_we (top_din =
                             // top_lat - 1) to PUSH.  fpu_done pulses here.
+        S_DIVWAIT = 4'd10;  // PR-2b.5x (iter 144, synth-unblock Slice 2b):
+                            // DIV-only multi-cycle wait.  softfloat_div_x80 is
+                            // now CLOCKED (Slice 2a); for KIND_DIV ops S_COMPUTE
+                            // pulses div_start (1 cyc) then parks here until
+                            // div_done (~131 cyc), where z_lat/flags_lat get
+                            // (re-)registered with the now-valid div result and
+                            // we advance to S_POST.  EVERY non-DIV op keeps the
+                            // 1-cycle S_COMPUTE->S_POST path.  This state is
+                            // invisible to all outputs (they're gated on
+                            // S_RETIRE/S_POP/S_FXCH2/S_POP2/S_XTRACT2).
 
     reg [3:0]  state;
 
@@ -1128,6 +1138,16 @@ module execute_fpu (
     wire [79:0] div_z;
     wire [5:0]  div_flags;
 
+    // PR-2b.5x (iter 144, synth-unblock Slice 2b): the divide primitive is now
+    // CLOCKED (Slice 2a, 15f2d17).  div_start is a NATURAL 1-cycle pulse — it is
+    // high only during the single S_COMPUTE cycle a KIND_DIV op occupies before
+    // it parks in S_DIVWAIT, so u_div (idle at that point) latches op_a/op_b
+    // exactly once and never re-starts.  div_done is forward-declared here
+    // (Gotcha #9) because the FSM's S_DIVWAIT arm reads it above the u_div
+    // instantiation that drives it.
+    wire        div_start = (state == S_COMPUTE) && (kind_lat == KIND_DIV);
+    wire        div_done;
+
     // PR-2b.3e: es_now / unmasked_flags forward-declared here because the
     // FSM's S_RETIRE→S_POP transition rule reads es_now (gating the pop
     // on ~es_now to honour SDM §8.1.5).  Without the forward declaration
@@ -1394,7 +1414,34 @@ module execute_fpu (
                                        is_mem_form_lat ?
                                            (flags_pre | {4'd0, mem_de_flag, mem_ie_flag}) :
                                                     flags_pre;
-                    state           <= S_POST;
+                    // PR-2b.5x (iter 144): KIND_DIV parks in S_DIVWAIT until the
+                    // clocked divider asserts div_done.  The z_lat/flags_lat just
+                    // registered above are STALE for DIV (div_z is not valid this
+                    // cycle — the divider only just latched its operands) and get
+                    // overwritten in S_DIVWAIT.  div_start is high this cycle (and
+                    // only this cycle).  Every non-DIV op keeps S_COMPUTE->S_POST.
+                    state           <= (kind_lat == KIND_DIV) ? S_DIVWAIT : S_POST;
+                end
+
+                // S_DIVWAIT (PR-2b.5x iter 144): hold while the clocked
+                // softfloat_div_x80 runs (~131 cycles).  div_start was pulsed for
+                // the single S_COMPUTE cycle that preceded this state, so the
+                // divider already froze op_a/op_b (op_b was the LIVE rf_rd_data /
+                // mem_z during S_COMPUTE — see the arith_b mux).  On div_done,
+                // sum_pre = div_z is valid and held; register z_lat/flags_lat with
+                // the DIV-only arms of the S_COMPUTE cascade (reg-form falls to
+                // flags_pre; mem-form FDIV/FDIVR ORs in the converter's DE/IE),
+                // then advance to S_POST.  fpu_busy stays high throughout
+                // (state != S_IDLE) so the pipeline stalls; no output fires here
+                // (all gated on S_RETIRE/S_POP/...).
+                S_DIVWAIT: begin
+                    if (div_done) begin
+                        z_lat     <= sum_pre;
+                        flags_lat <= is_mem_form_lat
+                                   ? (flags_pre | {4'd0, mem_de_flag, mem_ie_flag})
+                                   : flags_pre;
+                        state     <= S_POST;
+                    end
                 end
 
                 // S_POST: PR-2b.2c places exception-flag computation here.
@@ -1580,9 +1627,13 @@ module execute_fpu (
     );
 
     softfloat_div_x80 u_div (
+        .clk       (clk),
+        .rst       (~rst_n | exe_reset | init),  // mirror the FSM state-clear
+        .start     (div_start),
         .a         (op_a),
         .b         (op_b),
         .precision (cw[9:8]),
+        .done      (div_done),
         .z         (div_z),
         .flags     (div_flags)
     );
