@@ -851,7 +851,7 @@ module execute_fpu (
                             // change); S_XTRACT2 writes the significand to
                             // abs_new_top and pulses top_we (top_din =
                             // top_lat - 1) to PUSH.  fpu_done pulses here.
-        S_DIVWAIT = 4'd10;  // PR-2b.5x (iter 144, synth-unblock Slice 2b):
+        S_DIVWAIT = 4'd10,  // PR-2b.5x (iter 144, synth-unblock Slice 2b):
                             // DIV-only multi-cycle wait.  softfloat_div_x80 is
                             // now CLOCKED (Slice 2a); for KIND_DIV ops S_COMPUTE
                             // pulses div_start (1 cyc) then parks here until
@@ -861,6 +861,18 @@ module execute_fpu (
                             // 1-cycle S_COMPUTE->S_POST path.  This state is
                             // invisible to all outputs (they're gated on
                             // S_RETIRE/S_POP/S_FXCH2/S_POP2/S_XTRACT2).
+        S_REMWAIT = 4'd11;  // PR-2b.5x (iter 146, synth-unblock Slice 3b):
+                            // FPREM/FPREM1-only multi-cycle wait.  floatx80_remainder
+                            // is now CLOCKED (Slice 3a, af075d3); for is_fprem_any_lat
+                            // ops S_COMPUTE pulses rem_start (1 cyc) then parks here
+                            // until rem_done (~64 cyc for the divide paths, ~2 cyc for
+                            // special/passthru/expDiff<=0), where flags_lat gets
+                            // (re-)registered with the now-valid rem_flags and we
+                            // advance to S_POST.  rem_z / rem_quotient / rem_incomplete
+                            // HOLD after rem_done (the primitive doesn't restart), so
+                            // the S_RETIRE arms reading them (rf_wr_data, fprem_tag,
+                            // fprem_cc) stay valid.  Like S_DIVWAIT this state is
+                            // invisible to all outputs (gated on S_RETIRE/S_POP/...).
 
     reg [3:0]  state;
 
@@ -1148,6 +1160,17 @@ module execute_fpu (
     wire        div_start = (state == S_COMPUTE) && (kind_lat == KIND_DIV);
     wire        div_done;
 
+    // PR-2b.5x (iter 146, synth-unblock Slice 3b): the floatx80_remainder primitive
+    // is now CLOCKED (Slice 3a, af075d3).  rem_start is a NATURAL 1-cycle pulse — it
+    // is high only during the single S_COMPUTE cycle an FPREM/FPREM1 op occupies
+    // before it parks in S_REMWAIT, so u_floatx80_remainder (idle then) latches its
+    // a (a_lat) / b (LIVE rf_rd_data = ST(1)) exactly once and never re-starts.
+    // rem_done is forward-declared here (Gotcha #9) because the FSM's S_REMWAIT arm
+    // reads it above the instantiation that drives it.  FPREM is KIND_ADD (not in the
+    // KIND_DIV rail) so div_start stays 0 for it — the two waits never overlap.
+    wire        rem_start = (state == S_COMPUTE) && is_fprem_any_lat;
+    wire        rem_done;
+
     // PR-2b.3e: es_now / unmasked_flags forward-declared here because the
     // FSM's S_RETIRE→S_POP transition rule reads es_now (gating the pop
     // on ~es_now to honour SDM §8.1.5).  Without the forward declaration
@@ -1419,8 +1442,14 @@ module execute_fpu (
                     // registered above are STALE for DIV (div_z is not valid this
                     // cycle — the divider only just latched its operands) and get
                     // overwritten in S_DIVWAIT.  div_start is high this cycle (and
-                    // only this cycle).  Every non-DIV op keeps S_COMPUTE->S_POST.
-                    state           <= (kind_lat == KIND_DIV) ? S_DIVWAIT : S_POST;
+                    // only this cycle).  PR-2b.5x (iter 146): likewise FPREM/FPREM1
+                    // parks in S_REMWAIT until the clocked remainder asserts rem_done
+                    // — the flags_lat<=rem_flags arm above is STALE for FPREM (the
+                    // primitive only just latched its operands this cycle) and gets
+                    // overwritten in S_REMWAIT.  rem_start is high this cycle (and only
+                    // this cycle).  Every other op keeps the 1-cycle S_COMPUTE->S_POST.
+                    state           <= (kind_lat == KIND_DIV) ? S_DIVWAIT :
+                                       is_fprem_any_lat       ? S_REMWAIT : S_POST;
                 end
 
                 // S_DIVWAIT (PR-2b.5x iter 144): hold while the clocked
@@ -1440,6 +1469,24 @@ module execute_fpu (
                         flags_lat <= is_mem_form_lat
                                    ? (flags_pre | {4'd0, mem_de_flag, mem_ie_flag})
                                    : flags_pre;
+                        state     <= S_POST;
+                    end
+                end
+
+                // S_REMWAIT (PR-2b.5x iter 146): hold while the clocked
+                // floatx80_remainder runs.  rem_start was pulsed for the single
+                // S_COMPUTE cycle that preceded this state, so the primitive already
+                // froze its a (a_lat) / b (the LIVE rf_rd_data = ST(1) during
+                // S_COMPUTE — see the remainder's .b mux).  On rem_done, rem_flags is
+                // valid and held; re-register flags_lat with it (FPREM is reg-only so
+                // no mem-form DE/IE OR — unlike S_DIVWAIT), then advance to S_POST.
+                // rem_z / rem_quotient / rem_incomplete also hold, so the S_RETIRE
+                // arms (rf_wr_data, fprem_tag, fprem_cc) read them correctly later.
+                // fpu_busy stays high throughout (state != S_IDLE) so the pipeline
+                // stalls; no output fires here (all gated on S_RETIRE/S_POP/...).
+                S_REMWAIT: begin
+                    if (rem_done) begin
+                        flags_lat <= rem_flags;
                         state     <= S_POST;
                     end
                 end
@@ -1760,14 +1807,24 @@ module execute_fpu (
     // rf_rd_data during S_COMPUTE (src_lat=1 -> rd_idx=abs_st1 in S_FETCH_B); using
     // b_lat alone would latch flags off a stale operand.  rnd_nearest selects FPREM1
     // (RTNE quotient) vs FPREM (RTZ).
+    // PR-2b.5x (iter 146, synth-unblock Slice 3b): now CLOCKED.  clk/rst/start/done
+    // added; rem_start (1-cycle, S_COMPUTE only) latches a/b internally so the .b
+    // timing mux only needs to be valid at that start edge (state==S_COMPUTE →
+    // rf_rd_data = LIVE ST(1)); after the freeze .b reverts to b_lat but the
+    // primitive ignores it (results key off its frozen a_reg/b_reg).  rst mirrors
+    // the FSM state-clear.
     floatx80_remainder u_floatx80_remainder (
+        .clk         (clk),
+        .rst         (~rst_n | exe_reset | init),
+        .start       (rem_start),
         .a           (a_lat),
         .b           ((state == S_COMPUTE) ? rf_rd_data : b_lat),
         .rnd_nearest (is_fprem1_lat),
         .z           (rem_z),
         .quotient    (rem_quotient),
         .incomplete  (rem_incomplete),
-        .flags       (rem_flags)
+        .flags       (rem_flags),
+        .done        (rem_done)
     );
     // PR-2b.5t (iter 137): FSQRT.  SINGLE operand a = ST(0) (a_lat, stable from
     // S_FETCH_B through S_RETIRE — no S_COMPUTE/b_lat timing mux, unlike FSCALE/
