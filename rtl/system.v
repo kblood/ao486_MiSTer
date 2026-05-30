@@ -550,26 +550,14 @@ ide ide1
 	.irq               (irq_15)
 );
 
-joystick joystick
-(
-	.clk               (clk_sys),
-	.rst_n             (~reset),
-
-	.clock_rate        (clock_rate),
-
-	.read              (iobus_read & joy_cs),
-	.write             (iobus_write & joy_cs),
-	.readdata          (joystick_readdata),
-
-	.dis               (joystick_dis),
-
-	.dig_1             (joystick_dig_1),
-	.dig_2             (joystick_dig_2),
-	.ana_1             (joystick_ana_1),
-	.ana_2             (joystick_ana_2),
-	.mode              (joystick_mode),
-	.timed             (joystick_timed)
-);
+// PR-2c.7 (iter 160): the gameport/joystick controller is removed to reclaim
+// ~655 ALUTs for the x87 FPU fit on the fixed DE10-nano.  With no gameport
+// card present, I/O port 0x201 reads open-bus 0xFF (all buttons released, all
+// axis one-shots timed-out) — which is exactly how DOS software detects "no
+// joystick installed".  The joystick_* HPS inputs are left unconnected (no
+// fan-out, pruned by synthesis).  To restore, re-instantiate joystick here
+// driving joystick_readdata from the .dig_*/.ana_*/.mode/.timed inputs.
+assign joystick_readdata = 8'hFF;
 
 pit pit
 (
