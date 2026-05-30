@@ -59,6 +59,32 @@ set_global_assignment -name FITTER_AGGRESSIVE_ROUTABILITY_OPTIMIZATION ALWAYS
 # full 128KB L2; if this still congests, next escalation is L2 -> 64KB.
 set_global_assignment -name SEED 2
 
+# PR-2c.15 (iter 165d): keep register retiming ON globally (line 38 — an upstream MiSTer
+# HIGH-PERFORMANCE setting the NON-FPU paths need: a global OFF closed the FPU but
+# regressed l2_cache read_addr/ram_addr (-19.8 ns) and tlb|linear, which are real
+# single-cycle paths retiming was pipelining and CANNOT be multicycled).  Retiming's only
+# harm is pulling the FPU multicycle-destination flops BACKWARD into their deep source
+# cones (esp. b_lat into the bcd_to_int64 18-term multiply cone), splitting each
+# multicycle path (e.g. -from mem_data_lat -to b_lat) so NEITHER segment matches the
+# set_multicycle_path endpoints and the retimed segment is checked SINGLE-cycle (STA:
+# b_lat via bcd_to_int64|Add0~1_OTERM... = -32 ns; b_lat was the SOLE failure with
+# retiming on).  Per-instance ALLOW_REGISTER_RETIMING -to is rejected by 17.0 Lite (err
+# 125024), but PRESERVE_REGISTER ON IS node-level and the fitter does NOT retime a
+# preserved register — so pin exactly the deep FPU multicycle flops.  These are simple
+# flops (NOT the regfile/csr RAM, which inferred fine and passed), clocked only after the
+# S_ARITHWAIT / wait states, so preserving them costs nothing and lets the SDC multicycle
+# exceptions survive.  Retiming stays ON everywhere else (l2_cache, tlb, etc).
+set_instance_assignment -name PRESERVE_REGISTER ON -to "*u_execute_fpu|b_lat*"
+set_instance_assignment -name PRESERVE_REGISTER ON -to "*u_execute_fpu|z_lat*"
+set_instance_assignment -name PRESERVE_REGISTER ON -to "*u_execute_fpu|flags_lat*"
+set_instance_assignment -name PRESERVE_REGISTER ON -to "*write_inst|wr_fpu_store_data*"
+set_instance_assignment -name PRESERVE_REGISTER ON -to "*write_inst|wr_fpu_eflags_value*"
+# PR-2c.17 (iter 165g): the divider's registered divisor/numerator (fed by the deep
+# floatx80_normalize cone, captured once in D_SETTLE and multicycled -setup 3) — keep
+# the fitter from retiming them back into the cone and re-splitting the relaxed path.
+set_instance_assignment -name PRESERVE_REGISTER ON -to "*u_div|num_reg*"
+set_instance_assignment -name PRESERVE_REGISTER ON -to "*u_div|den_reg*"
+
 set_global_assignment -name VERILOG_MACRO "MISTER_FB=1"
 
 #enable it only if 8bit indexed mode is used in core

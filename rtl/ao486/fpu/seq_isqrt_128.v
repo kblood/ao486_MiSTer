@@ -51,15 +51,27 @@ module seq_isqrt_128 (
 
     assign busy = (state == S_RUN);
 
-    // One restoring step -- IDENTICAL recurrence to floatx80_sqrt.v's comb loop:
-    //   if (op >= res+one) { op -= res+one; res = (res>>1)+one; }
-    //   else               {                res =  res>>1;       }
-    //   one >>= 2;
-    wire [127:0] res_plus_one = res_q + one_q;
-    wire         ge           = (op_q >= res_plus_one);
-    wire [127:0] op_next      = ge ? (op_q - res_plus_one)      : op_q;
-    wire [127:0] res_next     = ge ? ((res_q >> 1) + one_q)     : (res_q >> 1);
-    wire [127:0] one_next     = one_q >> 2;
+    // PR-2c.16 (iter 165f): each restoring step is now split across TWO clock cycles
+    // to halve the per-cycle combinational depth.  The single-cycle recurrence chained
+    // TWO serial 128-bit adders -- res_plus_one = res_q + one_q, THEN op_q - res_plus_one
+    // (the compare `ge` is that same subtract's borrow) -- a ~28 ns path that could not
+    // close at 90 MHz (STA: op_q = -17 ns) and, being an every-cycle iteration register,
+    // CANNOT be multicycled.  Now phase 0 computes res_plus_one into the registered
+    // rpo_q (one 128-bit add); phase 1 consumes rpo_q to produce op_next/res_next (one
+    // 128-bit subtract + mux).  The recurrence is BIT-IDENTICAL to before -- rpo_q is
+    // res_q + one_q evaluated while res_q/one_q are still the step's input values, and
+    // op_q/res_q/one_q advance only on phase 1 -- so the FSQRT golden is unchanged.
+    // Compute now takes 64*2 = 128 cycles (FSQRT is rare; S_SQRTWAIT just waits on done).
+    reg         phase;   // sub-step: 0 = compute res_plus_one, 1 = apply
+    reg [127:0] rpo_q;   // registered res_q + one_q (carried from phase 0 to phase 1)
+
+    // phase-1 next-state -- IDENTICAL recurrence to floatx80_sqrt.v's comb loop, but
+    // reading the REGISTERED rpo_q instead of a live (res_q + one_q):
+    //   if (op >= rpo) { op -= rpo; res = (res>>1)+one; } else { res = res>>1; } one>>=2;
+    wire         ge        = (op_q >= rpo_q);
+    wire [127:0] op_next   = ge ? (op_q - rpo_q)          : op_q;
+    wire [127:0] res_next  = ge ? ((res_q >> 1) + one_q)  : (res_q >> 1);
+    wire [127:0] one_next  = one_q >> 2;
 
     always @(posedge clk) begin
         if (rst) begin
@@ -70,6 +82,8 @@ module seq_isqrt_128 (
             op_q  <= 128'd0;
             res_q <= 128'd0;
             one_q <= 128'd0;
+            rpo_q <= 128'd0;
+            phase <= 1'b0;
             cnt   <= 7'd0;
         end else begin
             done <= 1'b0;
@@ -80,19 +94,28 @@ module seq_isqrt_128 (
                         res_q <= 128'd0;
                         one_q <= 128'd1 << 126;
                         cnt   <= 7'd64;
+                        phase <= 1'b0;
                         state <= S_RUN;
                     end
                 end
                 S_RUN: begin
-                    op_q  <= op_next;
-                    res_q <= res_next;
-                    one_q <= one_next;
-                    cnt   <= cnt - 7'd1;
-                    if (cnt == 7'd1) begin   // 64th (final) step
-                        root  <= res_next[63:0];
-                        resid <= op_next;
-                        done  <= 1'b1;
-                        state <= S_IDLE;
+                    if (phase == 1'b0) begin
+                        // phase 0: register res_plus_one for this digit
+                        rpo_q <= res_q + one_q;
+                        phase <= 1'b1;
+                    end else begin
+                        // phase 1: apply the restoring step using rpo_q
+                        op_q  <= op_next;
+                        res_q <= res_next;
+                        one_q <= one_next;
+                        cnt   <= cnt - 7'd1;
+                        phase <= 1'b0;
+                        if (cnt == 7'd1) begin   // 64th (final) step
+                            root  <= res_next[63:0];
+                            resid <= op_next;
+                            done  <= 1'b1;
+                            state <= S_IDLE;
+                        end
                     end
                 end
             endcase

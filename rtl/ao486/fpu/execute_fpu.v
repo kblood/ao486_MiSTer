@@ -904,7 +904,7 @@ module execute_fpu (
                             // KIND_DIV rail; is_fprem_any_lat=0) so div_start/rem_start
                             // stay 0 — the three waits never overlap.  Like S_DIVWAIT
                             // this state is invisible to all outputs.
-        S_BCDWAIT = 4'd13;  // PR-2c.10 (iter 163, synth-unblock FBSTP BCD): the
+        S_BCDWAIT = 4'd13,  // PR-2c.10 (iter 163, synth-unblock FBSTP BCD): the
                             // int64_to_bcd packed-BCD encoder is now CLOCKED
                             // (Slice 1, d105a8f); for is_fbstp_lat ops S_COMPUTE
                             // pulses bcd_start (1 cyc) then parks here until
@@ -918,8 +918,27 @@ module execute_fpu (
                             // (fbstp_ia/fbstp_pe) so it was already registered
                             // correctly at S_COMPUTE and needs no re-register here.
                             // Invisible to all outputs (gated on S_RETIRE/S_POP/...).
+        S_ARITHWAIT = 4'd14; // PR-2c.12 (iter 165): multi-cycle wait for the
+                            // COMBINATIONAL arith/converter ops (add/sub/mul + the
+                            // mem load/store converters) whose result reaches z_lat
+                            // through the full ~106 ns floatx80 datapath.  Today
+                            // S_COMPUTE registers z_lat<=sum_pre / flags_lat<=cascade
+                            // in ONE edge = the mem_data_lat->z_lat path that fails
+                            // setup at 90 MHz (Restricted Fmax 9.3 MHz).  Mirroring
+                            // S_DIVWAIT, the else-bucket now parks here
+                            // ARITH_WAIT_CYCLES cycles with operands held stable
+                            // (mem-form keeps mem_z LIVE; reg-form uses registered
+                            // b_lat), then (re-)registers z_lat<=sum_pre and
+                            // flags_lat<=flags_compute and advances to S_POST.  Paired
+                            // with set_multicycle_path -setup/-hold to z_lat+flags_lat
+                            // in ao486.sdc.  Invisible to outputs (gated S_RETIRE...).
+
+    localparam ARITH_WAIT_CYCLES = 12; // PR-2c.12: dwell so the ~106 ns sum_pre/
+                                       // flags_pre paths settle (12*11.11ns=133ns);
+                                       // MUST match the SDC multicycle N in ao486.sdc.
 
     reg [3:0]  state;
+    reg [3:0]  arith_wait_cnt;  // PR-2c.12 (iter 165): S_ARITHWAIT down-counter
 
     // Latched operands + result.
     reg [79:0] a_lat;       // ST(0) at op start
@@ -1200,6 +1219,10 @@ module execute_fpu (
     //--------------------------------------------------------------------
     wire [79:0] sum_pre;       // final z presented to the FSM
     wire [5:0]  flags_pre;     // final flags presented to the FSM
+    wire [5:0]  flags_compute; // PR-2c.12 (iter 165): the full per-op flags
+                               // cascade as a continuous wire, so BOTH S_COMPUTE
+                               // and the new S_ARITHWAIT re-capture the identical
+                               // settled value (assigned after sum_pre/flags_pre).
     wire [79:0] add_z;
     wire [5:0]  add_flags;
     wire [79:0] sub_z;
@@ -1216,7 +1239,20 @@ module execute_fpu (
     // exactly once and never re-starts.  div_done is forward-declared here
     // (Gotcha #9) because the FSM's S_DIVWAIT arm reads it above the u_div
     // instantiation that drives it.
-    wire        div_start = (state == S_COMPUTE) && (kind_lat == KIND_DIV);
+    // PR-2c.13 (iter 165b): the iterative-primitive start pulses now fire on the
+    // TERMINAL S_ARITHWAIT cycle (arith_wait_cnt==0), NOT in S_COMPUTE.  The operand
+    // cone feeding op_a/op_b (esp. the mem-form convert/align: mem_data_lat ->
+    // floatN/int/bcd_to_x80 -> mantissa align) is ~55 ns deep and only had the single
+    // S_COMPUTE cycle to settle before the primitive latched a_reg/b_reg — an
+    // un-relaxable 1-cycle path (STA: mem_data_lat -> u_div|a_reg = -44 ns).  Routing
+    // every op through S_ARITHWAIT first (operands held stable: a_lat registered,
+    // mem-form arith_b keeps mem_z LIVE) lets that cone settle ARITH_WAIT_CYCLES
+    // cycles; pulsing start only at cnt==0 means the primitive latches the SETTLED
+    // op_a/op_b, so -from {FPU latches} -to {u_div|a_reg ...} is an honest multicycle.
+    // Still a NATURAL 1-cycle pulse (cnt==0 holds for exactly one cycle before the
+    // state advances to S_DIVWAIT), so each primitive latches operands exactly once.
+    wire        arith_wait_done = (state == S_ARITHWAIT) && (arith_wait_cnt == 4'd0);
+    wire        div_start = arith_wait_done && (kind_lat == KIND_DIV);
     wire        div_done;
 
     // PR-2b.5x (iter 146, synth-unblock Slice 3b): the floatx80_remainder primitive
@@ -1227,7 +1263,7 @@ module execute_fpu (
     // rem_done is forward-declared here (Gotcha #9) because the FSM's S_REMWAIT arm
     // reads it above the instantiation that drives it.  FPREM is KIND_ADD (not in the
     // KIND_DIV rail) so div_start stays 0 for it — the two waits never overlap.
-    wire        rem_start = (state == S_COMPUTE) && is_fprem_any_lat;
+    wire        rem_start = arith_wait_done && is_fprem_any_lat;  // PR-2c.13: see div_start
     wire        rem_done;
 
     // PR-2b.5x (iter 149, synth-unblock Slice 4c): the floatx80_sqrt primitive is
@@ -1238,7 +1274,7 @@ module execute_fpu (
     // forward-declared here (Gotcha #9) because the FSM's S_SQRTWAIT arm reads it
     // above the instantiation that drives it.  FSQRT is KIND_ADD (not the KIND_DIV
     // rail) and is_fprem_any_lat=0, so div_start/rem_start stay 0 for it.
-    wire        sqrt_start = (state == S_COMPUTE) && is_fsqrt_lat;
+    wire        sqrt_start = arith_wait_done && is_fsqrt_lat;  // PR-2c.13: see div_start
     wire        sqrt_done;
 
     // PR-2c.10 (iter 163, synth-unblock FBSTP BCD): int64_to_bcd is now CLOCKED
@@ -1249,7 +1285,7 @@ module execute_fpu (
     // S_BCDWAIT arm reads it above the instantiation that drives it.  FBSTP is
     // not in the KIND_DIV rail and is_fprem_any_lat/is_fsqrt_lat=0, so the other
     // three start pulses stay 0 — the four waits never overlap.
-    wire        bcd_start = (state == S_COMPUTE) && is_fbstp_lat;
+    wire        bcd_start = arith_wait_done && is_fbstp_lat;  // PR-2c.13: see div_start
     wire        bcd_done;
 
     // PR-2b.3e: es_now / unmasked_flags forward-declared here because the
@@ -1297,6 +1333,7 @@ module execute_fpu (
         // forcing state<=S_IDLE during init is a no-op for correctness.
         if (!rst_n || exe_reset || init) begin
             state           <= S_IDLE;
+            arith_wait_cnt  <= 4'd0;     // PR-2c.12 iter 165
             a_lat           <= 80'd0;
             b_lat           <= 80'd0;
             z_lat           <= 80'd0;
@@ -1449,87 +1486,45 @@ module execute_fpu (
                     // from the captured halves — no converter (the bits ARE the
                     // floatx80).  Takes priority over the m32/m64 mem_z path
                     // (is_mem_form_lat is 0 for FLD m80, but be explicit).
-                    b_lat           <= is_fbld_lat    ? fbld_x80 :          // PR-2b.5z iter 152: BCD->int->floatx80
-                                       is_fld_m80_lat ? {mem80_hi_lat, mem_data_lat} :
-                                       is_mem_form_lat ? mem_z : rf_rd_data;
+                    // PR-2c.14 (iter 165c): the DEEP b_lat arms (mem_z float/int
+                    // converter, fbld_x80 BCD->int->floatx80, m80 raw concat) launch
+                    // from mem_data_lat/mem80_hi_lat and are ~45 ns deep — capturing
+                    // them at this single S_COMPUTE edge (~3 cyc after mem_data_lat) was
+                    // the binding -33.8 ns path (STA: mem_data_lat -> b_lat).  None of
+                    // them is read during S_ARITHWAIT (mem-form arith uses LIVE mem_z via
+                    // arith_b; loads read b_lat only at S_RETIRE), so DEFER them to the
+                    // S_ARITHWAIT terminal cycle (12-cyc settle, see the b_lat arm there).
+                    // ONLY the reg-form arm (rf_rd_data, SHALLOW) stays here — it is the
+                    // operand the reg-form arith wait consumes as arith_b during
+                    // S_ARITHWAIT, so it must be valid at S_ARITHWAIT entry and CANNOT be
+                    // relaxed (its launch is fpu_regfile, excluded from the b_lat -from).
+                    b_lat           <= (is_fbld_lat || is_fld_m80_lat || is_mem_form_lat)
+                                       ? b_lat            // deep: hold, re-captured at S_ARITHWAIT cnt==0
+                                       : rf_rd_data;      // reg-form: shallow, single-cycle
                     stsrc_empty_lat <= (rf_rd_tag == 2'b11);
                     stsrc_tag_lat   <= rf_rd_tag;
-                    z_lat           <= sum_pre;
-                    // PR-2b.4d (iter 55): mem-form OR's the converter's
-                    // de/ie flags into the arith primitive's flags_pre so
-                    // SNaN-input loads raise IE and denormal-input loads
-                    // raise DE.  Bit positions match cw[5:0] / sw[5:0]:
-                    //   flags_lat[0] = IE
-                    //   flags_lat[1] = DE
-                    // Higher bits (ZE/OE/UE/PE) come solely from flags_pre.
-                    flags_lat       <= // PR-2b.4k STAGE 3 (iter 77): mem-form FLD takes ONLY
-                                       // the converter's DE/IE — flags_pre is junk for FLD
-                                       // (the arith primitive ran on a fabricated a/b pair).
-                                       // Check this BEFORE the is_fld_lat-in-OR-list arm so
-                                       // mem-form FLD doesn't fall through to 6'd0.
-                                       is_fld_mem_lat ? {4'd0, mem_de_flag, mem_ie_flag} :
-                                       // PR-2b.5f (iter 119): narrowing-store exception flags.
-                                       // {PE,UE,OE,ZE,DE,IE} = {pe, ue, oe, 0, 0, ie} taken from
-                                       // the active converter (FST and FSTP share the same lane).
-                                       // ZE/DE are never raised by a store narrowing-conversion.
-                                       // Must precede the 6'd0 control-op arm below.
-                                       (is_fstp_m32_lat | is_fst_m32_lat) ? {f32_pe, f32_ue, f32_oe, 1'b0, 1'b0, f32_ie} :
-                                       (is_fstp_m64_lat | is_fst_m64_lat) ? {f64_pe, f64_ue, f64_oe, 1'b0, 1'b0, f64_ie} :
-                                       // PR-2b.5w (iter 141): FIST/FISTP flags.  {PE,UE,OE,ZE,DE,IE} =
-                                       // {pe,0,0,0,0,ie}; only IE (#IA on out-of-range/NaN/Inf) and PE
-                                       // (inexact) arise from an integer store — no UE/OE/ZE, and FIST
-                                       // does NOT raise DE on a denormal source (Bochs convention).
-                                       is_fist_lat ? {fist_pe, 1'b0, 1'b0, 1'b0, 1'b0, fist_ie} :
-                                       // PR-2b.5z (iter 152): FBSTP flags.  {PE,UE,OE,ZE,DE,IE} =
-                                       // {pe & ~ia, 0,0,0,0, ia}; IA on out-of-range / NaN / Inf (stores
-                                       // packed-BCD indefinite), else PE on a rounded (inexact) integer.
-                                       // No UE/OE/ZE/DE from a packed-BCD store.  Must precede the 6'd0
-                                       // control-op arm (is_fbstp_lat is NOT in that OR-list).
-                                       is_fbstp_lat ? fbstp_flags :
-                                       // PR-2b.5n (iter 127): FRNDINT flags.  {PE,UE,OE,ZE,DE,IE} =
-                                       // {pe,0,0,0,de,ie}; OE/UE/ZE never arise from round-to-int.
-                                       // Must precede the 6'd0 control-op arm (is_frndint_lat is NOT
-                                       // in that OR-list, so omitting this would drop to flags_pre).
-                                       is_frndint_lat ? {rndint_pe, 1'b0, 1'b0, 1'b0, rndint_de, rndint_ie} :
-                                       // PR-2b.5p (iter 130): FSCALE flags.  {PE,UE,OE,ZE,DE,IE} =
-                                       // {pe,ue,oe,0,de,ie}; ZE never arises from a power-of-two
-                                       // scale.  Must precede the 6'd0 control-op arm (is_fscale_lat
-                                       // is NOT in that OR-list, so omitting this drops to flags_pre).
-                                       is_fscale_lat ? {scale_pe, scale_ue, scale_oe, 1'b0, scale_de, scale_ie} :
-                                       // PR-2b.5q (iter 131): FXTRACT flags.  {PE,UE,OE,ZE,DE,IE} =
-                                       // {0,0,0,ze,de,ie}; PE/UE/OE never arise from a split.  ZE on a
-                                       // zero source (exponent = -Inf).  Must precede the 6'd0 arm
-                                       // (is_fxtract_lat is NOT in that OR-list).
-                                       is_fxtract_lat ? {3'b0, extract_ze, extract_de, extract_ie} :
-                                       // PR-2b.5r (iter 135): FPREM/FPREM1 flags.  rem_flags is
-                                       // already {PE,UE,OE,ZE,DE,IE} (OE/ZE always 0; Slice-1 IE
-                                       // from the special-operand stub).  Must precede the 6'd0
-                                       // control-op arm (is_fprem*_lat are NOT in that OR-list).
-                                       is_fprem_any_lat ? rem_flags :
-                                       // PR-2b.5t (iter 137): FSQRT flags.  sqrt_flags is already
-                                       // {PE,UE,OE,ZE,DE,IE} (UE/OE/ZE always 0; IE on negative/SNaN,
-                                       // DE on a positive denormal).  Must precede the 6'd0 control-op
-                                       // arm (is_fsqrt_lat is NOT in that OR-list).
-                                       is_fsqrt_lat ? sqrt_flags :
-                                       (is_fxch_lat | is_fld_lat | is_fst_lat |
-                                        is_fstp_m80_lat |                       // PR-2b.5a iter 113: verbatim 80-bit store, no exceptions
-                                        is_fld_m80_lat |                        // PR-2b.5g iter 124: verbatim 80-bit load, no exceptions (even on SNaN)
-                                        is_fbld_lat |                           // PR-2b.5z iter 152: BCD load is exact (18 digits < 2^60), no exceptions
-                                        is_fchs_lat | is_fabs_lat | is_fxam_lat |
-                                        is_ffree_lat | is_fnop_lat |
-                                        is_fdecstp_lat | is_fincstp_lat |
-                                        is_fcmov_lat | is_fconst_lat) ? 6'd0 :  // PR-2b.4n iter 112
-                                       // PR-2b.4g (iter 58): mem-form cmp ops OR the
-                                       // converter's de/ie into the cmp_ie_now lane.
-                                       // Denormal mem -> DE (converter); SNaN mem ->
-                                       // IE (from BOTH the converter and cmp_ie_now —
-                                       // OR is idempotent so they merge harmlessly).
-                                       (is_cmp_lat & is_mem_form_lat) ?
-                                           {4'd0, mem_de_flag, cmp_ie_now | mem_ie_flag} :
-                                       is_cmp_lat ? {5'd0, cmp_ie_now} :
-                                       is_mem_form_lat ?
-                                           (flags_pre | {4'd0, mem_de_flag, mem_ie_flag}) :
-                                                    flags_pre;
+                    // PR-2c.12 (iter 165): z_lat / flags_lat are NO LONGER captured
+                    // here.  Capturing them at this single S_COMPUTE edge made the
+                    // full ~106 ns combinational arith/flags chain a one-cycle path:
+                    //   reg-form  rf_rd_data -> align -> add/mul -> ... -> z_lat/flags
+                    //   mem-form  mem_data_lat -> convert -> ... -> z_lat/flags
+                    // The mem-form source (mem_data_lat) could be relaxed by a
+                    // multicycle, but the reg-form source (rf_rd_data) is only valid
+                    // for ~1 cycle before this edge, so it CANNOT be legally relaxed
+                    // by an SDC multicycle.  Instead EVERY exit from S_COMPUTE now
+                    // goes to a wait state that re-captures from STABLE registers:
+                    //   - else-bucket (add/sub/mul, converters, control) -> S_ARITHWAIT
+                    //     (z_lat<=sum_pre, flags_lat<=flags_compute from a_lat/b_lat/
+                    //      mem_z, held ARITH_WAIT_CYCLES cycles; multicycle-relaxed)
+                    //   - KIND_DIV  -> S_DIVWAIT  (z_lat/flags_lat from div_z/div_flags)
+                    //   - FPREM*    -> S_REMWAIT  (flags_lat from rem_flags; reads rem_z)
+                    //   - FSQRT     -> S_SQRTWAIT (flags_lat from sqrt_flags; reads sqrt_z)
+                    //   - FBSTP     -> S_BCDWAIT  (flags_lat from flags_compute=fbstp_flags,
+                    //                              now captured there — see S_BCDWAIT)
+                    // b_lat IS still captured here: it is the registered operand the
+                    // arith wait consumes (reg-form) and the FLD/FXCH/FBLD result; its
+                    // mem-form source is the SHALLOW converter (mem_data_lat->mem_z),
+                    // which was never in the failing path set.
                     // PR-2b.5x (iter 144): KIND_DIV parks in S_DIVWAIT until the
                     // clocked divider asserts div_done.  The z_lat/flags_lat just
                     // registered above are STALE for DIV (div_z is not valid this
@@ -1541,10 +1536,81 @@ module execute_fpu (
                     // primitive only just latched its operands this cycle) and gets
                     // overwritten in S_REMWAIT.  rem_start is high this cycle (and only
                     // this cycle).  Every other op keeps the 1-cycle S_COMPUTE->S_POST.
-                    state           <= (kind_lat == KIND_DIV) ? S_DIVWAIT :
-                                       is_fprem_any_lat       ? S_REMWAIT :
-                                       is_fsqrt_lat           ? S_SQRTWAIT :
-                                       is_fbstp_lat           ? S_BCDWAIT : S_POST;
+                    // PR-2c.12 (iter 165): the else-bucket (add/sub/mul reg+mem
+                    // form, the load/store converters, and the trivial control
+                    // ops) no longer drops straight to S_POST.  Its z_lat/flags_lat
+                    // reach the regfile through the full combinational floatx80
+                    // datapath (mem_data_lat -> convert -> align -> add/mul ->
+                    // normalize -> round -> pack), which is 106 ns and CANNOT close
+                    // in one 11.1 ns (90 MHz) cycle.  Park ARITH_WAIT_CYCLES in
+                    // S_ARITHWAIT (operands held: mem-form keeps mem_z live, reg-form
+                    // uses registered b_lat) and capture z_lat/flags_lat there.  The
+                    // z_lat/flags_lat assigned above this cycle are now STALE for the
+                    // else-bucket (just like the div/rem stale-capture) and get
+                    // overwritten in S_ARITHWAIT.  Paired with set_multicycle_path
+                    // -setup ARITH_WAIT_CYCLES in ao486.sdc.  Div/rem/sqrt/bcd are
+                    // ALREADY multi-cycle so they keep their own wait states.
+                    // PR-2c.13 (iter 165b): EVERY op now enters S_ARITHWAIT first so
+                    // the deep operand cone settles ARITH_WAIT_CYCLES cycles with
+                    // operands held stable.  Plain arith captures z_lat/flags_lat at
+                    // cnt==0 and falls to S_POST; div/rem/sqrt/bcd instead pulse their
+                    // start (op_a/op_b now SETTLED) at cnt==0 and branch to their own
+                    // iterative wait.  Previously div/rem/sqrt/bcd branched here in
+                    // S_COMPUTE and latched their primitive's operands after only the
+                    // single S_COMPUTE cycle — a -44 ns single-cycle path into u_div's
+                    // a_reg.  See the *_start wires and the S_ARITHWAIT arm below.
+                    arith_wait_cnt  <= ARITH_WAIT_CYCLES;
+                    state           <= S_ARITHWAIT;
+                end
+
+                // S_ARITHWAIT (PR-2c.12 iter 165): hold while the combinational
+                // floatx80 add/sub/mul + load/store converters settle.  Operands are
+                // stable (a_lat registered; mem-form arith_b keeps mem_z LIVE via the
+                // (S_COMPUTE||S_ARITHWAIT) mux arm; reg-form arith_b = registered
+                // b_lat), so sum_pre/flags_compute are a pure combinational function
+                // of held registers and converge given ARITH_WAIT_CYCLES cycles.
+                // On the final cycle (re-)register z_lat/flags_lat with the SETTLED
+                // values and advance to S_POST.  fpu_busy (state != S_IDLE) stalls the
+                // pipeline throughout; no output fires here (all gated on
+                // S_RETIRE/S_POP/...), so the extra latency is functionally free.
+                S_ARITHWAIT: begin
+                    if (arith_wait_cnt == 4'd0) begin
+                        // PR-2c.14 (iter 165c): re-capture the DEEP b_lat arms now that
+                        // their converter cone (mem_data_lat/mem80_hi_lat -> mem_z /
+                        // fbld_x80 / m80-concat) has settled the full wait.  Identical
+                        // value to the old S_COMPUTE capture (sources are stable per-op
+                        // latches), just clocked ARITH_WAIT_CYCLES later — consumed only
+                        // at S_RETIRE for loads / unused for mem-form arith.  Reg-form
+                        // b_lat was already captured (shallow) in S_COMPUTE and is left
+                        // untouched here.  Paired with the b_lat -from {mem_data_lat,
+                        // mem80_hi_lat} multicycle in ao486.sdc.
+                        if (is_fbld_lat || is_fld_m80_lat || is_mem_form_lat) begin
+                            b_lat <= is_fbld_lat    ? fbld_x80 :
+                                     is_fld_m80_lat ? {mem80_hi_lat, mem_data_lat} : mem_z;
+                        end
+                        // PR-2c.13 (iter 165b): operands have now settled for the full
+                        // wait.  div/rem/sqrt/bcd pulse their start THIS cycle (via the
+                        // arith_wait_done term in the *_start wires) latching the settled
+                        // op_a/op_b, and branch to their iterative wait WITHOUT capturing
+                        // z_lat/flags_lat (those come from the iterative result on *_done).
+                        // Plain arith captures the settled sum_pre/flags_compute and
+                        // falls to S_POST, exactly as before.
+                        if (kind_lat == KIND_DIV) begin
+                            state <= S_DIVWAIT;
+                        end else if (is_fprem_any_lat) begin
+                            state <= S_REMWAIT;
+                        end else if (is_fsqrt_lat) begin
+                            state <= S_SQRTWAIT;
+                        end else if (is_fbstp_lat) begin
+                            state <= S_BCDWAIT;
+                        end else begin
+                            z_lat     <= sum_pre;
+                            flags_lat <= flags_compute;
+                            state     <= S_POST;
+                        end
+                    end else begin
+                        arith_wait_cnt <= arith_wait_cnt - 4'd1;
+                    end
                 end
 
                 // S_DIVWAIT (PR-2b.5x iter 144): hold while the clocked
@@ -1618,7 +1684,16 @@ module execute_fpu (
                 // latch the half-formed BCD before this completes.
                 S_BCDWAIT: begin
                     if (bcd_done) begin
-                        state <= S_POST;
+                        // PR-2c.12 (iter 165): FBSTP's flags used to be captured at
+                        // the S_COMPUTE edge, but that edge no longer writes flags_lat
+                        // (it created the single-cycle arith-chain timing path).
+                        // fbstp_flags is combinational off a_lat (shallow IA/PE range
+                        // check) and a_lat is stable throughout the BCD wait, so
+                        // re-register flags_compute (= the is_fbstp_lat ? fbstp_flags
+                        // arm) here.  a_lat -> flags_lat is also multicycle-relaxed in
+                        // ao486.sdc, so even a deeper path would be covered.
+                        flags_lat <= flags_compute;
+                        state     <= S_POST;
                     end
                 end
 
@@ -1768,8 +1843,16 @@ module execute_fpu (
     // (which we update in S_COMPUTE — see the b_lat write below).  For
     // reg-form, this mux collapses to the original
     // `(state == S_COMPUTE) ? rf_rd_data : b_lat` expression.
+    // PR-2c.12 (iter 165): mem-form keeps the LIVE converter output `mem_z`
+    // selected through S_ARITHWAIT as well as S_COMPUTE, so the WHOLE
+    // mem_data_lat -> convert -> arith -> z_lat chain is the single multi-cycle
+    // path (matching the set_multicycle_path -from mem_data_lat in ao486.sdc).
+    // Were we to fall back to b_lat in S_ARITHWAIT, the mem_data_lat->b_lat
+    // converter hop would be left as a hidden single-cycle path.  Reg-form is
+    // unaffected (rf_rd_data is consumed only in S_COMPUTE -> b_lat, and the
+    // b_lat -> z_lat arith path is what S_ARITHWAIT relaxes).
     wire [79:0] arith_b = is_mem_form_lat
-                              ? ((state == S_COMPUTE) ? mem_z : b_lat)
+                              ? (((state == S_COMPUTE) || (state == S_ARITHWAIT)) ? mem_z : b_lat)
                               : ((state == S_COMPUTE) ? rf_rd_data : b_lat);
     wire [79:0] op_a = reverse_lat ? arith_b : arith_a;
     wire [79:0] op_b = reverse_lat ? arith_a : arith_b;
@@ -1981,6 +2064,79 @@ module execute_fpu (
 
     assign sum_pre   = (kind_lat == KIND_DIV) ? div_z     : mul_or_addsub_z;
     assign flags_pre = (kind_lat == KIND_DIV) ? div_flags : mul_or_addsub_flags;
+
+    // PR-2c.12 (iter 165): per-op flags cascade extracted verbatim from the old
+    // S_COMPUTE `flags_lat <= ...` ternary so S_COMPUTE and S_ARITHWAIT capture
+    // the SAME settled value.  Pure combinational on _lat/converter signals.
+    assign flags_compute =
+                                       // PR-2b.4k STAGE 3 (iter 77): mem-form FLD takes ONLY
+                                       // the converter's DE/IE — flags_pre is junk for FLD
+                                       // (the arith primitive ran on a fabricated a/b pair).
+                                       // Check this BEFORE the is_fld_lat-in-OR-list arm so
+                                       // mem-form FLD doesn't fall through to 6'd0.
+                                       is_fld_mem_lat ? {4'd0, mem_de_flag, mem_ie_flag} :
+                                       // PR-2b.5f (iter 119): narrowing-store exception flags.
+                                       // {PE,UE,OE,ZE,DE,IE} = {pe, ue, oe, 0, 0, ie} taken from
+                                       // the active converter (FST and FSTP share the same lane).
+                                       // ZE/DE are never raised by a store narrowing-conversion.
+                                       // Must precede the 6'd0 control-op arm below.
+                                       (is_fstp_m32_lat | is_fst_m32_lat) ? {f32_pe, f32_ue, f32_oe, 1'b0, 1'b0, f32_ie} :
+                                       (is_fstp_m64_lat | is_fst_m64_lat) ? {f64_pe, f64_ue, f64_oe, 1'b0, 1'b0, f64_ie} :
+                                       // PR-2b.5w (iter 141): FIST/FISTP flags.  {PE,UE,OE,ZE,DE,IE} =
+                                       // {pe,0,0,0,0,ie}; only IE (#IA on out-of-range/NaN/Inf) and PE
+                                       // (inexact) arise from an integer store — no UE/OE/ZE, and FIST
+                                       // does NOT raise DE on a denormal source (Bochs convention).
+                                       is_fist_lat ? {fist_pe, 1'b0, 1'b0, 1'b0, 1'b0, fist_ie} :
+                                       // PR-2b.5z (iter 152): FBSTP flags.  {PE,UE,OE,ZE,DE,IE} =
+                                       // {pe & ~ia, 0,0,0,0, ia}; IA on out-of-range / NaN / Inf (stores
+                                       // packed-BCD indefinite), else PE on a rounded (inexact) integer.
+                                       // No UE/OE/ZE/DE from a packed-BCD store.  Must precede the 6'd0
+                                       // control-op arm (is_fbstp_lat is NOT in that OR-list).
+                                       is_fbstp_lat ? fbstp_flags :
+                                       // PR-2b.5n (iter 127): FRNDINT flags.  {PE,UE,OE,ZE,DE,IE} =
+                                       // {pe,0,0,0,de,ie}; OE/UE/ZE never arise from round-to-int.
+                                       // Must precede the 6'd0 control-op arm (is_frndint_lat is NOT
+                                       // in that OR-list, so omitting this would drop to flags_pre).
+                                       is_frndint_lat ? {rndint_pe, 1'b0, 1'b0, 1'b0, rndint_de, rndint_ie} :
+                                       // PR-2b.5p (iter 130): FSCALE flags.  {PE,UE,OE,ZE,DE,IE} =
+                                       // {pe,ue,oe,0,de,ie}; ZE never arises from a power-of-two
+                                       // scale.  Must precede the 6'd0 control-op arm (is_fscale_lat
+                                       // is NOT in that OR-list, so omitting this drops to flags_pre).
+                                       is_fscale_lat ? {scale_pe, scale_ue, scale_oe, 1'b0, scale_de, scale_ie} :
+                                       // PR-2b.5q (iter 131): FXTRACT flags.  {PE,UE,OE,ZE,DE,IE} =
+                                       // {0,0,0,ze,de,ie}; PE/UE/OE never arise from a split.  ZE on a
+                                       // zero source (exponent = -Inf).  Must precede the 6'd0 arm
+                                       // (is_fxtract_lat is NOT in that OR-list).
+                                       is_fxtract_lat ? {3'b0, extract_ze, extract_de, extract_ie} :
+                                       // PR-2b.5r (iter 135): FPREM/FPREM1 flags.  rem_flags is
+                                       // already {PE,UE,OE,ZE,DE,IE} (OE/ZE always 0; Slice-1 IE
+                                       // from the special-operand stub).  Must precede the 6'd0
+                                       // control-op arm (is_fprem*_lat are NOT in that OR-list).
+                                       is_fprem_any_lat ? rem_flags :
+                                       // PR-2b.5t (iter 137): FSQRT flags.  sqrt_flags is already
+                                       // {PE,UE,OE,ZE,DE,IE} (UE/OE/ZE always 0; IE on negative/SNaN,
+                                       // DE on a positive denormal).  Must precede the 6'd0 control-op
+                                       // arm (is_fsqrt_lat is NOT in that OR-list).
+                                       is_fsqrt_lat ? sqrt_flags :
+                                       (is_fxch_lat | is_fld_lat | is_fst_lat |
+                                        is_fstp_m80_lat |                       // PR-2b.5a iter 113: verbatim 80-bit store, no exceptions
+                                        is_fld_m80_lat |                        // PR-2b.5g iter 124: verbatim 80-bit load, no exceptions (even on SNaN)
+                                        is_fbld_lat |                           // PR-2b.5z iter 152: BCD load is exact (18 digits < 2^60), no exceptions
+                                        is_fchs_lat | is_fabs_lat | is_fxam_lat |
+                                        is_ffree_lat | is_fnop_lat |
+                                        is_fdecstp_lat | is_fincstp_lat |
+                                        is_fcmov_lat | is_fconst_lat) ? 6'd0 :  // PR-2b.4n iter 112
+                                       // PR-2b.4g (iter 58): mem-form cmp ops OR the
+                                       // converter's de/ie into the cmp_ie_now lane.
+                                       // Denormal mem -> DE (converter); SNaN mem ->
+                                       // IE (from BOTH the converter and cmp_ie_now —
+                                       // OR is idempotent so they merge harmlessly).
+                                       (is_cmp_lat & is_mem_form_lat) ?
+                                           {4'd0, mem_de_flag, cmp_ie_now | mem_ie_flag} :
+                                       is_cmp_lat ? {5'd0, cmp_ie_now} :
+                                       is_mem_form_lat ?
+                                           (flags_pre | {4'd0, mem_de_flag, mem_ie_flag}) :
+                                                    flags_pre;
 
     //--------------------------------------------------------------------
     // Outputs

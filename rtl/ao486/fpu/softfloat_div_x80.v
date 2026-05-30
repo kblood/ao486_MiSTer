@@ -271,16 +271,34 @@ module softfloat_div_x80 (
                D_START1 = 3'd1,
                D_PASS1  = 3'd2,
                D_START2 = 3'd3,
-               D_PASS2  = 3'd4;
+               D_PASS2  = 3'd4,
+               D_SETTLE = 3'd5;  // PR-2c.17: normalize-cone settle before pass 1
     reg  [2:0]  dstate;
+    reg  [3:0]  settle_cnt;    // PR-2c.17: D_SETTLE countdown
+    reg  [127:0] num_reg;      // PR-2c.17: registered pass-1 numerator
+    reg  [63:0]  den_reg;      // PR-2c.17: registered (normalized) divisor
     reg  [63:0] zSig0_q;       // pass-1 quotient
     reg  [63:0] rem_after_q;   // pass-1 remainder (feeds pass-2 numerator)
     reg  [63:0] zSig1_raw_q;   // pass-2 quotient
     reg  [63:0] r2_q;          // pass-2 remainder (sticky source)
 
-    wire [127:0] div_num   = (dstate == D_START1) ? num128_first
+    // PR-2c.17 (iter 165g): the divisor `den` fed to seq_divider was b_sig =
+    // floatx80_normalize(b_reg) — a CLZ + 64-bit barrel-shift cone (~17 ns) that the
+    // per-cycle restoring subtract re-traversed EVERY one of the 64 divide cycles
+    // (STA: u_div|...|rem_q = -11 ns binding setup path, from b_reg[12]).  Since the
+    // divisor (and the pass-1 numerator) are CONSTANT for the whole divide, register
+    // them ONCE: freeze a_reg/b_reg on `start`, dwell SETTLE cycles in D_SETTLE while
+    // the normalize cones settle, then capture b_sig -> den_reg and num128_first ->
+    // num_reg and feed the divider from those stable registers.  seq_divider's per-cycle
+    // path is then just the 65-bit subtract (den_reg is a plain register input).  The
+    // one-shot a_reg/b_reg -> num_reg/den_reg capture is held stable for the full
+    // D_SETTLE window, so ao486.sdc multicycles it (-setup 3); PRESERVE_REGISTER on
+    // num_reg/den_reg keeps the fitter from retiming them back into the cone.  Math is
+    // BIT-IDENTICAL (operands registered, start merely deferred — same quotient/rem),
+    // so the FDIV witnesses are unchanged; the divide just takes SETTLE extra cycles.
+    wire [127:0] div_num   = (dstate == D_START1) ? num_reg
                                                   : {rem_after_q, 64'd0};
-    wire [63:0]  div_den   = b_sig;
+    wire [63:0]  div_den   = den_reg;
     wire         div_start = (dstate == D_START1) || (dstate == D_START2);
     wire [63:0]  div_q, div_r;
     wire         div_done;
@@ -303,6 +321,9 @@ module softfloat_div_x80 (
             done        <= 1'b0;
             a_reg       <= 80'd0;
             b_reg       <= 80'd0;
+            settle_cnt  <= 4'd0;
+            num_reg     <= 128'd0;
+            den_reg     <= 64'd0;
             zSig0_q     <= 64'd0;
             rem_after_q <= 64'd0;
             zSig1_raw_q <= 64'd0;
@@ -311,12 +332,25 @@ module softfloat_div_x80 (
             done <= 1'b0;                         // default; pulsed below
             case (dstate)
                 D_IDLE: if (start) begin
-                    a_reg  <= a;                 // freeze operands for the compute
-                    b_reg  <= b;
-                    dstate <= D_START1;
+                    a_reg      <= a;             // freeze operands for the compute
+                    b_reg      <= b;
+                    settle_cnt <= 4'd3;          // PR-2c.17: dwell while cones settle
+                    dstate     <= D_SETTLE;
                 end
-                // a_reg/b_reg now settled -> num128_first valid; div_start is
-                // high this cycle so the divider latches pass 1.
+                // PR-2c.17: a_reg/b_reg now frozen; let the floatx80_normalize cones
+                // settle, then register the (constant) divisor + pass-1 numerator ONCE
+                // so the divider's per-cycle path no longer re-traverses the cone.
+                D_SETTLE: begin
+                    if (settle_cnt == 4'd0) begin
+                        num_reg <= num128_first; // deep normalize cone -> registered
+                        den_reg <= b_sig;        // deep normalize cone -> registered
+                        dstate  <= D_START1;
+                    end else begin
+                        settle_cnt <= settle_cnt - 4'd1;
+                    end
+                end
+                // num_reg/den_reg now stable -> div_start high this cycle so the
+                // divider latches pass 1 from the REGISTERED operands.
                 D_START1: dstate <= D_PASS1;
                 D_PASS1: if (div_done) begin
                     zSig0_q     <= div_q;
