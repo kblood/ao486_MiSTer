@@ -193,45 +193,17 @@ wire cms_wr = ~address[3] & sb_cs & cms_en;
 reg [7:0] cms_det;
 always @(posedge clk) if(write && cms_wr && &address[2:1]) cms_det <= writedata;
 
-reg ce_saa;
-always @(posedge clk) begin
-	reg [27:0] sum = 0;
-
-	ce_saa = 0;
-	sum = sum + 28'd7159090;
-	if(sum >= clk_rate) begin
-		sum = sum - clk_rate;
-		ce_saa = 1;
-	end
-end
-
-wire [7:0] saa1_l,saa1_r;
-saa1099 ssa1
-(
-	.clk_sys(clk),
-	.ce(ce_saa),
-	.rst_n(rst_n & cms_en),
-	.cs_n(~(cms_wr && (address[2:1] == 0))),
-	.a0(address[0]),
-	.wr_n(~write),
-	.din(writedata),
-	.out_l(saa1_l),
-	.out_r(saa1_r)
-);
-
-wire [7:0] saa2_l,saa2_r;
-saa1099 ssa2
-(
-	.clk_sys(clk),
-	.ce(ce_saa),
-	.rst_n(rst_n & cms_en),
-	.cs_n(~(cms_wr && (address[2:1] == 1))),
-	.a0(address[0]),
-	.wr_n(~write),
-	.din(writedata),
-	.out_l(saa2_l),
-	.out_r(saa2_r)
-);
+// PR-2c.5 (iter 159): the two SAA1099 sound chips (Creative Music System /
+// "Game Blaster" CMS) are stubbed to silence to reclaim ~1336 ALUTs for the
+// x87 FPU fit on the fixed DE10-nano (Cyclone V SE).  CMS is a rarely-used
+// legacy chip — almost no DOS software targets it — whereas the Sound Blaster
+// DSP (sound_dsp) and OPL3/Adlib FM (opl3) below are kept fully intact.
+// The cms_en port + cms_det detection register are retained so an SB CMS
+// presence probe still reads back consistently; only the synthesised audio
+// generators are removed.  To restore CMS, re-instantiate saa1099 ssa1/ssa2
+// here (and the ce_saa divider) driving saa{1,2}_{l,r}.
+wire [7:0] saa1_l = 8'd0, saa1_r = 8'd0;
+wire [7:0] saa2_l = 8'd0, saa2_r = 8'd0;
 
 wire [8:0] cms_l = {1'b0, saa1_l} + {1'b0, saa2_l};
 wire [8:0] cms_r = {1'b0, saa1_r} + {1'b0, saa2_r};
