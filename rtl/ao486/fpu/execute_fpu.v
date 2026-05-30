@@ -891,7 +891,7 @@ module execute_fpu (
                             // the S_RETIRE arms reading them (rf_wr_data, fprem_tag,
                             // fprem_cc) stay valid.  Like S_DIVWAIT this state is
                             // invisible to all outputs (gated on S_RETIRE/S_POP/...).
-        S_SQRTWAIT = 4'd12; // PR-2b.5x (iter 149, synth-unblock Slice 4c):
+        S_SQRTWAIT = 4'd12, // PR-2b.5x (iter 149, synth-unblock Slice 4c):
                             // FSQRT-only multi-cycle wait.  floatx80_sqrt is now
                             // CLOCKED (Slice 4b, 9de3a7e) driving seq_isqrt_128; for
                             // is_fsqrt_lat ops S_COMPUTE pulses sqrt_start (1 cyc) then
@@ -904,6 +904,20 @@ module execute_fpu (
                             // KIND_DIV rail; is_fprem_any_lat=0) so div_start/rem_start
                             // stay 0 — the three waits never overlap.  Like S_DIVWAIT
                             // this state is invisible to all outputs.
+        S_BCDWAIT = 4'd13;  // PR-2c.10 (iter 163, synth-unblock FBSTP BCD): the
+                            // int64_to_bcd packed-BCD encoder is now CLOCKED
+                            // (Slice 1, d105a8f); for is_fbstp_lat ops S_COMPUTE
+                            // pulses bcd_start (1 cyc) then parks here until
+                            // bcd_done (~60 cyc), where the assembled 80-bit
+                            // packed-BCD payload (fbstp_store_data) is valid and
+                            // HELD.  Only after this do we advance to S_POST, so
+                            // FBSTP's store_ready (which now EXCLUDES S_COMPUTE)
+                            // first asserts at S_POST with the BCD fully formed —
+                            // write.v latches the real payload, not garbage.
+                            // flags_lat for FBSTP is combinational off a_lat
+                            // (fbstp_ia/fbstp_pe) so it was already registered
+                            // correctly at S_COMPUTE and needs no re-register here.
+                            // Invisible to all outputs (gated on S_RETIRE/S_POP/...).
 
     reg [3:0]  state;
 
@@ -1227,6 +1241,17 @@ module execute_fpu (
     wire        sqrt_start = (state == S_COMPUTE) && is_fsqrt_lat;
     wire        sqrt_done;
 
+    // PR-2c.10 (iter 163, synth-unblock FBSTP BCD): int64_to_bcd is now CLOCKED
+    // (Slice 1, d105a8f).  bcd_start is a NATURAL 1-cycle pulse — high only during
+    // the single S_COMPUTE cycle an FBSTP op occupies before it parks in S_BCDWAIT,
+    // so u_int64_to_bcd (idle then) latches fbstp_mag exactly once and never
+    // re-starts.  bcd_done is forward-declared here (Gotcha #9) because the FSM's
+    // S_BCDWAIT arm reads it above the instantiation that drives it.  FBSTP is
+    // not in the KIND_DIV rail and is_fprem_any_lat/is_fsqrt_lat=0, so the other
+    // three start pulses stay 0 — the four waits never overlap.
+    wire        bcd_start = (state == S_COMPUTE) && is_fbstp_lat;
+    wire        bcd_done;
+
     // PR-2b.3e: es_now / unmasked_flags forward-declared here because the
     // FSM's S_RETIRE→S_POP transition rule reads es_now (gating the pop
     // on ~es_now to honour SDM §8.1.5).  Without the forward declaration
@@ -1518,7 +1543,8 @@ module execute_fpu (
                     // this cycle).  Every other op keeps the 1-cycle S_COMPUTE->S_POST.
                     state           <= (kind_lat == KIND_DIV) ? S_DIVWAIT :
                                        is_fprem_any_lat       ? S_REMWAIT :
-                                       is_fsqrt_lat           ? S_SQRTWAIT : S_POST;
+                                       is_fsqrt_lat           ? S_SQRTWAIT :
+                                       is_fbstp_lat           ? S_BCDWAIT : S_POST;
                 end
 
                 // S_DIVWAIT (PR-2b.5x iter 144): hold while the clocked
@@ -1575,6 +1601,24 @@ module execute_fpu (
                     if (sqrt_done) begin
                         flags_lat <= sqrt_flags;
                         state     <= S_POST;
+                    end
+                end
+
+                // S_BCDWAIT (PR-2c.10 iter 163): hold while the clocked
+                // int64_to_bcd runs (~60 cyc).  bcd_start was pulsed for the single
+                // S_COMPUTE cycle that preceded this state, so the encoder already
+                // froze fbstp_mag.  On bcd_done, fbstp_bcd (and hence the assembled
+                // fbstp_store_data) is valid and HELD until the next start.  flags_lat
+                // for FBSTP is combinational off a_lat (fbstp_ia/fbstp_pe) — it was
+                // already registered correctly in the S_COMPUTE cascade and the BCD
+                // value does not feed flags, so NO re-register here (unlike the
+                // DIV/REM/SQRT waits, whose result feeds flags).  fpu_busy stays high
+                // (state != S_IDLE) so the pipeline stalls; no output fires here, and
+                // FBSTP's store_ready excludes S_COMPUTE/S_BCDWAIT so write.v can't
+                // latch the half-formed BCD before this completes.
+                S_BCDWAIT: begin
+                    if (bcd_done) begin
+                        state <= S_POST;
                     end
                 end
 
@@ -2045,7 +2089,19 @@ module execute_fpu (
     wire        fbstp_range_ovf = (fbstp_mag > 64'd999999999999999999);  // > 10^18 - 1
     wire        fbstp_ia        = fbstp_ie | fbstp_range_ovf;
     wire [71:0] fbstp_bcd;
-    int64_to_bcd u_int64_to_bcd (.val(fbstp_mag[59:0]), .bcd(fbstp_bcd));
+    // PR-2c.10 (iter 163): CLOCKED sequential double-dabble (was a ~1800-ALUT
+    // combinational unroll; now ~150 ALUTs for this rare op).  bcd_start pulses for
+    // the single S_COMPUTE cycle, then the FSM parks in S_BCDWAIT until bcd_done;
+    // fbstp_bcd holds after done.  .busy unused (the FSM gates on bcd_done).
+    int64_to_bcd u_int64_to_bcd (
+        .clk   (clk),
+        .rst   (~rst_n | exe_reset | init),
+        .start (bcd_start),
+        .val   (fbstp_mag[59:0]),
+        .bcd   (fbstp_bcd),
+        .done  (bcd_done),
+        .busy  ()
+    );
     assign fbstp_store_data = fbstp_ia ? 80'hFFFFC000000000000000
                                        : {fbstp_sign, 7'd0, fbstp_bcd};
     assign fbstp_flags      = {(~fbstp_ia & fbstp_pe), 1'b0, 1'b0, 1'b0, 1'b0, fbstp_ia};
@@ -2152,11 +2208,20 @@ module execute_fpu (
     // FSM never enters S_POP, but the latch in write.v fires during S_COMPUTE
     // (the write stage runs concurrently with the FPU FSM, retiring early), so
     // the S_RETIRE-and-earlier window suffices; the S_POP term is dead for FST.
-    assign store_ready = (is_fstp_m80_lat || is_fstp_m32_lat || is_fstp_m64_lat ||
-                          is_fst_m32_lat  || is_fst_m64_lat  || is_fist_lat ||
-                          is_fbstp_lat) &&                       // PR-2b.5z iter 152
-                         ((state == S_COMPUTE) || (state == S_POST) ||
-                          (state == S_RETIRE)  || (state == S_POP));
+    // Non-FBSTP float/int stores carry COMBINATIONAL payloads valid the moment
+    // a_lat is latched, so their window opens at S_COMPUTE.  PR-2c.10 (iter 163):
+    // FBSTP's payload now comes from the CLOCKED int64_to_bcd and is only valid
+    // after S_BCDWAIT completes, so FBSTP's window EXCLUDES S_COMPUTE (and
+    // S_BCDWAIT) — it first asserts at S_POST (reached only via bcd_done), which
+    // is the first cycle write.v could latch fbstp_store_data and get the real
+    // assembled BCD rather than the half-formed accumulator.
+    assign store_ready = ((is_fstp_m80_lat || is_fstp_m32_lat || is_fstp_m64_lat ||
+                           is_fst_m32_lat  || is_fst_m64_lat  || is_fist_lat) &&
+                          ((state == S_COMPUTE) || (state == S_POST) ||
+                           (state == S_RETIRE)  || (state == S_POP))) ||
+                         (is_fbstp_lat &&                        // PR-2c.10 iter 163
+                          ((state == S_POST) || (state == S_RETIRE) ||
+                           (state == S_POP)));
 
     //--------------------------------------------------------------------
     // PR-2b.2d: exc_flags_set OR-lane into the external fpu_csr.
