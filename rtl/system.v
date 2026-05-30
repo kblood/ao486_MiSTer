@@ -629,57 +629,23 @@ rtc rtc
 	.irq               (irq_8)
 );
 
-sound sound
-(
-	.clk               (clk_sys),
-	.clk_audio         (clk_audio),
-	.rst_n             (~reset),
-
-	.clock_rate        (clock_rate),
-
-	.address           (iobus_address[3:0]),
-	.writedata         (iobus_writedata[7:0]),
-	.read              (iobus_read),
-	.write             (iobus_write),
-	.readdata          (sound_readdata),
-	.sb_cs             (sb_cs),
-	.fm_cs             (fm_cs),
-
-	.dma_req8          (dma_sb_req_8),
-	.dma_req16         (dma_sb_req_16),
-	.dma_ack           (dma_sb_ack_16 | dma_sb_ack_8),
-	.dma_readdata      (dma_sb_req_16 ? dma_sb_readdata_16 : dma_sb_readdata_8),
-	.dma_writedata     (dma_sb_writedata),
-
-	.sbp               (sbp),
-
-	.vol_master_l      (vol_master_l),
-	.vol_master_r      (vol_master_r),
-	.vol_voice_l       (vol_voice_l),
-	.vol_voice_r       (vol_voice_r),
-	.vol_midi_l        (vol_midi_l),
-	.vol_midi_r        (vol_midi_r),
-	.vol_cd_l          (vol_cd_l),
-	.vol_cd_r          (vol_cd_r),
-	.vol_line_l        (vol_line_l),
-	.vol_line_r        (vol_line_r),
-	.vol_spk           (vol_spk),
-	.vol_en            (vol_en),
-
-	.sample_cms_l      (sample_cms_l),
-	.sample_cms_r      (sample_cms_r),
-	.sample_sb_l       (sample_sb_l),
-	.sample_sb_r       (sample_sb_r),
-	.sample_opl_l      (sample_opl_l),
-	.sample_opl_r      (sample_opl_r),
-
-	.fm_mode           (sound_fm_mode),
-	.cms_en            (sound_cms_en),
-
-	.irq_5             (irq_5),
-	.irq_7             (irq_7),
-	.irq_10            (irq_10)
-);
+// PR-2c.9 (iter 164): SB/OPL/CMS sound block REMOVED to free ~1,590 ALM for the
+// full x87 FPU (option a: full FPU > audio). Outputs the instance used to drive
+// are tied off below so the rest of system.v stays well-formed. Reversible:
+// restore the `sound sound (...)` instance to bring audio back.
+assign sound_readdata = 8'h00;
+assign sample_cms_l   = 9'd0;
+assign sample_cms_r   = 9'd0;
+assign sample_sb_l    = 16'd0;
+assign sample_sb_r    = 16'd0;
+assign sample_opl_l   = 16'd0;
+assign sample_opl_r   = 16'd0;
+assign sbp            = 1'b0;
+assign dma_sb_req_8   = 1'b0;
+assign dma_sb_req_16  = 1'b0;
+assign irq_5          = 1'b0;
+assign irq_7          = 1'b0;
+assign irq_10         = 1'b0;
 
 uart uart1
 (
