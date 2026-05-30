@@ -1701,12 +1701,13 @@ module execute_fpu (
     // converters.  Runs combinationally off mem_data_lat; selected into mem_z
     // by is_fild_lat below.  No de/ie outputs — the int->x80 conversion is
     // exact and raises no exceptions.
+    // PR-2c.6 (iter 160): the int->floatx80 converter is now SHARED with FBLD.
+    // FILD and FBLD are mutually-exclusive opcodes (is_fild_lat & is_fbld_lat
+    // are never both set), so a single muxed int_to_floatx80 serves both and
+    // reclaims ~326 ALUTs vs two instances.  The shared instance lives next to
+    // the FBLD BCD->int chain (search u_int_to_x80 below); int_to_x80_z is only
+    // selected into mem_z when is_fild_lat=1.
     wire [79:0] int_to_x80_z;
-    int_to_floatx80 u_int_to_x80 (
-        .a     (mem_data_lat),
-        .width (fild_width_lat),
-        .z     (int_to_x80_z)
-    );
     // mem_z / mem_de_flag / mem_ie_flag are forward-declared near the FSM's
     // forward-decl block (cmp_ie_now / sum_pre / etc) so the S_COMPUTE
     // always-block can read them before this mux.  Same Gotcha #9 pattern.
@@ -2015,7 +2016,14 @@ module execute_fpu (
     bcd_to_int64 u_bcd_to_int64 (.bcd(fbld_bcd), .val(fbld_val));
     wire        fbld_sign = mem80_hi_lat[15];
     wire [63:0] fbld_int  = fbld_sign ? (~fbld_val + 64'd1) : fbld_val;
-    int_to_floatx80 u_fbld_int_to_x80 (.a(fbld_int), .width(2'd2), .z(fbld_x80));
+    // PR-2c.6 (iter 160): single shared int_to_floatx80 for FILD + FBLD.  When
+    // is_fbld_lat=1 it converts the signed BCD-derived int64 (width m64); else
+    // it serves FILD (mem_data_lat, fild_width_lat).  fbld_x80 aliases the
+    // shared output and is only consumed (b_lat) when is_fbld_lat=1.
+    wire [63:0] shared_int_a = is_fbld_lat ? fbld_int : mem_data_lat;
+    wire [1:0]  shared_int_w = is_fbld_lat ? 2'd2     : fild_width_lat;
+    int_to_floatx80 u_int_to_x80 (.a(shared_int_a), .width(shared_int_w), .z(int_to_x80_z));
+    assign fbld_x80 = int_to_x80_z;
     // PR-2b.5z (iter 152): FBSTP m80 converter chain.  Round ST(0) to a signed int64
     // per CW.RC (floatx80_to_int, width=m64), take the magnitude, and range-check it
     // against 10^18-1 (the largest 18-digit value).  On overflow / NaN / Inf
