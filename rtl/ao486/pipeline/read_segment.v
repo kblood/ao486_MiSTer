@@ -27,7 +27,13 @@
 `include "defines.v"
 
 module read_segment(
-    
+
+    //clock / pipeline control (iter 166: seg-protection cone +1-cycle pipeline)
+    input               clk,
+    input               rst_n,
+    input               rd_reset,
+    input               rd_ready,
+
     //general input
     input       [63:0]  es_cache,
     input       [63:0]  cs_cache,
@@ -75,7 +81,9 @@ module read_segment(
     output              rd_seg_gp_fault_init,
     output              rd_seg_ss_fault_init,
     
-    output      [31:0]  rd_seg_linear
+    output      [31:0]  rd_seg_linear,
+
+    output              rd_seg_ready
 );
 
 //------------------------------------------------------------------------------
@@ -112,6 +120,23 @@ wire        seg_invalid_write_access;
 wire        seg_valid;
 
 wire        seg_fault;
+
+// iter 166: seg-protection cone pipeline registers (stage-1 -> stage-2 boundary).
+// Declared before the always blocks that drive them (vlog-2730 procedural
+// net-decl-order rule, see [[feedback_modelsim_procedural_net_decl_order]]).
+reg         seg_ready_q;
+reg  [4:0]  seg_left_q;
+reg         seg_limit_overflow_q;
+reg         seg_invalid_read_q;
+reg         seg_invalid_write_q;
+reg         seg_valid_q;
+reg         seg_read_q;
+reg         seg_write_q;
+reg  [2:0]  seg_select_q;
+reg  [3:0]  read_length_q;
+reg  [31:0] rd_seg_linear_q;
+
+wire [31:0] rd_seg_linear_comb;
 
 //------------------------------------------------------------------------------
 
@@ -197,25 +222,64 @@ assign seg_valid =
     (seg_select == 3'd4)?   fs_cache[`DESC_BIT_P] && fs_cache_valid :
                             gs_cache[`DESC_BIT_P] && gs_cache_valid;    
     
-//------------------------------------------------------------------------------    
-    
-assign seg_fault = 
-    (rd_address_effective_ready && (seg_read || seg_write)) &&
-    ((seg_invalid_read_access && seg_read) || (seg_invalid_write_access && seg_write) ||
-     seg_limit_overflow || (seg_left < { 1'b0, read_length }) || ~(seg_valid));
+//------------------------------------------------------------------------------
+// iter 166: SEGMENT-PROTECTION CONE PIPELINE.  The path
+//   rd_cmdex -> seg_select -> *_left subtract -> seg_fault -> read_do -> tlb|linear
+// was the residual -9.74ns / 24-logic-level setup wall at 90MHz (clk_sys).  Every
+// input to the seg math is an upstream register stable for the whole read micro-
+// op; only rd_address_effective is "late".  STAGE 1 (below): register the
+// seg_select-MUXED scalars, ending in the ~7.7ns *_left subtract.  STAGE 2: combine
+// them into seg_fault next cycle (feeding read_do -> the ~6.6ns tlb mux).  This
+// splits the 24-level cone ~12+12.  Cost: +1 cycle of request/fault latency;
+// cpu_export is retirement-indexed so traces stay bit-exact (design doc:
+// research/design_phase2_seg_pipeline.md, [[tlb_linear_critical_path_is_seg_protection]]).
+// seg_ready_q gates seg_fault, so the data regs may free-run (only meaningful when
+// seg_ready_q is high); seg_ready_q is the +1-delayed EA-ready, flushed per-op.
 
-assign rd_seg_gp_fault_init = seg_select != 3'd2 && seg_fault;
-assign rd_seg_ss_fault_init = seg_select == 3'd2 && seg_fault;
+always @(posedge clk) begin
+    if(rst_n == 1'b0)               seg_ready_q <= 1'b0;
+    else if(rd_ready || rd_reset)   seg_ready_q <= 1'b0;
+    else                            seg_ready_q <= rd_address_effective_ready;
+end
+
+always @(posedge clk) begin
+    seg_left_q           <= seg_left;
+    seg_limit_overflow_q <= seg_limit_overflow;
+    seg_invalid_read_q   <= seg_invalid_read_access;
+    seg_invalid_write_q  <= seg_invalid_write_access;
+    seg_valid_q          <= seg_valid;
+    seg_read_q           <= seg_read;
+    seg_write_q          <= seg_write;
+    seg_select_q         <= seg_select;
+    read_length_q        <= read_length;
+    rd_seg_linear_q      <= rd_seg_linear_comb;
+end
 
 //------------------------------------------------------------------------------
+// STAGE 2 (combinational, fed ONLY by the stage-1 registers above -> shallow)
 
-assign rd_seg_linear =
+assign seg_fault =
+    (seg_ready_q && (seg_read_q || seg_write_q)) &&
+    ((seg_invalid_read_q && seg_read_q) || (seg_invalid_write_q && seg_write_q) ||
+     seg_limit_overflow_q || (seg_left_q < { 1'b0, read_length_q }) || ~(seg_valid_q));
+
+assign rd_seg_gp_fault_init = seg_select_q != 3'd2 && seg_fault;
+assign rd_seg_ss_fault_init = seg_select_q == 3'd2 && seg_fault;
+
+assign rd_seg_ready = seg_ready_q;
+
+//------------------------------------------------------------------------------
+// STAGE 1 combinational linear (registered into rd_seg_linear_q -> output)
+
+assign rd_seg_linear_comb =
     (seg_select == 3'd0)?       es_base + rd_address_effective :
     (seg_select == 3'd1)?       cs_base + rd_address_effective :
     (seg_select == 3'd2)?       ss_base + rd_address_effective :
     (seg_select == 3'd3)?       ds_base + rd_address_effective :
     (seg_select == 3'd4)?       fs_base + rd_address_effective :
                                 gs_base + rd_address_effective;
+
+assign rd_seg_linear = rd_seg_linear_q;
 
 //------------------------------------------------------------------------------
 

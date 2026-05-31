@@ -528,6 +528,7 @@ assign rd_io_ready = rd_one_io_read || io_read_done;
 
 wire rd_seg_gp_fault_init;
 wire rd_seg_ss_fault_init;
+wire rd_seg_ready;          // iter 166: +1-delayed EA-ready out of the pipelined seg cone
 
 always @(posedge clk) begin
     if(rst_n == 1'b0)               rd_seg_gp_fault <= `FALSE;
@@ -639,8 +640,11 @@ assign read_do =
     ~(read_page_fault) && ~(read_ac_fault) &&
     ~(rd_seg_gp_fault_init) && ~(rd_seg_gp_fault) && ~(rd_descriptor_gp_fault) && ~(rd_seg_ss_fault_init) && ~(rd_seg_ss_fault) && ~(rd_io_allow_fault) && ~(rd_ss_esp_from_tss_fault) &&
     ( (is_fld_m80_op)?
-        (rd_address_effective_ready && read_virtual && ~(fld_m80_complete)) :
-        ( ((rd_address_effective_ready && (read_rmw_virtual || read_virtual)) || memory_read_system) && ~(rd_one_mem_read) ) );
+        // iter 166: virtual reads now wait for rd_seg_ready (EA-ready +1) so the
+        // pipelined seg cone (rd_seg_linear / rd_seg_gp_fault_init) is valid this
+        // cycle; system reads keep their own memory_read_system gate (no seg path).
+        (rd_seg_ready && read_virtual && ~(fld_m80_complete)) :
+        ( ((rd_seg_ready && (read_rmw_virtual || read_virtual)) || memory_read_system) && ~(rd_one_mem_read) ) );
 
 // PR-2b.5g (iter 124): FLD m80fp signals ready only when beat 1 (the qword)
 // completes, so the autogen cond_281 hold spans both beats.
@@ -658,10 +662,15 @@ always @(posedge clk) begin
     else                                                    rd_address_effective_ready_delayed <= rd_address_effective_ready;
 end
 
+// iter 166: the seg cone is now pipelined, so rd_seg_gp_fault_init/ss_fault_init
+// are themselves +1-cycle-registered and land in the SAME cycle as
+// rd_address_effective_ready_delayed (also a +1 register of EA-ready).  Use the
+// *_init forms here (not the further-+1 rd_seg_gp_fault/ss_fault regs, which would
+// now be +2 and lag the delayed-ready by a cycle).
 assign write_virtual_check_ready =
     ~(rd_reset) &&
     rd_address_effective_ready_delayed &&
-    ~(rd_seg_gp_fault) && ~(rd_descriptor_gp_fault) && ~(rd_seg_ss_fault) && ~(rd_io_allow_fault) && ~(rd_ss_esp_from_tss_fault);
+    ~(rd_seg_gp_fault_init) && ~(rd_descriptor_gp_fault) && ~(rd_seg_ss_fault_init) && ~(rd_io_allow_fault) && ~(rd_ss_esp_from_tss_fault);
 
 //------------------------------------------------------------------------------ misc
 
@@ -689,7 +698,13 @@ assign rd_descriptor_not_in_limits =
 //------------------------------------------------------------------------------
 
 read_segment read_segment_inst(
-    
+
+    //clock / pipeline control (iter 166: seg-protection cone +1-cycle pipeline)
+    .clk                        (clk),                          //input
+    .rst_n                      (rst_n),                        //input
+    .rd_reset                   (rd_reset),                     //input
+    .rd_ready                   (rd_ready),                     //input
+
     //general input
     .es_cache                   (es_cache),                     //input [63:0]
     .cs_cache                   (cs_cache),                     //input [63:0]
@@ -736,7 +751,9 @@ read_segment read_segment_inst(
     .rd_seg_gp_fault_init       (rd_seg_gp_fault_init),         //output
     .rd_seg_ss_fault_init       (rd_seg_ss_fault_init),         //output
     
-    .rd_seg_linear              (rd_seg_linear)                 //output [31:0]
+    .rd_seg_linear              (rd_seg_linear),                //output [31:0]
+
+    .rd_seg_ready               (rd_seg_ready)                  //output
 );
 
 //------------------------------------------------------------------------------
