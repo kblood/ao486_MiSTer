@@ -45,6 +45,17 @@ module floatx80_sqrt (
     input  wire        rst,
     input  wire        start,
     input  wire [79:0] a,
+    // iter-170 (Slice 3): shared input normalizer hoisted to execute_fpu.v.
+    // sqrt USED to instantiate its own u_norm_a (~307 ALUTs) on a_reg; now
+    // it consumes the shared u_norm_a_shared output LATCHED at `start` into
+    // a_sign_n_reg/.../a_sig_n_reg below.  The shared cone reads op_a at the
+    // top level (= a_lat for sqrt) and is stable at sqrt_start (S_ARITHWAIT
+    // terminal cycle, op_a has had ARITH_WAIT_CYCLES to settle) -- exactly
+    // the same instant a_reg latches from a, so the registered values match
+    // what the deleted local u_norm_a would have produced from a_reg.
+    input  wire               na_sign,
+    input  wire signed [16:0] na_exp,
+    input  wire        [63:0] na_sig,
     output wire [79:0] z,
     output wire [5:0]  flags,         // {PE, UE, OE, ZE, DE, IE}
     output reg         done
@@ -115,11 +126,20 @@ module floatx80_sqrt (
     // exp widened to signed-17; sig_out = a_sig); a positive denormal goes
     // negative-exponent with the J-bit shifted in, so the root math below is
     // IEEE-correct.
+    //
+    // iter-170 (Slice 3): local floatx80_normalize u_norm_a (~307 ALUTs)
+    // REPLACED by the shared u_norm_a_shared in execute_fpu.v.  Its outputs
+    // are latched into a_sign_n_reg / a_exp_n_reg / a_sig_n_reg on `start`
+    // (R_IDLE branch in the FSM below).  The local wires a_sign_n / a_exp_n /
+    // a_sig_n alias those regs so every downstream user (diff, parity,
+    // zexp_pre, M) is bit-identical without touching its expression.
     //--------------------------------------------------------------------
-    wire               a_sign_n;
-    wire signed [16:0] a_exp_n;
-    wire [63:0]        a_sig_n;
-    floatx80_normalize u_norm_a (.a(a_reg), .sign_out(a_sign_n), .exp_out(a_exp_n), .sig_out(a_sig_n));
+    reg                a_sign_n_reg;
+    reg signed  [16:0] a_exp_n_reg;
+    reg         [63:0] a_sig_n_reg;
+    wire               a_sign_n = a_sign_n_reg;
+    wire signed [16:0] a_exp_n  = a_exp_n_reg;
+    wire        [63:0] a_sig_n  = a_sig_n_reg;
 
     //--------------------------------------------------------------------
     // Exponent + significand setup.
@@ -156,18 +176,31 @@ module floatx80_sqrt (
 
     always @(posedge clk) begin
         if (rst) begin
-            rstate    <= R_IDLE;
-            done      <= 1'b0;
-            a_reg     <= 80'd0;
-            root_reg  <= 64'd0;
-            resid_reg <= 128'd0;
+            rstate       <= R_IDLE;
+            done         <= 1'b0;
+            a_reg        <= 80'd0;
+            a_sign_n_reg <= 1'b0;       // iter-170 Slice 3
+            a_exp_n_reg  <= 17'sd0;
+            a_sig_n_reg  <= 64'd0;
+            root_reg     <= 64'd0;
+            resid_reg    <= 128'd0;
         end else begin
             done <= 1'b0;
             case (rstate)
                 R_IDLE: begin
                     if (start) begin
-                        a_reg  <= a;
-                        rstate <= R_START;
+                        a_reg        <= a;
+                        // iter-170 Slice 3: latch the shared normalizer cone
+                        // outputs at the SAME edge that freezes a_reg.  na_*
+                        // is the shared cone evaluating op_a (= a_lat for the
+                        // sqrt op) which is STABLE through S_ARITHWAIT and
+                        // identical to what feeds a here, so the registered
+                        // values are bit-identical to the deleted local
+                        // u_norm_a's outputs one cycle later.
+                        a_sign_n_reg <= na_sign;
+                        a_exp_n_reg  <= na_exp;
+                        a_sig_n_reg  <= na_sig;
+                        rstate       <= R_START;
                     end
                 end
                 // a_reg settled: needs_sqrt / M now valid.

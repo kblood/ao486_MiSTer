@@ -2422,6 +2422,15 @@ module execute_fpu (
         .rst   (~rst_n | exe_reset | init),
         .start (sqrt_start),
         .a     (a_lat),
+        // iter-170 (Slice 3): shared input normalizer (~307 ALUTs saved).  For
+        // sqrt op_a == arith_a == a_lat (reverse_lat=0 for unary), so the shared
+        // u_norm_a_shared cone evaluating op_a is identical to what the deleted
+        // local u_norm_a inside floatx80_sqrt would have produced from a_reg
+        // (which latches a = a_lat).  sqrt latches na_* into its own *_reg on
+        // `start` so it has stable normalized inputs across the ~64-cycle isqrt.
+        .na_sign (norm_a_sign),
+        .na_exp  (norm_a_exp),
+        .na_sig  (norm_a_sig),
         .z     (sqrt_z),
         .flags (sqrt_flags),
         .done  (sqrt_done)
