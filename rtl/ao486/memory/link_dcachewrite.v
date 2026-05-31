@@ -96,12 +96,30 @@ end
 
 assign req_dcachewrite_done = done_delayed;
 
-assign resp_dcachewrite_do            = (req_dcachewrite_do)? req_dcachewrite_do            : current_do;
-assign resp_dcachewrite_length        = (req_dcachewrite_do)? req_dcachewrite_length        : length;
-assign resp_dcachewrite_cache_disable = (req_dcachewrite_do)? req_dcachewrite_cache_disable : cache_disable;
-assign resp_dcachewrite_address       = (req_dcachewrite_do)? req_dcachewrite_address       : address;
-assign resp_dcachewrite_write_through = (req_dcachewrite_do)? req_dcachewrite_write_through : write_through;
-assign resp_dcachewrite_data          = (req_dcachewrite_do)? req_dcachewrite_data          : data;
+// iter-166e: defeat the combinational bypass mux on resp_* outputs.
+// Original (bypass): resp_X = (req_dcachewrite_do)? req_X : X_reg
+//   - On the first cycle of a write, req_X flows COMBINATIONALLY through to L2,
+//     creating the long path: tlb|linear[*] -> ... -> dcachewrite_do_comb ->
+//     link_dcachewrite|resp_addr -> avalon|avm_writedata -> l2_cache|memory_datain
+//     (15 logic levels, -9.100 ns at 90 MHz, iter-166c STA worst).
+// New (registered-only): resp_X = X_reg
+//   - tlb's combinational outputs now END at this module's input registers;
+//     L2 sees the write 1 cycle later (every dcache write pays +1 cycle).
+//   - Handshake intact: `save` still uses req_dcachewrite_do combinationally,
+//     so the registers latch on the same cycle tlb asserts req_do. current_do
+//     rises one cycle later, holding resp_do=1 until resp_dcachewrite_done
+//     comes back from L2 (then done_delayed -> req_dcachewrite_done one cycle
+//     after that, signalling tlb to drop req_do). The total round-trip
+//     stretches by 1 cycle (tlb sees done at K+2 instead of K+1).
+// Same approach iter-166c took on the read direction via rd_seg_ready; this
+// is the symmetric write-side cut. Validation: segtest_1/2/3 + run_fpu_sweep
+// retirement-indexed bit-exact via cpu_export.
+assign resp_dcachewrite_do            = current_do;
+assign resp_dcachewrite_length        = length;
+assign resp_dcachewrite_cache_disable = cache_disable;
+assign resp_dcachewrite_address       = address;
+assign resp_dcachewrite_write_through = write_through;
+assign resp_dcachewrite_data          = data;
 
 //------------------------------------------------------------------------------
 
