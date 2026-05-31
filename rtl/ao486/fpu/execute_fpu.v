@@ -2040,6 +2040,18 @@ module execute_fpu (
         .shared_round_flags (shared_round_flags),
         .shared_subn_z      (shared_subn_z),
         .shared_subn_pe     (shared_subn_pe),
+        // iter-169 (Slice 2): shared input normalizers (~300 ALUTs * 2 saved).
+        // div latches these into local regs on `start`; the shared cone is
+        // stable at div_start (= S_ARITHWAIT cnt==0, op_a/op_b have had
+        // ARITH_WAIT_CYCLES to settle), so the registered values are bit-
+        // identical to what the deleted local u_norm_a/b inside u_div would
+        // have produced from a_reg/b_reg one cycle later.
+        .na_sign            (norm_a_sign),
+        .na_exp             (norm_a_exp),
+        .na_sig             (norm_a_sig),
+        .nb_sign            (norm_b_sign),
+        .nb_exp             (norm_b_exp),
+        .nb_sig             (norm_b_sig),
         .done               (div_done),
         .z                  (div_z),
         .flags              (div_flags)

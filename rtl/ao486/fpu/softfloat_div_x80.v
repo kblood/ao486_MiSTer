@@ -97,6 +97,21 @@ module softfloat_div_x80 (
     // PR-2c.2 (iter 157): floatx80_pack_subn hoisted to execute_fpu.v too.
     input  wire [79:0] shared_subn_z,
     input  wire        shared_subn_pe,
+    // iter-169 (Slice 2): shared input normalizers hoisted to execute_fpu.v
+    // (u_norm_a_shared / u_norm_b_shared already feed add/sub/mul).  The
+    // divider used to instantiate its OWN u_norm_a/u_norm_b on a_reg/b_reg
+    // (~300 ALUTs each); now it consumes the shared cone outputs LATCHED at
+    // `start` into na_sign_reg/.../nb_sig_reg below.  The shared cone reads
+    // op_a/op_b at the top level and is stable at div_start (S_ARITHWAIT
+    // terminal cycle) -- exactly the same instant a_reg/b_reg latch from
+    // a/b, so the registered values are bit-identical to what the deleted
+    // local u_norm_a/b would have produced from a_reg/b_reg.
+    input  wire               na_sign,
+    input  wire signed [16:0] na_exp,
+    input  wire        [63:0] na_sig,
+    input  wire               nb_sign,
+    input  wire signed [16:0] nb_exp,
+    input  wire        [63:0] nb_sig,
     output reg         done,
     output wire [79:0] z,
     output wire [5:0]  flags        // {PE, UE, OE, ZE, DE, IE}
@@ -200,25 +215,29 @@ module softfloat_div_x80 (
     // a=b=0) are decided from the RAW operands via is_zero_a / is_zero_b
     // above — those classifiers run on the unnormalized inputs, so a
     // genuine zero is NOT mistaken for a "normalized denormal".
-    //--------------------------------------------------------------------
-    wire               a_sign;
-    wire signed [16:0] a_exp_s;
-    wire        [63:0] a_sig;
-    floatx80_normalize u_norm_a (
-        .a        (a_reg),
-        .sign_out (a_sign),
-        .exp_out  (a_exp_s),
-        .sig_out  (a_sig)
-    );
-    wire               b_sign;
-    wire signed [16:0] b_exp_s;
-    wire        [63:0] b_sig;
-    floatx80_normalize u_norm_b (
-        .a        (b_reg),
-        .sign_out (b_sign),
-        .exp_out  (b_exp_s),
-        .sig_out  (b_sig)
-    );
+    //
+    // iter-169 (Slice 2): the local floatx80_normalize u_norm_a/u_norm_b
+    // (~300 ALUTs each) are GONE.  The shared u_norm_a_shared / u_norm_b_shared
+    // in execute_fpu.v feed na_*/nb_* ports; those are LATCHED into *_reg below
+    // on `start` (in D_IDLE) and consumed throughout the divide from registers.
+    // The latches are necessary because the shared cone reads LIVE op_a/op_b
+    // which release as soon as the pipeline advances past S_DIVWAIT.  a_reg /
+    // b_reg are still captured -- the floatx80_zero/inf/nan/subn_handle classifiers
+    // above (and the override z_inf / z_zero / z_nan / is_div_zero_override muxes)
+    // use the RAW operands.
+    reg                a_sign_reg;
+    reg signed  [16:0] a_exp_reg;
+    reg         [63:0] a_sig_reg;
+    reg                b_sign_reg;
+    reg signed  [16:0] b_exp_reg;
+    reg         [63:0] b_sig_reg;
+
+    wire               a_sign  = a_sign_reg;
+    wire signed [16:0] a_exp_s = a_exp_reg;
+    wire        [63:0] a_sig   = a_sig_reg;
+    wire               b_sign  = b_sign_reg;
+    wire signed [16:0] b_exp_s = b_exp_reg;
+    wire        [63:0] b_sig   = b_sig_reg;
 
     wire        z_sign = a_sign ^ b_sign;
 
@@ -321,6 +340,12 @@ module softfloat_div_x80 (
             done        <= 1'b0;
             a_reg       <= 80'd0;
             b_reg       <= 80'd0;
+            a_sign_reg  <= 1'b0;       // iter-169 Slice 2
+            a_exp_reg   <= 17'sd0;
+            a_sig_reg   <= 64'd0;
+            b_sign_reg  <= 1'b0;
+            b_exp_reg   <= 17'sd0;
+            b_sig_reg   <= 64'd0;
             settle_cnt  <= 4'd0;
             num_reg     <= 128'd0;
             den_reg     <= 64'd0;
@@ -334,6 +359,21 @@ module softfloat_div_x80 (
                 D_IDLE: if (start) begin
                     a_reg      <= a;             // freeze operands for the compute
                     b_reg      <= b;
+                    // iter-169 Slice 2: latch the shared normalizer cone outputs
+                    // at the SAME edge that freezes a_reg/b_reg.  The shared
+                    // u_norm_a/b_shared in execute_fpu.v read live op_a/op_b which
+                    // are STABLE through S_ARITHWAIT and = the values being captured
+                    // into a_reg/b_reg here, so na_*/nb_* are bit-identical to what
+                    // the deleted local u_norm_a/b would have produced from a_reg/
+                    // b_reg one cycle later.  The local-reg copies stay valid for
+                    // the whole compute (~131 cycles) -- the pipeline may release
+                    // op_a/op_b as soon as it advances past S_DIVWAIT.
+                    a_sign_reg <= na_sign;
+                    a_exp_reg  <= na_exp;
+                    a_sig_reg  <= na_sig;
+                    b_sign_reg <= nb_sign;
+                    b_exp_reg  <= nb_exp;
+                    b_sig_reg  <= nb_sig;
                     settle_cnt <= 4'd3;          // PR-2c.17: dwell while cones settle
                     dstate     <= D_SETTLE;
                 end
