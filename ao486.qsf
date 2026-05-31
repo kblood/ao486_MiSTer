@@ -96,12 +96,26 @@ set_global_assignment -name VERILOG_MACRO "MISTER_FB_PALETTE=1"
 # priority; HDMI scaler (ascal, ~2,309 ALM) is dropped to make room. Analog VGA
 # output still works. Paired with SB/OPL audio removal in system.v.
 #do not enable DEBUG_NOHDMI in release!
-set_global_assignment -name VERILOG_MACRO "MISTER_DEBUG_NOHDMI=1"
+#
+# iter-167c (2026-05-31): RESTORED ascal. iter-165/166 work shed ~1,200 ALMs
+# of headroom; ascal restoration should land at ~96.7% (40,544/41,910). This
+# brings HDMI + OSD + screenshot mechanism back online so we can actually
+# observe whether iter-166e is silicon-good. SoundBlaster remains dropped
+# (no room for both). Re-enable line below if a future iter regresses area
+# and we need NOHDMI again as an escape hatch.
+# set_global_assignment -name VERILOG_MACRO "MISTER_DEBUG_NOHDMI=1"
 
 # PR-2c.8 (iter 161): disable ascal's adaptive (polyphase) scaler to reclaim
 # ALMs for the x87 FPU fit.  HDMI output still works (nearest-neighbour scaling
 # instead of HQ/polyphase); far less drastic than DEBUG_NOHDMI.
 set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_ADAPTIVE=1"
+
+# iter-167c (2026-05-31): drop alsa non-SB audio path (~260 ALMs) to close
+# the 24-LAB gap when restoring ascal. SoundBlaster + OPL3 remain (those
+# live in system.v's sound block, also dropped in iter-164 — separate
+# decision). alsa was the I2S non-SB audio path nothing in current testing
+# exercises.
+set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_ALSA=1"
 
 source sys/sys.tcl
 source sys/sys_analog.tcl

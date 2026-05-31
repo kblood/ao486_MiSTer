@@ -633,7 +633,15 @@ rtc rtc
 // full x87 FPU (option a: full FPU > audio). Outputs the instance used to drive
 // are tied off below so the rest of system.v stays well-formed. Reversible:
 // restore the `sound sound (...)` instance to bring audio back.
-assign sound_readdata = 8'h00;
+//
+// iter-167d (2026-05-31): readback flipped 0x00 -> 0xFF (open-bus default).
+// Half-present 0x00 was being misdetected by lazy SB/OPL/CMS probes (e.g.
+// OPL timer-status polling loops would spin forever waiting for bit 7 to
+// flip from 0->1), causing DOS apps to freeze in audio init. 0xFF is the
+// canonical "no card installed" signature - software bails detection
+// cleanly. Doesn't fix software that hardcode-requires audio; for that
+// the sound block has to come back (+1,590 ALM).
+assign sound_readdata = 8'hFF;
 assign sample_cms_l   = 9'd0;
 assign sample_cms_r   = 9'd0;
 assign sample_sb_l    = 16'd0;
