@@ -918,7 +918,7 @@ module execute_fpu (
                             // (fbstp_ia/fbstp_pe) so it was already registered
                             // correctly at S_COMPUTE and needs no re-register here.
                             // Invisible to all outputs (gated on S_RETIRE/S_POP/...).
-        S_ARITHWAIT = 4'd14; // PR-2c.12 (iter 165): multi-cycle wait for the
+        S_ARITHWAIT = 4'd14, // PR-2c.12 (iter 165): multi-cycle wait for the
                             // COMBINATIONAL arith/converter ops (add/sub/mul + the
                             // mem load/store converters) whose result reaches z_lat
                             // through the full ~106 ns floatx80 datapath.  Today
@@ -932,6 +932,18 @@ module execute_fpu (
                             // flags_lat<=flags_compute and advances to S_POST.  Paired
                             // with set_multicycle_path -setup/-hold to z_lat+flags_lat
                             // in ao486.sdc.  Invisible to outputs (gated S_RETIRE...).
+        S_BCDLOADWAIT = 4'd15; // iter-168 (Slice 1, bcd_to_int64 sequentialize):
+                            // FBLD-only multi-cycle wait.  bcd_to_int64 is now
+                            // CLOCKED Horner (18 cycles).  For is_fbld_lat ops the
+                            // S_ARITHWAIT terminal cycle pulses bcd_load_start (1
+                            // cyc) and parks here until bcd_load_done; fbld_val
+                            // (and hence fbld_int -> shared int_to_floatx80 ->
+                            // fbld_x80) is then valid, b_lat captures fbld_x80
+                            // and we advance to S_POST.  S_ARITHWAIT no longer
+                            // captures b_lat for FBLD (was racing the now-deferred
+                            // BCD result).  FBLD's flags are unconditional 0 (BCD
+                            // load is exact, no IE/DE/ZE/OE/UE/PE) so no flags
+                            // re-register needed here.  Invisible to all outputs.
 
     localparam ARITH_WAIT_CYCLES = 12; // PR-2c.12: dwell so the ~106 ns sum_pre/
                                        // flags_pre paths settle (12*11.11ns=133ns);
@@ -1288,6 +1300,18 @@ module execute_fpu (
     wire        bcd_start = arith_wait_done && is_fbstp_lat;  // PR-2c.13: see div_start
     wire        bcd_done;
 
+    // iter-168 (Slice 1, bcd_to_int64 sequentialize): the BCD->int decoder for
+    // FBLD is now CLOCKED Horner (18 cyc) instead of a combinational unroll
+    // (~394 ALUTs -> ~80).  bcd_load_start is a NATURAL 1-cycle pulse high
+    // only on the S_ARITHWAIT terminal cycle of an FBLD op (mirrors
+    // bcd_start for FBSTP), so u_bcd_to_int64 (idle then) latches fbld_bcd
+    // exactly once and never re-starts.  bcd_load_done is forward-declared
+    // (Gotcha #9): the FSM's S_BCDLOADWAIT arm reads it above the
+    // instantiation that drives it.  FBLD is mutually exclusive with FBSTP /
+    // FILD / DIV / REM / SQRT, so none of the other start pulses fire here.
+    wire        bcd_load_start = arith_wait_done && is_fbld_lat;
+    wire        bcd_load_done;
+
     // PR-2b.3e: es_now / unmasked_flags forward-declared here because the
     // FSM's S_RETIRE→S_POP transition rule reads es_now (gating the pop
     // on ~es_now to honour SDM §8.1.5).  Without the forward declaration
@@ -1584,9 +1608,14 @@ module execute_fpu (
                         // b_lat was already captured (shallow) in S_COMPUTE and is left
                         // untouched here.  Paired with the b_lat -from {mem_data_lat,
                         // mem80_hi_lat} multicycle in ao486.sdc.
-                        if (is_fbld_lat || is_fld_m80_lat || is_mem_form_lat) begin
-                            b_lat <= is_fbld_lat    ? fbld_x80 :
-                                     is_fld_m80_lat ? {mem80_hi_lat, mem_data_lat} : mem_z;
+                        // iter-168 (Slice 1): FBLD's b_lat capture is DEFERRED to
+                        // S_BCDLOADWAIT now that bcd_to_int64 is sequential -- the
+                        // 18-cycle Horner runs from bcd_load_start (THIS cycle, via
+                        // arith_wait_done) and fbld_x80 isn't valid until then.
+                        // is_fld_m80_lat / is_mem_form_lat are unchanged; their
+                        // converter cones are combinational and settled by now.
+                        if (is_fld_m80_lat || is_mem_form_lat) begin
+                            b_lat <= is_fld_m80_lat ? {mem80_hi_lat, mem_data_lat} : mem_z;
                         end
                         // PR-2c.13 (iter 165b): operands have now settled for the full
                         // wait.  div/rem/sqrt/bcd pulse their start THIS cycle (via the
@@ -1603,6 +1632,13 @@ module execute_fpu (
                             state <= S_SQRTWAIT;
                         end else if (is_fbstp_lat) begin
                             state <= S_BCDWAIT;
+                        end else if (is_fbld_lat) begin
+                            // iter-168 (Slice 1): FBLD parks here while the clocked
+                            // bcd_to_int64 Horner runs (18 cyc).  bcd_load_start
+                            // pulsed THIS cycle (via arith_wait_done) latching the
+                            // settled fbld_bcd; on bcd_load_done the S_BCDLOADWAIT
+                            // arm captures b_lat<=fbld_x80 and advances to S_POST.
+                            state <= S_BCDLOADWAIT;
                         end else begin
                             z_lat     <= sum_pre;
                             flags_lat <= flags_compute;
@@ -1694,6 +1730,25 @@ module execute_fpu (
                         // ao486.sdc, so even a deeper path would be covered.
                         flags_lat <= flags_compute;
                         state     <= S_POST;
+                    end
+                end
+
+                // S_BCDLOADWAIT (iter-168 Slice 1): hold while the clocked Horner
+                // bcd_to_int64 runs (18 cyc).  bcd_load_start was pulsed for the
+                // single S_ARITHWAIT terminal cycle that preceded this state, so
+                // u_bcd_to_int64 already latched fbld_bcd.  On bcd_load_done,
+                // fbld_val (and hence fbld_int -> shared_int_a -> int_to_x80_z =
+                // fbld_x80) is valid; capture b_lat<=fbld_x80 just like the
+                // deferred S_ARITHWAIT capture used to do.  FBLD is exact (18
+                // decimal digits < 10^18 < 2^60 always fit the 64-bit
+                // significand) so flags_lat is already 6'b0 from S_COMPUTE and
+                // does NOT need re-register here.  fpu_busy stays high so the
+                // pipeline stalls; FBLD only writes the regfile at S_RETIRE so
+                // there's no chance of a stale b_lat being consumed early.
+                S_BCDLOADWAIT: begin
+                    if (bcd_load_done) begin
+                        b_lat <= fbld_x80;
+                        state <= S_POST;
                     end
                 end
 
@@ -2213,7 +2268,21 @@ module execute_fpu (
     // 2^60), so no exception flags.  Combinational; fbld_x80 feeds b_lat at S_COMPUTE.
     wire [71:0] fbld_bcd  = {mem80_hi_lat[7:0], mem_data_lat[63:0]};
     wire [63:0] fbld_val;
-    bcd_to_int64 u_bcd_to_int64 (.bcd(fbld_bcd), .val(fbld_val));
+    // iter-168 (Slice 1): CLOCKED Horner BCD->int (was ~394-ALUT combinational
+    // unroll; now ~80 ALUTs).  bcd_load_start pulses once at the S_ARITHWAIT
+    // terminal cycle of an FBLD op (when fbld_bcd has settled from mem_data_lat/
+    // mem80_hi_lat), the FSM parks in S_BCDLOADWAIT for 18 cycles, then captures
+    // b_lat <= fbld_x80 on bcd_load_done.  fbld_val HOLDS after done.  .busy
+    // unused (the FSM gates on bcd_load_done).
+    bcd_to_int64 u_bcd_to_int64 (
+        .clk   (clk),
+        .rst   (~rst_n | exe_reset | init),
+        .start (bcd_load_start),
+        .bcd   (fbld_bcd),
+        .val   (fbld_val),
+        .done  (bcd_load_done),
+        .busy  ()
+    );
     wire        fbld_sign = mem80_hi_lat[15];
     wire [63:0] fbld_int  = fbld_sign ? (~fbld_val + 64'd1) : fbld_val;
     // PR-2c.6 (iter 160): single shared int_to_floatx80 for FILD + FBLD.  When
