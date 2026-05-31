@@ -105,6 +105,8 @@ set fpu_dst [get_registers {*u_execute_fpu|z_lat* *u_execute_fpu|flags_lat* *u_f
                             *u_div|a_sign_reg* *u_div|a_exp_reg* *u_div|a_sig_reg* \
                             *u_div|b_sign_reg* *u_div|b_exp_reg* *u_div|b_sig_reg* \
                             *u_floatx80_remainder|a_reg* *u_floatx80_remainder|b_reg* *u_floatx80_remainder|rnd_reg* \
+                            *u_floatx80_remainder|a_sign_n_reg* *u_floatx80_remainder|a_exp_n_reg* *u_floatx80_remainder|a_sig_n_reg* \
+                            *u_floatx80_remainder|b_sign_n_reg* *u_floatx80_remainder|b_exp_n_reg* *u_floatx80_remainder|b_sig_n_reg* \
                             *u_floatx80_sqrt|a_reg* \
                             *u_floatx80_sqrt|a_sign_n_reg* *u_floatx80_sqrt|a_exp_n_reg* *u_floatx80_sqrt|a_sig_n_reg* \
                             *u_int64_to_bcd|val_reg* \

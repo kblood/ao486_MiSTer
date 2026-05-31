@@ -45,6 +45,20 @@ module floatx80_remainder (
     input  wire [79:0] a,
     input  wire [79:0] b,
     input  wire        rnd_nearest,   // 1 = FPREM1 (RTNE quotient), 0 = FPREM (RTZ)
+    // iter-171a: shared input normalizers (~600 ALUTs saved).  Caller drives
+    // these from execute_fpu's u_norm_a_shared / u_norm_b_shared cones
+    // evaluating op_a / op_b; at the `start` edge (rem_start fires in
+    // S_ARITHWAIT for FPREM) op_a == a_lat and op_b == b_lat, identical to
+    // what the removed local u_norm_a/u_norm_b would have produced from
+    // a_reg/b_reg.  Captured into a_*_n_reg/b_*_n_reg on `start` so the
+    // ~64-cycle divide and the surrounding combinational fabric see stable
+    // normalized inputs.
+    input  wire        na_sign,
+    input  wire signed [16:0] na_exp,
+    input  wire [63:0] na_sig,
+    input  wire        nb_sign,
+    input  wire signed [16:0] nb_exp,
+    input  wire [63:0] nb_sig,
     output wire [79:0] z,
     output wire [2:0]  quotient,      // low 3 bits of q -> {C0=q[2], C3=q[1], C1=q[0]}
     output wire        incomplete,    // -> C2 (partial reduction, expDiff >= 64)
@@ -95,20 +109,26 @@ module floatx80_remainder (
     );
 
     //--------------------------------------------------------------------
-    // Normalize the operands.  Pass-through for normals (exp_out = raw
-    // biased exp widened to signed-17; sig_out = a_sig); for denormals the
-    // exponent goes negative (down to -62) and the significand is shifted
-    // so the J-bit is set, letting the normal-path math be IEEE-correct.
+    // Normalized operands.  iter-171a: u_norm_a/u_norm_b removed in favor of
+    // execute_fpu's shared u_norm_a_shared / u_norm_b_shared cones driven
+    // through the na_*/nb_* ports.  Captured into _reg on the same `start`
+    // edge that latches a_reg/b_reg so the surrounding combinational fabric
+    // (expDiff, num_div, packer, special cascade) stays stable across the
+    // ~64-cycle divide.
     //--------------------------------------------------------------------
-    wire               a_sign_n;
-    wire signed [16:0] a_exp_n;
-    wire [63:0]        a_sig_n;
-    floatx80_normalize u_norm_a (.a(a_reg), .sign_out(a_sign_n), .exp_out(a_exp_n), .sig_out(a_sig_n));
+    reg                a_sign_n_reg;
+    reg  signed [16:0] a_exp_n_reg;
+    reg         [63:0] a_sig_n_reg;
+    reg                b_sign_n_reg;
+    reg  signed [16:0] b_exp_n_reg;
+    reg         [63:0] b_sig_n_reg;
 
-    wire               b_sign_n;
-    wire signed [16:0] b_exp_n;
-    wire [63:0]        b_sig_n;
-    floatx80_normalize u_norm_b (.a(b_reg), .sign_out(b_sign_n), .exp_out(b_exp_n), .sig_out(b_sig_n));
+    wire               a_sign_n = a_sign_n_reg;
+    wire signed [16:0] a_exp_n  = a_exp_n_reg;
+    wire        [63:0] a_sig_n  = a_sig_n_reg;
+    wire               b_sign_n = b_sign_n_reg;
+    wire signed [16:0] b_exp_n  = b_exp_n_reg;
+    wire        [63:0] b_sig_n  = b_sig_n_reg;
 
     wire signed [16:0] expDiff = a_exp_n - b_exp_n;
 
@@ -171,22 +191,39 @@ module floatx80_remainder (
 
     always @(posedge clk) begin
         if (rst) begin
-            rstate      <= R_IDLE;
-            done        <= 1'b0;
-            a_reg       <= 80'd0;
-            b_reg       <= 80'd0;
-            rnd_reg     <= 1'b0;
-            q_div_reg   <= 64'd0;
-            rem_div_reg <= 64'd0;
+            rstate       <= R_IDLE;
+            done         <= 1'b0;
+            a_reg        <= 80'd0;
+            b_reg        <= 80'd0;
+            rnd_reg      <= 1'b0;
+            q_div_reg    <= 64'd0;
+            rem_div_reg  <= 64'd0;
+            a_sign_n_reg <= 1'b0;
+            a_exp_n_reg  <= 17'sd0;
+            a_sig_n_reg  <= 64'd0;
+            b_sign_n_reg <= 1'b0;
+            b_exp_n_reg  <= 17'sd0;
+            b_sig_n_reg  <= 64'd0;
         end else begin
             done <= 1'b0;
             case (rstate)
                 R_IDLE: begin
                     if (start) begin
-                        a_reg   <= a;
-                        b_reg   <= b;
-                        rnd_reg <= rnd_nearest;
-                        rstate  <= R_START;
+                        a_reg        <= a;
+                        b_reg        <= b;
+                        rnd_reg      <= rnd_nearest;
+                        // iter-171a: capture shared-normalize cone outputs on
+                        // the SAME edge that latches a/b.  After this edge the
+                        // shared cones may see different op_a/op_b (next op
+                        // dispatching), but our local _reg copies are frozen
+                        // for the rest of the FPREM run.
+                        a_sign_n_reg <= na_sign;
+                        a_exp_n_reg  <= na_exp;
+                        a_sig_n_reg  <= na_sig;
+                        b_sign_n_reg <= nb_sign;
+                        b_exp_n_reg  <= nb_exp;
+                        b_sig_n_reg  <= nb_sig;
+                        rstate       <= R_START;
                     end
                 end
                 // a_reg/b_reg settled: needs_div / num_div / den_div now valid.

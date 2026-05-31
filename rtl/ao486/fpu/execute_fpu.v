@@ -2402,6 +2402,18 @@ module execute_fpu (
         .a           (a_lat),
         .b           ((state == S_COMPUTE) ? rf_rd_data : b_lat),
         .rnd_nearest (is_fprem1_lat),
+        // iter-171a: shared input normalizers (~600 ALUTs saved).  For FPREM
+        // reverse_lat=0 so op_a==a_lat (matches local a_reg <= a) and
+        // op_b==arith_b==b_lat at the rem_start edge (S_ARITHWAIT, state !=
+        // S_COMPUTE, is_mem_form_lat=0).  Equivalent to the deleted local
+        // u_norm_a/u_norm_b inputs.  remainder latches into its own _reg on
+        // start, so the shared cone outputs only need to be valid that edge.
+        .na_sign     (norm_a_sign),
+        .na_exp      (norm_a_exp),
+        .na_sig      (norm_a_sig),
+        .nb_sign     (norm_b_sign),
+        .nb_exp      (norm_b_exp),
+        .nb_sig      (norm_b_sig),
         .z           (rem_z),
         .quotient    (rem_quotient),
         .incomplete  (rem_incomplete),
