@@ -1070,11 +1070,12 @@ module execute_fpu (
     wire [5:0]  fbstp_flags;         // FBSTP: {PE,UE,OE,ZE,DE,IE}
     wire [79:0] fbstp_store_data;    // FBSTP: 10-byte packed BCD (or indefinite)
     // PR-2b.5f (iter 119): narrowing-store converter exception flags.  Declared
-    // here (ahead of the flags_lat S_COMPUTE block that consumes them) because
-    // ModelSim vlog requires nets used procedurally to be declared textually
-    // first.  Driven by the floatx80_to_float32/64 instances further below.
-    wire       f32_pe, f32_oe, f32_ue, f32_ie;
-    wire       f64_pe, f64_oe, f64_ue, f64_ie;
+    // PR-2c.26 (iter 179): the unified narrowing-store converter's outputs.
+    // Forward-declared here (ahead of the flags_compute / store_data assigns
+    // that consume them) -- mirrors the old f32_*/f64_* forward-decl block, now
+    // collapsed to one width-muxed instance (floatx80_to_floatN, below).
+    wire [63:0] fn_z;
+    wire        fn_pe, fn_oe, fn_ue, fn_ie;
     // PR-2b.5w (iter 141): FIST/FISTP result + flags from floatx80_to_int.
     // Declared ahead of the flags_lat block (procedural-net decl-order rule);
     // driven by the instance further below.  Only IE (#IA) and PE arise.
@@ -2226,8 +2227,10 @@ module execute_fpu (
                                        // the active converter (FST and FSTP share the same lane).
                                        // ZE/DE are never raised by a store narrowing-conversion.
                                        // Must precede the 6'd0 control-op arm below.
-                                       (is_fstp_m32_lat | is_fst_m32_lat) ? {f32_pe, f32_ue, f32_oe, 1'b0, 1'b0, f32_ie} :
-                                       (is_fstp_m64_lat | is_fst_m64_lat) ? {f64_pe, f64_ue, f64_oe, 1'b0, 1'b0, f64_ie} :
+                                       // PR-2c.26 (iter 179): both store widths share the unified
+                                       // floatx80_to_floatN flags (is_m64 picks the width internally).
+                                       (is_fstp_m32_lat | is_fst_m32_lat | is_fstp_m64_lat | is_fst_m64_lat)
+                                           ? {fn_pe, fn_ue, fn_oe, 1'b0, 1'b0, fn_ie} :
                                        // PR-2b.5w (iter 141): FIST/FISTP flags.  {PE,UE,OE,ZE,DE,IE} =
                                        // {pe,0,0,0,0,ie}; only IE (#IA on out-of-range/NaN/Inf) and PE
                                        // (inexact) arise from an integer store — no UE/OE/ZE, and FIST
@@ -2312,31 +2315,24 @@ module execute_fpu (
                                            && !(pop_after_lat && ~es_now)
                                            && !(is_fxtract_lat && ~es_now));
 
-    // PR-2b.5c (iter 116): FSTP m32 narrowing converter.  Fed combinationally by
-    // a_lat (ST(0), latched at S_FETCH_B); the RTNE-rounded float32 rides
-    // store_data[31:0] when is_fstp_m32_lat.  PR-2b.5f (iter 119): exc-flag
-    // outputs (pe/oe/ue/ie) now feed flags_lat (see narrowing-store arm above)
-    // and flow through exc_flags_set -> fpu_csr -> SW at S_RETIRE.
-    wire [31:0] fstp_m32_z;   // f32_pe/oe/ue/ie declared near the *_lat block above
-    floatx80_to_float32 u_floatx80_to_float32 (
-        .a  (a_lat),
-        .z  (fstp_m32_z),
-        .pe (f32_pe),
-        .oe (f32_oe),
-        .ue (f32_ue),
-        .ie (f32_ie)
-    );
-    // PR-2b.5d (iter 117): FSTP m64 narrowing converter — fed by a_lat, RTNE
-    // float64 rides store_data[63:0] when is_fstp_m64_lat.  PR-2b.5f (iter 119):
-    // flags (pe/oe/ue/ie) now drive flags_lat -> exc_flags_set -> SW.
-    wire [63:0] fstp_m64_z;   // f64_pe/oe/ue/ie declared near the *_lat block above
-    floatx80_to_float64 u_floatx80_to_float64 (
-        .a  (a_lat),
-        .z  (fstp_m64_z),
-        .pe (f64_pe),
-        .oe (f64_oe),
-        .ue (f64_ue),
-        .ie (f64_ie)
+    // PR-2c.26 (iter 179): the m32 + m64 NARROWING converters are now SHARED.
+    // FST/FSTP m32 and FST/FSTP m64 never co-occur, so a single runtime-muxed
+    // floatx80_to_floatN (is_m64 = the store-m64 lane) serves both widths and
+    // reclaims the duplicated rounding adder + subnormal shift/round/pack
+    // datapath the two modules carried.  Proven byte-identical to the old
+    // floatx80_to_float32/float64 pair by floatx80_to_floatN_tb.v (30044/30044
+    // z/pe/oe/ue/ie bit-exact).  fn_z carries the f32 result in [31:0] / the f64
+    // result in [63:0]; fn_pe/oe/ue/ie are the active-width flags (replacing the
+    // old f32_*/f64_* wires consumed by the store_data + flags_lat muxes).
+    wire        is_store_m64 = is_fstp_m64_lat | is_fst_m64_lat;
+    floatx80_to_floatN u_floatx80_to_floatN (
+        .a      (a_lat),
+        .is_m64 (is_store_m64),
+        .z      (fn_z),
+        .pe     (fn_pe),
+        .oe     (fn_oe),
+        .ue     (fn_ue),
+        .ie     (fn_ie)
     );
     // PR-2b.5w (iter 141): FIST/FISTP integer converter.  Fed by a_lat (ST(0),
     // latched at S_FETCH_B), the live rounding-control field cw[11:10], and the
@@ -2562,8 +2558,8 @@ module execute_fpu (
     // write stage can latch the payload at any point before its write
     // sequence retires the op.  PR-2b.5c: FSTP m32 substitutes the narrowed
     // float32 in [31:0] (write.v emits only step 0 for m32).  Both 0 otherwise.
-    assign store_data  = (is_fstp_m32_lat || is_fst_m32_lat) ? {48'd0, fstp_m32_z} :
-                         (is_fstp_m64_lat || is_fst_m64_lat) ? {16'd0, fstp_m64_z} :
+    assign store_data  = (is_fstp_m32_lat || is_fst_m32_lat) ? {48'd0, fn_z[31:0]} :
+                         (is_fstp_m64_lat || is_fst_m64_lat) ? {16'd0, fn_z[63:0]} :
                          // PR-2b.5w (iter 141): FIST/FISTP — the int rides the low
                          // bytes; write.v takes [15:0]/[31:0]/[63:0] per width.
                          (is_fist_lat) ? {16'd0, fist_z} :
