@@ -1853,23 +1853,23 @@ module execute_fpu (
     // mem_de_flag / mem_ie_flag fan into flags_lat at S_COMPUTE only when
     // is_mem_form_lat is set, so reg-form ops see exactly the same
     // flags_pre they did before this iter.
-    wire [79:0] f32_to_x80_z;
-    wire        f32_to_x80_de;
-    wire        f32_to_x80_ie;
-    float32_to_floatx80 u_f32_to_x80 (
-        .a  (mem_data_lat[31:0]),
-        .z  (f32_to_x80_z),
-        .de (f32_to_x80_de),
-        .ie (f32_to_x80_ie)
-    );
-    wire [79:0] f64_to_x80_z;
-    wire        f64_to_x80_de;
-    wire        f64_to_x80_ie;
-    float64_to_floatx80 u_f64_to_x80 (
-        .a  (mem_data_lat),
-        .z  (f64_to_x80_z),
-        .de (f64_to_x80_de),
-        .ie (f64_to_x80_ie)
+    // PR-2c.25 (iter 178): the m32 + m64 widening converters are now SHARED.
+    // FLD m32 and FLD m64 are mutually-exclusive in any S_COMPUTE cycle, so a
+    // single runtime-muxed floatN_to_floatx80 (is_m64 = mem_fmt_lat[0]) serves
+    // both widths and reclaims the duplicated 23-bit CLZ + second normalize/
+    // pack datapath the two separate modules carried.  Proven byte-identical to
+    // the old float32/float64_to_floatx80 pair by floatN_to_floatx80_tb.v
+    // (10034/10034 z/de/ie bit-exact).  fx80w_* below replace f32_to_x80_* and
+    // f64_to_x80_* — the mem_z/de/ie mux no longer needs to pick between them.
+    wire [79:0] fx80w_z;
+    wire        fx80w_de;
+    wire        fx80w_ie;
+    floatN_to_floatx80 u_fxw (
+        .a      (mem_data_lat),
+        .is_m64 (mem_fmt_lat[0]),
+        .z      (fx80w_z),
+        .de     (fx80w_de),
+        .ie     (fx80w_ie)
     );
     // PR-2b.5v (iter 140): FILD integer converter, parallel to the f32/f64
     // converters.  Runs combinationally off mem_data_lat; selected into mem_z
@@ -1887,9 +1887,9 @@ module execute_fpu (
     // always-block can read them before this mux.  Same Gotcha #9 pattern.
     // PR-2b.5v (iter 140): FILD takes priority — its int_to_x80_z replaces the
     // float-converter output and forces DE/IE = 0 (FILD raises no exceptions).
-    assign mem_z       = is_fild_lat ? int_to_x80_z : (mem_fmt_lat[0] ? f64_to_x80_z  : f32_to_x80_z);
-    assign mem_de_flag = is_fild_lat ? 1'b0         : (mem_fmt_lat[0] ? f64_to_x80_de : f32_to_x80_de);
-    assign mem_ie_flag = is_fild_lat ? 1'b0         : (mem_fmt_lat[0] ? f64_to_x80_ie : f32_to_x80_ie);
+    assign mem_z       = is_fild_lat ? int_to_x80_z : fx80w_z;
+    assign mem_de_flag = is_fild_lat ? 1'b0         : fx80w_de;
+    assign mem_ie_flag = is_fild_lat ? 1'b0         : fx80w_ie;
 
     wire [79:0] arith_a = a_lat;
     // PR-2b.4d (iter 55): for mem-form, b is the converted mem operand
