@@ -2153,14 +2153,43 @@ module execute_fpu (
     // identical pre-round triple it fed the rounder), so the same mux drives
     // both.  The per-primitive ue_now gate stays inline; only the encoding
     // helper is shared.
+    //
+    // PR-2c.22 (iter 171c): remainder added as a NEW consumer.  Its u_pack
+    // (floatx80_norm_round_pack) used to instantiate its OWN pack_subn
+    // (~400+ ALUTs).  We hoisted that out so u_pack_subn_shared serves it
+    // too — but pack_subn's inputs come from u_pack's POST-CLZ-shift triple,
+    // not the standard pre-round shared_pr_* triple.  State-keyed mux: in
+    // S_REMWAIT, feed remainder's triple; otherwise the existing shared_pr_*.
+    // u_pack_subn_shared's output then routes back to remainder via rps_z/pe.
+    // iter-171c: forward-declare remainder's pre-pack triple (driven below
+    // by u_floatx80_remainder).  Must be declared before the mux that reads
+    // them; the instance binding lower in the file drives these nets.
+    wire               rem_rps_in_sign;
+    wire signed [16:0] rem_rps_in_exp_pre;
+    wire        [63:0] rem_rps_in_sig_hi;
+    wire        [63:0] rem_rps_in_sig_lo;
+    wire        pks_sel_rem = (state == S_REMWAIT);
+    wire        pks_sign_in = pks_sel_rem ? rem_rps_in_sign    : shared_pr_sign;
+    wire signed [16:0] pks_exp_in = pks_sel_rem ? rem_rps_in_exp_pre : shared_pr_exp;
+    wire [63:0] pks_hi_in   = pks_sel_rem ? rem_rps_in_sig_hi  : shared_pr_sig0;
+    wire [63:0] pks_lo_in   = pks_sel_rem ? rem_rps_in_sig_lo  : shared_pr_sig1;
+    wire [79:0] pks_z_out;
+    wire        pks_pe_out;
     floatx80_pack_subn u_pack_subn_shared (
-        .sign      (shared_pr_sign),
-        .z_exp_pre (shared_pr_exp),
-        .sig_hi    (shared_pr_sig0),
-        .sig_lo    (shared_pr_sig1),
-        .z_subn    (shared_subn_z),
-        .pe_subn   (shared_subn_pe)
+        .sign      (pks_sign_in),
+        .z_exp_pre (pks_exp_in),
+        .sig_hi    (pks_hi_in),
+        .sig_lo    (pks_lo_in),
+        .z_subn    (pks_z_out),
+        .pe_subn   (pks_pe_out)
     );
+    // Fan-out: existing arith primitives consume shared_subn_z/pe only when
+    // their op is picked downstream (kind_lat-gated), so feeding them with
+    // remainder's pack during S_REMWAIT is harmless — the cascade ignores it.
+    assign shared_subn_z  = pks_z_out;
+    assign shared_subn_pe = pks_pe_out;
+    wire [79:0] rem_rps_z_in  = pks_z_out;
+    wire        rem_rps_pe_in = pks_pe_out;
 
     wire use_sub_primitive = (op_a[79] ^ op_b[79]) ^ kind_lat[0];
     wire [79:0] addsub_z     = use_sub_primitive ? sub_z     : add_z;
@@ -2462,6 +2491,15 @@ module execute_fpu (
         .sd_q        (sd_q_shared),
         .sd_r        (sd_r_shared),
         .sd_done     (sd_done_shared & pick_rem_div),
+        // iter-171c: shared pack_subn hookup.  u_pack's internal pack_subn
+        // is gone; these route to u_pack_subn_shared (input mux above keys
+        // off state==S_REMWAIT).
+        .rps_in_sign    (rem_rps_in_sign),
+        .rps_in_exp_pre (rem_rps_in_exp_pre),
+        .rps_in_sig_hi  (rem_rps_in_sig_hi),
+        .rps_in_sig_lo  (rem_rps_in_sig_lo),
+        .rps_z_in       (rem_rps_z_in),
+        .rps_pe_in      (rem_rps_pe_in),
         .z           (rem_z),
         .quotient    (rem_quotient),
         .incomplete  (rem_incomplete),

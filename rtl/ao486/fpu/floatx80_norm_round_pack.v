@@ -44,6 +44,16 @@ module floatx80_norm_round_pack (
     input  wire signed [16:0] z_exp_in,   // BIASED exponent (0x3FFF == bias of 1.0)
     input  wire        [63:0] sig0_in,    // high 64 bits of the 128-bit significand
     input  wire        [63:0] sig1_in,    // low  64 bits
+    // iter-171c: subn pack hoisted out — caller drives execute_fpu's shared
+    // u_pack_subn_shared with these post-CLZ-shift triple outputs, and feeds
+    // back z_subn/pe_subn.  Saves the duplicate floatx80_pack_subn that used
+    // to live inside this module (~400+ ALUTs).
+    output wire               subn_in_sign,
+    output wire signed [16:0] subn_in_exp_pre,
+    output wire        [63:0] subn_in_sig_hi,
+    output wire        [63:0] subn_in_sig_lo,
+    input  wire        [79:0] subn_z_in,
+    input  wire               subn_pe_in,
     output wire        [79:0] z,
     output wire               pe,         // inexact
     output wire               ue          // underflow (subnormal path -- Slice-2 stub)
@@ -105,16 +115,14 @@ module floatx80_norm_round_pack (
     //--------------------------------------------------------------------
     wire subn = ~all_zero && (n_exp <= $signed(17'sd0));
 
-    wire [79:0] z_subn;
-    wire        pe_subn;
-    floatx80_pack_subn u_subn_pack (
-        .sign      (sign),
-        .z_exp_pre (n_exp),
-        .sig_hi    (n_sig0),
-        .sig_lo    (n_sig1),
-        .z_subn    (z_subn),
-        .pe_subn   (pe_subn)
-    );
+    // iter-171c: u_subn_pack hoisted to execute_fpu's u_pack_subn_shared.
+    // We expose the pre-pack triple and consume back z_subn/pe_subn.
+    assign subn_in_sign    = sign;
+    assign subn_in_exp_pre = n_exp;
+    assign subn_in_sig_hi  = n_sig0;
+    assign subn_in_sig_lo  = n_sig1;
+    wire [79:0] z_subn  = subn_z_in;
+    wire        pe_subn = subn_pe_in;
 
     //--------------------------------------------------------------------
     // Result mux: zero > subnormal > normal.

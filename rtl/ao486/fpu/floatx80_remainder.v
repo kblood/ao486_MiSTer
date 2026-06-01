@@ -69,6 +69,14 @@ module floatx80_remainder (
     input  wire [63:0]  sd_q,
     input  wire [63:0]  sd_r,
     input  wire         sd_done,
+    // iter-171c: u_pack's internal floatx80_pack_subn hoisted to share
+    // execute_fpu's u_pack_subn_shared via a state-keyed input mux.
+    output wire         rps_in_sign,
+    output wire signed [16:0] rps_in_exp_pre,
+    output wire [63:0]  rps_in_sig_hi,
+    output wire [63:0]  rps_in_sig_lo,
+    input  wire [79:0]  rps_z_in,
+    input  wire         rps_pe_in,
     output wire [79:0] z,
     output wire [2:0]  quotient,      // low 3 bits of q -> {C0=q[2], C3=q[1], C1=q[0]}
     output wire        incomplete,    // -> C2 (partial reduction, expDiff >= 64)
@@ -329,6 +337,15 @@ module floatx80_remainder (
         .z_exp_in (final_exp),
         .sig0_in  (final_sig0),
         .sig1_in  (final_sig1),
+        // iter-171c: route the hoisted pack_subn through ports up to
+        // execute_fpu's shared u_pack_subn_shared (muxed against the
+        // existing shared_pr_* triple from sub/add/mul/div).
+        .subn_in_sign    (rps_in_sign),
+        .subn_in_exp_pre (rps_in_exp_pre),
+        .subn_in_sig_hi  (rps_in_sig_hi),
+        .subn_in_sig_lo  (rps_in_sig_lo),
+        .subn_z_in       (rps_z_in),
+        .subn_pe_in      (rps_pe_in),
         .z        (pack_z),
         .pe       (pack_pe),
         .ue       (pack_ue)

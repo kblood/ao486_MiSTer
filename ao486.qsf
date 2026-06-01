@@ -57,7 +57,7 @@ set_global_assignment -name FITTER_AGGRESSIVE_ROUTABILITY_OPTIMIZATION ALWAYS
 # X22-X32/Y46-Y57). Aggressive routability is already ALWAYS (line 54), so the
 # remaining Quartus-recommended remedy is a fresh fitter seed. Keeps full FPU +
 # full 128KB L2; if this still congests, next escalation is L2 -> 64KB.
-set_global_assignment -name SEED 2
+set_global_assignment -name SEED 3
 
 # PR-2c.15 (iter 165d): keep register retiming ON globally (line 38 — an upstream MiSTer
 # HIGH-PERFORMANCE setting the NON-FPU paths need: a global OFF closed the FPU but
