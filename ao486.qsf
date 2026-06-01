@@ -48,7 +48,11 @@ set_global_assignment -name ROUTER_CLOCKING_TOPOLOGY_ANALYSIS ON
 set_global_assignment -name ECO_OPTIMIZE_TIMING ON
 set_global_assignment -name PERIPHERY_TO_CORE_PLACEMENT_AND_ROUTING_OPTIMIZATION ON
 set_global_assignment -name PHYSICAL_SYNTHESIS_ASYNCHRONOUS_SIGNAL_PIPELINING ON
-set_global_assignment -name ALM_REGISTER_PACKING_EFFORT LOW
+# iter-172c (2026-06-01): SEED 3,4 fit RED on LAB density (19, 21 LABs short
+# at 95% ALM with sound block restored).  LOW->MEDIUM densifies ALM packing
+# (more registers per ALM, fewer LABs).  Timing risk: minor — current wall
+# is at int_to_floatx80 ShiftLeft cones, not register-packing-sensitive paths.
+set_global_assignment -name ALM_REGISTER_PACKING_EFFORT MEDIUM
 set_global_assignment -name OPTIMIZE_POWER_DURING_SYNTHESIS OFF
 set_global_assignment -name ROUTER_REGISTER_DUPLICATION ON
 set_global_assignment -name FITTER_AGGRESSIVE_ROUTABILITY_OPTIMIZATION ALWAYS
@@ -57,7 +61,7 @@ set_global_assignment -name FITTER_AGGRESSIVE_ROUTABILITY_OPTIMIZATION ALWAYS
 # X22-X32/Y46-Y57). Aggressive routability is already ALWAYS (line 54), so the
 # remaining Quartus-recommended remedy is a fresh fitter seed. Keeps full FPU +
 # full 128KB L2; if this still congests, next escalation is L2 -> 64KB.
-set_global_assignment -name SEED 3
+set_global_assignment -name SEED 4
 
 # PR-2c.15 (iter 165d): keep register retiming ON globally (line 38 — an upstream MiSTer
 # HIGH-PERFORMANCE setting the NON-FPU paths need: a global OFF closed the FPU but

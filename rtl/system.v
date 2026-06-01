@@ -629,31 +629,65 @@ rtc rtc
 	.irq               (irq_8)
 );
 
-// PR-2c.9 (iter 164): SB/OPL/CMS sound block REMOVED to free ~1,590 ALM for the
-// full x87 FPU (option a: full FPU > audio). Outputs the instance used to drive
-// are tied off below so the rest of system.v stays well-formed. Reversible:
-// restore the `sound sound (...)` instance to bring audio back.
-//
-// iter-167d (2026-05-31): readback flipped 0x00 -> 0xFF (open-bus default).
-// Half-present 0x00 was being misdetected by lazy SB/OPL/CMS probes (e.g.
-// OPL timer-status polling loops would spin forever waiting for bit 7 to
-// flip from 0->1), causing DOS apps to freeze in audio init. 0xFF is the
-// canonical "no card installed" signature - software bails detection
-// cleanly. Doesn't fix software that hardcode-requires audio; for that
-// the sound block has to come back (+1,590 ALM).
-assign sound_readdata = 8'hFF;
-assign sample_cms_l   = 9'd0;
-assign sample_cms_r   = 9'd0;
-assign sample_sb_l    = 16'd0;
-assign sample_sb_r    = 16'd0;
-assign sample_opl_l   = 16'd0;
-assign sample_opl_r   = 16'd0;
-assign sbp            = 1'b0;
-assign dma_sb_req_8   = 1'b0;
-assign dma_sb_req_16  = 1'b0;
-assign irq_5          = 1'b0;
-assign irq_7          = 1'b0;
-assign irq_10         = 1'b0;
+// PR-2c.23 (iter 172): SB+OPL+CMS sound block RESTORED on top of the
+// iter-168-171c FPU dedupe campaign (1,757 ALMs freed cumulatively: 168 +
+// 169 + 170 + 171a + 171b + 171c = 252 + 268 + 200 + 435 + 192 + 356 + 54 res).
+// iter-171c baseline: 39,643/41,910 ALMs (95%, 2,267 ALMs headroom);
+// restored sound block (~1,590 ALMs per iter-164 commit) fits with margin
+// for placement-density.  Reverts iter-164's removal verbatim; iter-167d's
+// 8'h00->8'hFF readback stub is no longer needed (the instance drives
+// sound_readdata natively).  HDMI/ascal stays (iter-167c).
+sound sound
+(
+	.clk               (clk_sys),
+	.clk_audio         (clk_audio),
+	.rst_n             (~reset),
+
+	.clock_rate        (clock_rate),
+
+	.address           (iobus_address[3:0]),
+	.writedata         (iobus_writedata[7:0]),
+	.read              (iobus_read),
+	.write             (iobus_write),
+	.readdata          (sound_readdata),
+	.sb_cs             (sb_cs),
+	.fm_cs             (fm_cs),
+
+	.dma_req8          (dma_sb_req_8),
+	.dma_req16         (dma_sb_req_16),
+	.dma_ack           (dma_sb_ack_16 | dma_sb_ack_8),
+	.dma_readdata      (dma_sb_req_16 ? dma_sb_readdata_16 : dma_sb_readdata_8),
+	.dma_writedata     (dma_sb_writedata),
+
+	.sbp               (sbp),
+
+	.vol_master_l      (vol_master_l),
+	.vol_master_r      (vol_master_r),
+	.vol_voice_l       (vol_voice_l),
+	.vol_voice_r       (vol_voice_r),
+	.vol_midi_l        (vol_midi_l),
+	.vol_midi_r        (vol_midi_r),
+	.vol_cd_l          (vol_cd_l),
+	.vol_cd_r          (vol_cd_r),
+	.vol_line_l        (vol_line_l),
+	.vol_line_r        (vol_line_r),
+	.vol_spk           (vol_spk),
+	.vol_en            (vol_en),
+
+	.sample_cms_l      (sample_cms_l),
+	.sample_cms_r      (sample_cms_r),
+	.sample_sb_l       (sample_sb_l),
+	.sample_sb_r       (sample_sb_r),
+	.sample_opl_l      (sample_opl_l),
+	.sample_opl_r      (sample_opl_r),
+
+	.fm_mode           (sound_fm_mode),
+	.cms_en            (sound_cms_en),
+
+	.irq_5             (irq_5),
+	.irq_7             (irq_7),
+	.irq_10            (irq_10)
+);
 
 uart uart1
 (
