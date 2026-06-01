@@ -1938,11 +1938,22 @@ module execute_fpu (
     // PR-2c.3 (iter 158): two shared floatx80_normalize instances feed
     // add/sub/mul (which all normalize the SAME live op_a/op_b).  div keeps
     // its own pair because it normalizes its internally-frozen a_reg/b_reg.
+    // PR-2c.21 (iter 173): u_norm_a_shared is ALSO time-multiplexed with the
+    // int_to_floatx80 input cone: when is_fild_lat | is_fbld_lat (which are
+    // dispatch-latched + mutex with arith ops), route int_norm_in_*
+    // ({sign, 15'd0, mag}) instead of op_a.  Saves the local 64-iter CLZ in
+    // int_to_floatx80 (~150-250 ALMs) and relieves the iter-171b STA wall.
     wire               norm_a_sign, norm_b_sign;
     wire signed [16:0] norm_a_exp,  norm_b_exp;
     wire        [63:0] norm_a_sig,  norm_b_sig;
+    wire               int_norm_in_sign;
+    wire        [63:0] int_norm_in_mag;
+    wire               fild_norm_sel = is_fild_lat | is_fbld_lat;
+    wire        [79:0] norm_a_in     = fild_norm_sel
+                                     ? {int_norm_in_sign, 15'd0, int_norm_in_mag}
+                                     : op_a;
     floatx80_normalize u_norm_a_shared (
-        .a        (op_a),
+        .a        (norm_a_in),
         .sign_out (norm_a_sign),
         .exp_out  (norm_a_exp),
         .sig_out  (norm_a_sig)
@@ -2371,7 +2382,18 @@ module execute_fpu (
     // shared output and is only consumed (b_lat) when is_fbld_lat=1.
     wire [63:0] shared_int_a = is_fbld_lat ? fbld_int : mem_data_lat;
     wire [1:0]  shared_int_w = is_fbld_lat ? 2'd2     : fild_width_lat;
-    int_to_floatx80 u_int_to_x80 (.a(shared_int_a), .width(shared_int_w), .z(int_to_x80_z));
+    int_to_floatx80 u_int_to_x80 (
+        .a            (shared_int_a),
+        .width        (shared_int_w),
+        // iter-173: share u_norm_a_shared's CLZ + shift cone with FILD/FBLD.
+        // Drive {int_norm_in_sign, 15'd0, int_norm_in_mag} into u_norm_a_shared's
+        // input (gated above by fild_norm_sel), and consume the normalized exp/sig.
+        .norm_in_sign (int_norm_in_sign),
+        .norm_in_mag  (int_norm_in_mag),
+        .norm_out_exp (norm_a_exp),
+        .norm_out_sig (norm_a_sig),
+        .z            (int_to_x80_z)
+    );
     assign fbld_x80 = int_to_x80_z;
     // PR-2b.5z (iter 152): FBSTP m80 converter chain.  Round ST(0) to a signed int64
     // per CW.RC (floatx80_to_int, width=m64), take the magnitude, and range-check it

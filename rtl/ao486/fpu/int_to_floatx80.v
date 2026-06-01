@@ -10,7 +10,19 @@
 //          2'd2 = m64 (a[63:0]).  The memory read delivers the operand
 //          right-aligned and zero-extended in a[63:0]; this module re-derives
 //          the signed 64-bit value per width, takes its magnitude, normalizes
-//          via a 64-bit priority encoder, and packs the result.
+//          via the SHARED floatx80_normalize cone in execute_fpu (iter 173),
+//          and packs the result.
+//
+// PR-2c.21 (iter 173): the local 64-iteration CLZ + 64-bit shift previously
+// done inline here is the iter-171b STA wall (ShiftLeft0~XX_OTERMxxxx).  This
+// module now exports its (sign, magnitude) prep to execute_fpu's existing
+// floatx80_normalize u_norm_a_shared (mutex with arith ops via is_fild_lat |
+// is_fbld_lat dispatch latches), saving ~150-250 ALMs and relieving the
+// timing wall.  The exp-bias math:
+//   floatx80_normalize returns norm_out_exp = 1 - clz (signed 17b, in [-62, 0]
+//   when mag != 0), and norm_out_sig = mag << clz (J-bit at bit 63).
+//   The original biased x80 exp was 16383 + msb = 16383 + (63 - clz) =
+//   16446 - clz = 16445 + (1 - clz) = 16445 + norm_out_exp.
 //
 // floatx80 layout (matches float32_to_floatx80.v): {sign[79], exp[78:64] biased
 // by 16383, sig[63:0] with the J-bit at [63]}.  A zero input yields +0 = 80'h0.
@@ -18,6 +30,15 @@
 module int_to_floatx80 (
     input  wire [63:0] a,
     input  wire [1:0]  width,    // 0=m16, 1=m32, 2=m64
+
+    // iter-173: shared floatx80_normalize plumbing.  norm_in_* drive
+    // execute_fpu's u_norm_a_shared input mux when fild_norm_sel is asserted;
+    // norm_out_* return the normalized triple.
+    output wire        norm_in_sign,
+    output wire [63:0] norm_in_mag,
+    input  wire signed [16:0] norm_out_exp,
+    input  wire        [63:0] norm_out_sig,
+
     output wire [79:0] z
 );
 
@@ -33,21 +54,18 @@ module int_to_floatx80 (
     wire [63:0] mag  = sign ? (~v + 64'd1) : v;
     wire        is_zero = (mag == 64'd0);
 
-    // 64-bit priority encoder: index (0..63) of the most-significant set bit.
-    reg [6:0] msb;
-    integer   i;
-    always @(*) begin
-        msb = 7'd0;
-        for (i = 0; i < 64; i = i + 1)
-            if (mag[i]) msb = i[6:0];
-    end
+    // Export sign + mag to execute_fpu, which feeds the SHARED u_norm_a_shared
+    // with {sign, 15'd0, mag} when fild_norm_sel is high (is_fild_lat |
+    // is_fbld_lat).  floatx80_normalize then detects is_subn (exp==0 && sig!=0)
+    // and returns mag << clz + (1 - clz) as the normalized triple.
+    assign norm_in_sign = sign;
+    assign norm_in_mag  = mag;
 
-    // Normalize the leading 1 up to bit 63.  shift in [0,63] for mag != 0.
-    wire [5:0]  shift = 6'd63 - msb[5:0];
-    wire [63:0] sig   = mag << shift;            // sig[63] == 1 when mag != 0
-    // Unbiased exponent == msb; bias by 16383.
-    wire [14:0] exp   = 15'd16383 + {8'd0, msb};
+    // Biased x80 exp = 16445 + norm_out_exp (signed-add the 17b normalized exp
+    // back onto the bias-1 constant; truncate to 15b for the encoding).
+    wire signed [16:0] exp_sum = $signed(17'sd16445) + norm_out_exp;
+    wire        [14:0] z_exp   = exp_sum[14:0];
 
-    assign z = is_zero ? 80'h0 : {sign, exp, sig};
+    assign z = is_zero ? 80'h0 : {sign, z_exp, norm_out_sig};
 
 endmodule
