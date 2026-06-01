@@ -2024,6 +2024,36 @@ module execute_fpu (
         .flags              (mul_flags)
     );
 
+    // iter-171b: shared seq_divider_128_64.  div + remainder used to each
+    // instantiate a local copy (~351 ALUTs each).  They run in mutually
+    // exclusive FSM states (FDIV in S_ARITHWAIT, FPREM in S_REMWAIT), so one
+    // shared instance can serve both.  div's sd_*_div and remainder's
+    // sd_*_rem ports feed a state-keyed mux that drives the shared divider.
+    wire         sd_start_div, sd_start_rem;
+    wire [127:0] sd_num_div,   sd_num_rem;
+    wire [63:0]  sd_den_div,   sd_den_rem;
+
+    wire         pick_rem_div = (state == S_REMWAIT);
+    wire         sd_start_shared = pick_rem_div ? sd_start_rem : sd_start_div;
+    wire [127:0] sd_num_shared   = pick_rem_div ? sd_num_rem   : sd_num_div;
+    wire [63:0]  sd_den_shared   = pick_rem_div ? sd_den_rem   : sd_den_div;
+
+    wire [63:0]  sd_q_shared;
+    wire [63:0]  sd_r_shared;
+    wire         sd_done_shared;
+
+    seq_divider_128_64 u_seqdiv_shared (
+        .clk       (clk),
+        .rst       (~rst_n | exe_reset | init),
+        .start     (sd_start_shared),
+        .num       (sd_num_shared),
+        .den       (sd_den_shared),
+        .quotient  (sd_q_shared),
+        .remainder (sd_r_shared),
+        .done      (sd_done_shared),
+        .busy      ()
+    );
+
     softfloat_div_x80 u_div (
         .clk                (clk),
         .rst                (~rst_n | exe_reset | init),  // mirror the FSM state-clear
@@ -2052,6 +2082,15 @@ module execute_fpu (
         .nb_sign            (norm_b_sign),
         .nb_exp             (norm_b_exp),
         .nb_sig             (norm_b_sig),
+        // iter-171b: shared seq_divider hookup.  div's u_seqdiv is gone;
+        // these route to the shared instance above.  sd_done only echoes
+        // back when our mux pick is active (pick_rem_div=0 ⇒ FDIV path).
+        .sd_start           (sd_start_div),
+        .sd_num             (sd_num_div),
+        .sd_den             (sd_den_div),
+        .sd_q               (sd_q_shared),
+        .sd_r               (sd_r_shared),
+        .sd_done            (sd_done_shared & ~pick_rem_div),
         .done               (div_done),
         .z                  (div_z),
         .flags              (div_flags)
@@ -2414,6 +2453,15 @@ module execute_fpu (
         .nb_sign     (norm_b_sign),
         .nb_exp      (norm_b_exp),
         .nb_sig      (norm_b_sig),
+        // iter-171b: shared seq_divider hookup.  remainder's u_div is gone;
+        // these route to u_seqdiv_shared.  sd_done only echoes back when our
+        // mux pick is active (pick_rem_div=1 ⇒ FPREM path).
+        .sd_start    (sd_start_rem),
+        .sd_num      (sd_num_rem),
+        .sd_den      (sd_den_rem),
+        .sd_q        (sd_q_shared),
+        .sd_r        (sd_r_shared),
+        .sd_done     (sd_done_shared & pick_rem_div),
         .z           (rem_z),
         .quotient    (rem_quotient),
         .incomplete  (rem_incomplete),

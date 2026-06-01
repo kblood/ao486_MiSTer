@@ -59,6 +59,16 @@ module floatx80_remainder (
     input  wire        nb_sign,
     input  wire signed [16:0] nb_exp,
     input  wire [63:0] nb_sig,
+    // iter-171b: shared seq_divider_128_64 hoisted to execute_fpu.v (single
+    // instance reused by div + remainder; mutually exclusive FSM states).
+    // remainder drives sd_start/sd_num/sd_den when it wants a divide; the
+    // quotient/remainder/done come back via sd_q/sd_r/sd_done.
+    output wire         sd_start,
+    output wire [127:0] sd_num,
+    output wire [63:0]  sd_den,
+    input  wire [63:0]  sd_q,
+    input  wire [63:0]  sd_r,
+    input  wire         sd_done,
     output wire [79:0] z,
     output wire [2:0]  quotient,      // low 3 bits of q -> {C0=q[2], C3=q[1], C1=q[0]}
     output wire        incomplete,    // -> C2 (partial reduction, expDiff >= 64)
@@ -252,17 +262,17 @@ module floatx80_remainder (
         end
     end
 
-    seq_divider_128_64 u_div (
-        .clk       (clk),
-        .rst       (rst),
-        .start     (div_start),
-        .num       (num_div),
-        .den       (den_div),
-        .quotient  (div_quotient_w),
-        .remainder (div_remainder_w),
-        .done      (div_done),
-        .busy      ()
-    );
+    // iter-171b: route to/from shared seq_divider_128_64 in execute_fpu.v
+    // instead of instantiating a local one (~351 ALUTs saved; paired with
+    // softfloat_div_x80's identical share).  FPREM runs in S_REMWAIT; FDIV
+    // runs in S_ARITHWAIT — mutually exclusive, so the top-level mux is
+    // keyed off FSM state, not handshakes here.
+    assign sd_start                 = div_start;
+    assign sd_num                   = num_div;
+    assign sd_den                   = den_div;
+    assign div_quotient_w           = sd_q;
+    assign div_remainder_w          = sd_r;
+    assign div_done                 = sd_done;
 
     //--------------------------------------------------------------------
     // Combinational result fabric, keyed off the registered operands and the
