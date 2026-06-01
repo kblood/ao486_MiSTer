@@ -696,7 +696,7 @@ assign edx_to_reg =
     (cond_133 && cond_134 && cond_101)? ( (wr_operand_16bit)? { edx[31:16], result[31:16] } : result2) :
     (cond_142 && cond_134 && cond_101)? ( (wr_operand_16bit)? { edx[31:16], result[31:16] } : result2) :
     (cond_164 && cond_165)? ( "Ieni") :
-    (cond_164 && cond_166)? ( 32'd0) :
+    (cond_164 && cond_166)? ( `CPUID_FEATURES_EDX) :
     (cond_164 && cond_275)? ( 32'd0) :
     (cond_215 && cond_83)? ( {32{eax[31]}}) :
     (cond_215 && ~cond_83)? ( { edx[31:16], {16{eax[15]}} }) :

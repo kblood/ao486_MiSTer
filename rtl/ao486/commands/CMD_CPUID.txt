@@ -43,7 +43,7 @@ IF(wr_cmd == `CMD_CPUID);
         SAVE(eax, `CPUID_MODEL_FAMILY_STEPPING);
         SAVE(ebx, 32'h0);
         SAVE(ecx, 32'd0);
-        SAVE(edx, 32'd0);
+        SAVE(edx, `CPUID_FEATURES_EDX);
     ENDIF();
     
     IF(eax > 32'd1);
