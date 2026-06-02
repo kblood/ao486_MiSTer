@@ -527,6 +527,12 @@ module execute_fpu (
     // joins this set now that T-3 (iter 189) computes a real result.
     wire is_transc_log     = is_transc && ((exe_cmdex == 4'd1) || (exe_cmdex == 4'd3) ||
                                            (exe_cmdex == 4'd4));
+    // PR-2c.T-4 (iter 190): FSIN (CMDEX 5) / FCOS (CMDEX 6) are ONE-source,
+    // in-place ST(0) writers (NOT in is_transc_log -> no pop, no ST(1) read).
+    // They additionally set SW.C2 (1 = argument out of range, |x|>=2^63) via the
+    // existing FXAM/cmp cc_we path — NOT the late-pulse EFLAGS override — because
+    // C2 is an FPU status-word bit, not an integer EFLAG.
+    wire is_transc_trig    = is_transc && ((exe_cmdex == 4'd5) || (exe_cmdex == 4'd6));
 
     // PR-2b.3o (iter 46): comparison ops on ST(0) vs ST(i).  Dispatched via
     // the new `CMD_fpu_cmp` (7'd120).  Both operands are read via the
@@ -1157,6 +1163,7 @@ module execute_fpu (
     wire [79:0] transc_z;        // F2XM1 result (held after transc_done)
     wire [5:0]  transc_flags;    // {PE,UE,OE,ZE,DE,IE}
     wire        transc_done;
+    wire        transc_c2;       // PR-2c.T-4: FSIN/FCOS arg out-of-range -> SW.C2
     wire [79:0] transc_arith_a;  // engine -> shared-arith left operand
     wire [79:0] transc_arith_b;  // engine -> shared-arith right operand
     wire [1:0]  transc_arith_op; // PR-2c.T-2 (iter 188): KIND_ADD/MUL/DIV request
@@ -1177,6 +1184,8 @@ module execute_fpu (
     wire       is_fprem_any_lat = is_fprem_lat | is_fprem1_lat;  // PR-2b.5r iter 135
     reg        is_fsqrt_lat;     // PR-2b.5t (iter 137)
     reg        is_transc_lat;    // PR-2c.T (iter 185+) — transcendental group, T-0 passthrough stub
+    reg        is_transc_trig_lat;// PR-2c.T-4 (iter 190) — FSIN/FCOS: pulse cc_we to set SW.C2
+    reg        transc_c2_lat;    // PR-2c.T-4 — captured C2 from engine on transc_done
     // PR-2b.3o: cmp-family latches.  is_cmp_lat covers all four ops and
     // is used to (a) gate rf_wr_en off (no data writeback), (b) drive
     // cc_we in S_RETIRE, (c) override flags_lat with the cmp-only IE
@@ -1466,6 +1475,8 @@ module execute_fpu (
             is_fprem1_lat   <= 1'b0;    // PR-2b.5r iter 135
             is_fsqrt_lat    <= 1'b0;    // PR-2b.5t iter 137
             is_transc_lat   <= 1'b0;    // PR-2c.T iter 185+
+            is_transc_trig_lat <= 1'b0; // PR-2c.T-4 iter 190
+            transc_c2_lat   <= 1'b0;    // PR-2c.T-4 iter 190
             is_cmp_lat      <= 1'b0;
             is_fucom_lat    <= 1'b0;
             is_cmpi_lat     <= 1'b0;
@@ -1495,7 +1506,14 @@ module execute_fpu (
                         // b_lat; all other ops take the modrm.rm source index.
                         // PR-2b.5r (iter 135): FPREM/FPREM1 likewise read the implicit
                         // ST(1) divisor — same src_lat=1 override (the FSCALE trap).
-                        src_lat        <= (is_fscale | is_fprem_any | is_transc_log) ? 3'd1 : exe_modregrm_rm_3b;
+                        // PR-2c.T-4 (iter 190): one-source transc ops (F2XM1/FSIN/
+                        // FCOS) read ONLY ST(0).  FSIN/FCOS are D9 FE/FF whose modrm.rm
+                        // = 6/7 would wrongly latch ST(6)/ST(7) into b_lat and could
+                        // raise a spurious #IS — force src=0 (ST0) for the whole
+                        // one-source transc set (F2XM1 already had rm=0, no change).
+                        src_lat        <= (is_fscale | is_fprem_any | is_transc_log) ? 3'd1 :
+                                          (is_transc & ~is_transc_log)               ? 3'd0 :
+                                          exe_modregrm_rm_3b;
                         kind_lat       <= kind_now;
                         reverse_lat    <= reverse_now;
                         dst_is_sti_lat <= dst_is_sti_now;
@@ -1531,6 +1549,7 @@ module execute_fpu (
                         is_fprem1_lat  <= is_fprem1;    // PR-2b.5r iter 135
                         is_fsqrt_lat   <= is_fsqrt;     // PR-2b.5t iter 137
                         is_transc_lat  <= is_transc;    // PR-2c.T iter 185+
+                        is_transc_trig_lat <= is_transc_trig; // PR-2c.T-4 iter 190
                         is_cmp_lat     <= is_cmp_now;
                         is_fucom_lat   <= is_cmp_unord_now;
                         is_cmpi_lat    <= is_cmpi_now;
@@ -1796,6 +1815,7 @@ module execute_fpu (
                     if (transc_done) begin
                         z_lat     <= transc_z;
                         flags_lat <= transc_flags;
+                        transc_c2_lat <= transc_c2;  // PR-2c.T-4: latch FSIN/FCOS C2
                         state     <= S_POST;
                     end
                 end
@@ -2346,7 +2366,8 @@ module execute_fpu (
         .div_done     (div_done),
         .done         (transc_done),
         .z            (transc_z),
-        .flags        (transc_flags)
+        .flags        (transc_flags),
+        .c2           (transc_c2)              // PR-2c.T-4: FSIN/FCOS out-of-range
     );
 
     // PR-2c.12 (iter 165): per-op flags cascade extracted verbatim from the old
@@ -3104,8 +3125,13 @@ module execute_fpu (
     // Intel SDM Vol 1 §8.3.8 / Bochs fpu_trans.cc).  This rides the existing SW
     // cc_we path (NOT the EFLAGS path) — no direct write_register override needed.
     wire [3:0] fprem_cc = {rem_quotient[1], rem_incomplete, rem_quotient[0], rem_quotient[2]};
-    assign cc_din = is_fprem_any_lat ? fprem_cc :
-                    is_cmp_lat       ? cmp_cc   : fxam_cc;
+    // PR-2c.T-4 (iter 190): FSIN/FCOS write only C2 (1=arg out of range); C1=0
+    // (no rounding-up indication modeled), C0/C3 left 0.  Rides the same cc_we
+    // path as FXAM/FPREM.
+    wire [3:0] transc_trig_cc = {1'b0, transc_c2_lat, 1'b0, 1'b0};
+    assign cc_din = is_fprem_any_lat   ? fprem_cc :
+                    is_transc_trig_lat ? transc_trig_cc :
+                    is_cmp_lat         ? cmp_cc   : fxam_cc;
     // PR-2b.3u (iter 52): FCOMI family does NOT pulse cc_we — it writes
     // integer EFLAGS instead.  The SDM-mandated "clear C1 on FCOMI"
     // partial-write to the CSR is deferred (the CSR module would need
@@ -3117,7 +3143,7 @@ module execute_fpu (
     // PR-2b.5r (iter 135): FPREM/FPREM1 also pulse cc_we at S_RETIRE to write the
     // C0-C3 status codes.  Like FXAM (a CMD_fpu_unary single-dispatch op), the
     // S_RETIRE pulse retires correctly for the SW path.
-    assign cc_we  = (state == S_RETIRE) && (is_fxam_lat | is_fprem_any_lat | (is_cmp_lat & ~is_cmpi_lat));
+    assign cc_we  = (state == S_RETIRE) && (is_fxam_lat | is_fprem_any_lat | is_transc_trig_lat | (is_cmp_lat & ~is_cmpi_lat));
 
     //--------------------------------------------------------------------
     // PR-2b.3u (iter 52): integer EFLAGS write-back lane.  Pulsed in

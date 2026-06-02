@@ -10,8 +10,21 @@
 //   T-2 (iter 188): FYL2X  (D9 F1)  ST1 <- ST1*log2(ST0), pop
 //                   FYL2XP1(D9 F9)  ST1 <- ST1*log2(ST0+1), pop
 //   T-3 (iter 189): FPATAN (D9 F3)  ST1 <- atan2(ST1,ST0), pop
-// The remaining four (FPTAN/FSIN/FCOS/FSINCOS) still route here and take the
-// deterministic PASSTHROUGH (ST0 unchanged) until T-4..T-5 land.
+//   T-4 (iter 190): FSIN   (D9 FE)  ST0 <- sin(ST0)
+//                   FCOS   (D9 FF)  ST0 <- cos(ST0)
+// The remaining two (FPTAN/FSINCOS) still route here and take the deterministic
+// PASSTHROUGH (ST0 unchanged) until T-5 lands.
+//
+// FSIN/FCOS argument reduction (research/design_transcendentals.md, T-4 study):
+// Bochs reduces x mod pi/2 in 128-bit integer precision; we keep the Option-X80
+// promise (NO new wide datapath) with a 3-part Cody-Waite pi/2 (HP0/HP1 low-32-
+// zeroed, HP2 full) and a 2-chunk q split: q=round(x*2/pi) is split into
+// qhi*2^32+qlo so every qchunk*HPi product (<=64 sig bits) is EXACT in a plain
+// floatx80 mul.  r = x - sum(qchunk*HPi) lands in [-pi/4,pi/4]; quadrant q&3
+// selects sin/cos(r) and sign.  Model (sim/transc_model/fsincos_model.py) proved
+// <=2 ULP vs the exact-reduction float128 reference for |x|<2^54 (every real
+// angle and far beyond).  |x|>=2^63 (expDiff>=63) is x87 out-of-range: C2=1,
+// ST0 unchanged, no reduction.
 //
 // SHARED-ARITH PROTOCOL (execute_fpu wires arith_a/arith_b/arith_op into the
 // op_a/op_b + eff_kind muxes; arith_z = mul_or_addsub_z; div_* = u_div):
@@ -65,7 +78,8 @@ module fpu_transcendental (
 
     output reg         done,           // 1-cycle pulse: z/flags valid
     output reg  [79:0] z,
-    output reg  [5:0]  flags            // {PE,UE,OE,ZE,DE,IE}
+    output reg  [5:0]  flags,           // {PE,UE,OE,ZE,DE,IE}
+    output reg         c2               // SW C2: 1 = FSIN/FCOS arg out of range
 );
 
     // op-kind encoding -- MUST match execute_fpu.v's KIND_* localparams.
@@ -73,7 +87,7 @@ module fpu_transcendental (
 
     // CMDEX selectors (research/design_transcendentals.md §5).
     localparam [3:0] CMDEX_F2XM1 = 4'd0, CMDEX_FYL2X = 4'd1, CMDEX_FPATAN = 4'd3,
-                     CMDEX_FYL2XP1 = 4'd4;
+                     CMDEX_FYL2XP1 = 4'd4, CMDEX_FSIN = 4'd5, CMDEX_FCOS = 4'd6;
 
     // Settle dwell per shared-arith op (>= ARITH_WAIT_CYCLES / sdc -setup N).
     localparam [4:0] WAIT = 5'd12;
@@ -154,6 +168,51 @@ module fpu_transcendental (
         endcase
     endfunction
 
+    // ----- FSIN/FCOS argument-reduction constants (T-4) --------------------
+    // 2/pi, and a 3-part Cody-Waite pi/2: HP0,HP1 have their low 32 significand
+    // bits zeroed so qchunk*HPi (each <=32 sig bits) is EXACT; HP2 carries the
+    // residual.  q = round(x*TWO_OVER_PI); r = x - q*(pi/2) in [-pi/4,pi/4].
+    localparam [79:0] TWO_OVER_PI = 80'h3ffea2f9836e4e44152a; // 2/pi
+    localparam [79:0] HP0 = 80'h3fffc90fdaa200000000;         // pi/2 hi   (lo32=0)
+    localparam [79:0] HP1 = 80'h3fdd85a308d300000000;         // pi/2 mid  (lo32=0)
+    localparam [79:0] HP2 = 80'h3fba98cc51701b839a25;         // pi/2 lo   (full)
+
+    // ----- FSIN poly ROM: sin_arr[i] (OddPoly over r^2, outer *r) ----------
+    function [79:0] sin_coeff(input [3:0] i);
+        case (i)
+            4'd0 : sin_coeff = 80'h3fff8000000000000000; //  1
+            4'd1 : sin_coeff = 80'hbffcaaaaaaaaaaaaaaab; // -1/3!
+            4'd2 : sin_coeff = 80'h3ff88888888888888889; //  1/5!
+            4'd3 : sin_coeff = 80'hbff2d00d00d00d00d00d; // -1/7!
+            4'd4 : sin_coeff = 80'h3fecb8ef1d2ab6399c7d; //  1/9!
+            4'd5 : sin_coeff = 80'hbfe5d7322b3faa271c7f; // -1/11!
+            4'd6 : sin_coeff = 80'h3fdeb092309d43684be5; //  1/13!
+            4'd7 : sin_coeff = 80'hbfd6d73f9f399dc0f88f; // -1/15!
+            4'd8 : sin_coeff = 80'h3fceca963b81856a5359; //  1/17!
+            4'd9 : sin_coeff = 80'hbfc697a4da340a0ab926; // -1/19!
+            4'd10: sin_coeff = 80'h3fbdb8dc77b6e7ab8c5f; //  1/21!
+            default: sin_coeff = 80'h3fff8000000000000000;
+        endcase
+    endfunction
+
+    // ----- FCOS poly ROM: cos_arr[i] (EvenPoly over r^2, no outer mul) ------
+    function [79:0] cos_coeff(input [3:0] i);
+        case (i)
+            4'd0 : cos_coeff = 80'h3fff8000000000000000; //  1
+            4'd1 : cos_coeff = 80'hbffe8000000000000000; // -1/2!
+            4'd2 : cos_coeff = 80'h3ffaaaaaaaaaaaaaaaab; //  1/4!
+            4'd3 : cos_coeff = 80'hbff5b60b60b60b60b60b; // -1/6!
+            4'd4 : cos_coeff = 80'h3fefd00d00d00d00d00d; //  1/8!
+            4'd5 : cos_coeff = 80'hbfe993f27dbbc4fae397; // -1/10!
+            4'd6 : cos_coeff = 80'h3fe28f76c77fc6c4bdaa; //  1/12!
+            4'd7 : cos_coeff = 80'hbfdac9cba54603e4e906; // -1/14!
+            4'd8 : cos_coeff = 80'h3fd2d73f9f399dc0f88f; //  1/16!
+            4'd9 : cos_coeff = 80'hbfcab413c31dcbecbbde; // -1/18!
+            4'd10: cos_coeff = 80'h3fc1f2a15d201011283d; //  1/20!
+            default: cos_coeff = 80'h3fff8000000000000000;
+        endcase
+    endfunction
+
     // ----- combinational helpers -------------------------------------------
     // count leading zeros of a 64-bit significand (0..63)
     function [6:0] clz64(input [63:0] v);
@@ -179,6 +238,66 @@ module fpu_transcendental (
                 sig = {48'b0, mag} << (6'd63 - p);
                 int_to_fx80 = {sgn, (15'd16383 + {8'b0, p}), sig};
             end
+        end
+    endfunction
+
+    // floatx80 -> signed int64, round-nearest-even (T-4 q = round(x*2/pi)).
+    // |q| < 2^63 by construction (caller gates expDiff < 63), so it fits.
+    function signed [63:0] fx80_to_int64(input [79:0] f);
+        reg s; reg [14:0] e; reg [63:0] sig;
+        integer E, sh; reg [64:0] mag; reg rbit, sticky;
+        begin
+            s = f[79]; e = f[78:64]; sig = f[63:0];
+            if (e == 15'h0) mag = 65'd0;            // zero/denormal -> 0
+            else begin
+                E = $signed({1'b0, e}) - 16383;     // unbiased exponent
+                if (E < -1) mag = 65'd0;            // |f| < 0.5 -> 0
+                else if (E >= 63) mag = {1'b0, sig};// (shouldn't happen, gated)
+                else begin
+                    sh  = 63 - E;                   // 1..64 fraction bits
+                    mag = {1'b0, sig} >> sh;        // integer part
+                    rbit   = sig[sh-1];
+                    sticky = (sh >= 2) ? (|(sig & ((64'd1 << (sh-1)) - 64'd1))) : 1'b0;
+                    if (rbit && (sticky || mag[0])) mag = mag + 65'd1;
+                end
+            end
+            fx80_to_int64 = s ? -$signed(mag[63:0]) : $signed(mag[63:0]);
+        end
+    endfunction
+
+    // signed int64 -> floatx80, EXACT (|v| < 2^63 so <=63 sig bits fit).
+    function [79:0] int64_to_fx80(input signed [63:0] v);
+        reg sgn; reg [63:0] mag; reg [6:0] lz; reg [14:0] e;
+        begin
+            if (v == 64'sd0) int64_to_fx80 = 80'h0;
+            else begin
+                sgn = v[63];
+                mag = sgn ? (~v + 64'd1) : v;       // |v|
+                lz  = clz64(mag);                   // 0..63
+                e   = 15'd16383 + (15'd63 - {8'b0, lz});
+                int64_to_fx80 = {sgn, e, (mag << lz)};
+            end
+        end
+    endfunction
+
+    // q split helpers: hi = q with low 32 bits cleared, lo = low 32 bits;
+    // sign preserved (truncate toward zero -- NOT floor -- so |q| splits cleanly).
+    function signed [63:0] q_hi_signed(input [79:0] qf);
+        reg signed [63:0] qi; reg s; reg [63:0] mag, himag;
+        begin
+            qi = fx80_to_int64(qf);
+            s = qi[63]; mag = s ? (~qi + 64'd1) : qi;
+            himag = {mag[63:32], 32'b0};            // (|q|>>32)<<32
+            q_hi_signed = s ? -$signed(himag) : $signed(himag);
+        end
+    endfunction
+    function signed [63:0] q_lo_signed(input [79:0] qf);
+        reg signed [63:0] qi; reg s; reg [63:0] mag, lomag;
+        begin
+            qi = fx80_to_int64(qf);
+            s = qi[63]; mag = s ? (~qi + 64'd1) : qi;
+            lomag = {32'b0, mag[31:0]};
+            q_lo_signed = s ? -$signed(lomag) : $signed(lomag);
         end
     endfunction
 
@@ -222,7 +341,14 @@ module fpu_transcendental (
         AT_C6_MUL=6'd23, AT_C6_ADD=6'd24, AT_C6_SUB=6'd25,            // +pi/6 corr
         AT_P_X2 = 6'd26, AT_P_MUL= 6'd27, AT_P_ADD= 6'd28, AT_P_OUT=6'd29, // poly
         AT_CORR = 6'd30, AT_SWAP = 6'd31, AT_SWAPW= 6'd32,            // +corr / pi/2-x
-        AT_SIGN = 6'd33, AT_PIW  = 6'd34;                             // quadrant +/-pi
+        AT_SIGN = 6'd33, AT_PIW  = 6'd34,                             // quadrant +/-pi
+        // FSIN/FCOS (T-4): x*2/pi -> round/split q -> 3-part reduce -> poly -> quad
+        TR_QMUL = 6'd35, TR_QF   = 6'd36,                             // q = round(x*2/pi)
+        TR_RIS  = 6'd37, TR_RML  = 6'd38, TR_RSB  = 6'd39,            // r -= qchunk*HPi
+        TR_X2   = 6'd40,                                              // rr = r*r
+        TR_S_MUL= 6'd41, TR_S_ADD= 6'd42, TR_S_OUT= 6'd43,           // sin Horner+outer
+        TR_C_MUL= 6'd44, TR_C_ADD= 6'd45,                            // cos Horner
+        TR_QUAD = 6'd46;                                             // quadrant select
 
     reg [5:0]  phase;
     reg [4:0]  settle;
@@ -244,6 +370,19 @@ module fpu_transcendental (
     reg        at_zsign;  // aSign ^ bSign (negate magnitude result)
     reg        at_bsign;  // bSign (quadrant +/- pi selector)
 
+    // FSIN/FCOS (T-4) state
+    reg        want_cos_reg; // 0 = sin(ST0), 1 = cos(ST0)
+    reg [1:0]  qq_reg;       // quadrant = q & 3
+    reg [79:0] qhiS_reg;     // q hi chunk (mult of 2^32) as floatx80
+    reg [79:0] qloF_reg;     // q lo chunk (< 2^32) as floatx80
+    reg [79:0] sin_reg;      // sin(r)
+    reg [79:0] cos_reg;      // cos(r)
+    reg [2:0]  red_idx;      // 0..5 over (chunk,P) reduction pairs
+    // reduction operand select: idx 0,2,4 -> hi chunk ; 1,3,5 -> lo chunk.
+    //                           idx 0,1 -> HP0 ; 2,3 -> HP1 ; 4,5 -> HP2.
+    wire [79:0] red_chunk = red_idx[0] ? qloF_reg : qhiS_reg;
+    wire [79:0] red_P     = (red_idx < 3'd2) ? HP0 : (red_idx < 3'd4) ? HP1 : HP2;
+
     // reduce a normalized (rExp,rSig) -> xred + ExpDiff helper, used at two
     // entry points (FYL2X start from a, FYL2XP1-big from a+1).
     task do_reduce(input [14:0] rExp, input [63:0] rSig);
@@ -260,13 +399,13 @@ module fpu_transcendental (
     always @(posedge clk) begin
         if (rst) begin
             phase <= P_IDLE; done <= 1'b0; arith_op <= KIND_ADD;
-            div_start <= 1'b0; settle <= 5'd0; cnt <= 4'd0;
+            div_start <= 1'b0; settle <= 5'd0; cnt <= 4'd0; c2 <= 1'b0;
         end else begin
             done <= 1'b0; div_start <= 1'b0;
             case (phase)
                 // ---------------------------------------------------------
                 P_IDLE: if (start) begin
-                    b_reg <= b; a_reg_hold <= a;
+                    b_reg <= b; a_reg_hold <= a; c2 <= 1'b0;
                     if (cmdex == CMDEX_F2XM1) begin
                         // |x|<1 normal OR denormal -> poly ; else special
                         if (((aExp != 15'h0) && (aExp < 15'h3FFF)) || a_den) begin
@@ -393,9 +532,33 @@ module fpu_transcendental (
                             phase <= AT_DSET;
                         end
                     end
+                    else if (cmdex == CMDEX_FSIN || cmdex == CMDEX_FCOS) begin
+                        want_cos_reg <= (cmdex == CMDEX_FCOS);
+                        if (a_nan) begin
+                            z <= {a[79],15'h7FFF,1'b1,a[62:0]};
+                            flags <= a_snan ? 6'b000001 : 6'd0; phase <= P_DONE;
+                        end else if (a_inf) begin
+                            z <= DEFNAN; flags <= 6'b000001; phase <= P_DONE; // #IA
+                        end else if (aExp == 15'h0) begin
+                            // zero -> sin=a / cos=1 ; denormal -> same (+PE+DE)
+                            z <= (cmdex == CMDEX_FCOS) ? ONE : a;
+                            flags <= a_den ? 6'b100010 : 6'd0; phase <= P_DONE;
+                        end else if (aExp >= 15'h403E) begin
+                            // |x| >= 2^63 : x87 out-of-range -> ST0 unchanged, C2=1
+                            z <= a; flags <= 6'd0; c2 <= 1'b1; phase <= P_DONE;
+                        end else if (aExp < 15'h3FFE) begin
+                            // |x| < 0.5 : q=0, r=x -> straight to poly (rr = x*x)
+                            arith_a <= a; arith_b <= a; arith_op <= KIND_MUL;
+                            settle <= WAIT; x_reg <= a; qq_reg <= 2'd0;
+                            flags <= 6'b100000; phase <= TR_X2;
+                        end else begin
+                            // reduce: qf = x * (2/pi)
+                            arith_a <= a; arith_b <= TWO_OVER_PI; arith_op <= KIND_MUL;
+                            settle <= WAIT; flags <= 6'b100000; phase <= TR_QMUL;
+                        end
+                    end
                     else begin
-                        // T-4..T-5 (FSIN/FCOS/FSINCOS/FPTAN) not yet implemented:
-                        // passthrough ST(0)
+                        // T-5 (FSINCOS/FPTAN) not yet implemented: passthrough ST(0)
                         z <= a; flags <= 6'd0; phase <= P_DONE;
                     end
                 end
@@ -597,6 +760,88 @@ module fpu_transcendental (
                 end
                 AT_PIW: if (settle==0) begin z<=arith_z; phase<=P_DONE; end
                         else settle<=settle-5'd1;
+
+                // ---------------- FSIN/FCOS (T-4) ------------------------
+                // qf = x*(2/pi) settled -> round to int q, split hi/lo, latch
+                // quadrant, kick off the 3-part Cody-Waite reduction.
+                TR_QMUL: if (settle==0) begin
+                    qq_reg   <= fx80_to_int64(arith_z) & 64'd3;
+                    qhiS_reg <= int64_to_fx80(q_hi_signed(arith_z));
+                    qloF_reg <= int64_to_fx80(q_lo_signed(arith_z));
+                    x_reg    <= a_reg_hold;          // r := x
+                    red_idx  <= 3'd0; phase <= TR_RIS;
+                end else settle<=settle-5'd1;
+                // issue qchunk * HPi  (red_idx selects chunk + Pi)
+                TR_RIS: begin
+                    arith_a<=red_chunk; arith_b<=red_P; arith_op<=KIND_MUL;
+                    settle<=WAIT; phase<=TR_RML;
+                end
+                // r := r + (-term)   (subtract via negated addend)
+                TR_RML: if (settle==0) begin
+                    arith_a<=x_reg; arith_b<={~arith_z[79],arith_z[78:0]};
+                    arith_op<=KIND_ADD; settle<=WAIT; phase<=TR_RSB;
+                end else settle<=settle-5'd1;
+                TR_RSB: if (settle==0) begin
+                    x_reg<=arith_z;
+                    if (red_idx==3'd5) begin
+                        // reduction done -> rr = r*r  (r = arith_z this cycle)
+                        arith_a<=arith_z; arith_b<=arith_z; arith_op<=KIND_MUL;
+                        settle<=WAIT; phase<=TR_X2;
+                    end else begin
+                        red_idx<=red_idx+3'd1; phase<=TR_RIS;
+                    end
+                end else settle<=settle-5'd1;
+                // rr settled -> start sin Horner: acc = sin[10]*rr
+                TR_X2: if (settle==0) begin
+                    t_reg<=arith_z;                  // rr
+                    arith_a<=sin_coeff(4'd10); arith_b<=arith_z; arith_op<=KIND_MUL;
+                    cnt<=4'd10; settle<=WAIT; phase<=TR_S_MUL;
+                end else settle<=settle-5'd1;
+                TR_S_MUL: if (settle==0) begin
+                    arith_a<=arith_z; arith_b<=sin_coeff(cnt-4'd1); arith_op<=KIND_ADD;
+                    settle<=WAIT; phase<=TR_S_ADD;
+                end else settle<=settle-5'd1;
+                TR_S_ADD: if (settle==0) begin
+                    if (cnt==4'd1) begin
+                        arith_a<=arith_z; arith_b<=x_reg; arith_op<=KIND_MUL; // outer *r
+                        settle<=WAIT; phase<=TR_S_OUT;
+                    end else begin
+                        arith_a<=arith_z; arith_b<=t_reg; arith_op<=KIND_MUL;
+                        cnt<=cnt-4'd1; settle<=WAIT; phase<=TR_S_MUL;
+                    end
+                end else settle<=settle-5'd1;
+                // sin(r) done -> start cos Horner: acc = cos[10]*rr
+                TR_S_OUT: if (settle==0) begin
+                    sin_reg<=arith_z;
+                    arith_a<=cos_coeff(4'd10); arith_b<=t_reg; arith_op<=KIND_MUL;
+                    cnt<=4'd10; settle<=WAIT; phase<=TR_C_MUL;
+                end else settle<=settle-5'd1;
+                TR_C_MUL: if (settle==0) begin
+                    arith_a<=arith_z; arith_b<=cos_coeff(cnt-4'd1); arith_op<=KIND_ADD;
+                    settle<=WAIT; phase<=TR_C_ADD;
+                end else settle<=settle-5'd1;
+                TR_C_ADD: if (settle==0) begin
+                    if (cnt==4'd1) begin cos_reg<=arith_z; phase<=TR_QUAD; end
+                    else begin
+                        arith_a<=arith_z; arith_b<=t_reg; arith_op<=KIND_MUL;
+                        cnt<=cnt-4'd1; settle<=WAIT; phase<=TR_C_MUL;
+                    end
+                end else settle<=settle-5'd1;
+                // quadrant select.  FSIN: [sin,cos,-sin,-cos][qq].
+                //                    FCOS: [cos,-sin,-cos,sin][qq].
+                TR_QUAD: begin
+                    case ({want_cos_reg, qq_reg})
+                        3'b0_00: z <= sin_reg;
+                        3'b0_01: z <= cos_reg;
+                        3'b0_10: z <= {~sin_reg[79], sin_reg[78:0]};
+                        3'b0_11: z <= {~cos_reg[79], cos_reg[78:0]};
+                        3'b1_00: z <= cos_reg;
+                        3'b1_01: z <= {~sin_reg[79], sin_reg[78:0]};
+                        3'b1_10: z <= {~cos_reg[79], cos_reg[78:0]};
+                        3'b1_11: z <= sin_reg;
+                    endcase
+                    phase <= P_DONE;
+                end
 
                 P_DONE: begin done<=1'b1; phase<=P_IDLE; end
                 default: phase<=P_IDLE;
