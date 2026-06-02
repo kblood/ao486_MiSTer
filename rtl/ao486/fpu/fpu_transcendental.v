@@ -9,8 +9,9 @@
 //   T-1 (iter 187): F2XM1  (D9 F0)  ST0 <- 2^ST0 - 1, |ST0|<=1
 //   T-2 (iter 188): FYL2X  (D9 F1)  ST1 <- ST1*log2(ST0), pop
 //                   FYL2XP1(D9 F9)  ST1 <- ST1*log2(ST0+1), pop
-// The remaining four (FPTAN/FPATAN/FSIN/FCOS/FSINCOS) still route here and take
-// the deterministic PASSTHROUGH (ST0 unchanged) until T-3..T-5 land.
+//   T-3 (iter 189): FPATAN (D9 F3)  ST1 <- atan2(ST1,ST0), pop
+// The remaining four (FPTAN/FSIN/FCOS/FSINCOS) still route here and take the
+// deterministic PASSTHROUGH (ST0 unchanged) until T-4..T-5 land.
 //
 // SHARED-ARITH PROTOCOL (execute_fpu wires arith_a/arith_b/arith_op into the
 // op_a/op_b + eff_kind muxes; arith_z = mul_or_addsub_z; div_* = u_div):
@@ -36,6 +37,10 @@
 //   FYL2XP1: |a|>=1/8 -> FYL2X(a+1,ST1).  else u=a/(a+2) ; same ln/l2 ;
 //           z = ST1 * l2   (no ExpDiff -- |log2(1+a)|<1)
 //   EvalPoly(y,arr,9): r=arr[8]; 8x(r=r*y; r=r+arr[k]).  OddPoly outer mul by u.
+//   FPATAN: x=min(|a|,|b|)/max(|a|,|b|) ; octant: x>=3/4 -> (x-1)/(x+1)+pi/4,
+//           1/4<=x<3/4 -> (x*sqrt3-1)/(x+sqrt3)+pi/6, x<1/4 -> none ;
+//           atan = OddPoly(x,atan_arr,11) (+corr) ; swap(|a|<=|b|): pi/2-atan ;
+//           sign: negate by aSign^bSign, then +/- pi to land atan2 in (-pi,pi].
 
 `timescale 1ns / 1ps
 
@@ -67,7 +72,8 @@ module fpu_transcendental (
     localparam [1:0] KIND_ADD = 2'd0, KIND_MUL = 2'd2, KIND_DIV = 2'd3;
 
     // CMDEX selectors (research/design_transcendentals.md §5).
-    localparam [3:0] CMDEX_F2XM1 = 4'd0, CMDEX_FYL2X = 4'd1, CMDEX_FYL2XP1 = 4'd4;
+    localparam [3:0] CMDEX_F2XM1 = 4'd0, CMDEX_FYL2X = 4'd1, CMDEX_FPATAN = 4'd3,
+                     CMDEX_FYL2XP1 = 4'd4;
 
     // Settle dwell per shared-arith op (>= ARITH_WAIT_CYCLES / sdc -setup N).
     localparam [4:0] WAIT = 5'd12;
@@ -121,6 +127,33 @@ module fpu_transcendental (
     localparam [79:0] DEFNAN   = 80'hffffc000000000000000; // x87 indefinite QNaN
     localparam [63:0] SQRT2_HALF_SIG = 64'hb504f333f9de6484;
 
+    // ----- FPATAN constants (floatx80-truncated from Bochs float128) --------
+    localparam [79:0] PI80      = 80'h4000c90fdaa22168c235; //  pi
+    localparam [79:0] PI2_80    = 80'h3fffc90fdaa22168c235; //  pi/2
+    localparam [79:0] PI4_80    = 80'h3ffec90fdaa22168c235; //  pi/4
+    localparam [79:0] PI6_80    = 80'h3ffe860a91c16b9b2c23; //  pi/6
+    localparam [79:0] THREEPI4  = 80'h400096cbe3f9990e91a8; //  3pi/4
+    localparam [79:0] SQRT3_80  = 80'h3fffddb3d742c265539e; //  sqrt(3)
+
+    // ----- FPATAN coefficient ROM: atan_arr[i], floatx80-truncated ---------
+    // OddPoly over x^2: 1, -1/3, 1/5, -1/7, ... 1/21 (indices 0..10).
+    function [79:0] atan_coeff(input [3:0] i);
+        case (i)
+            4'd0 : atan_coeff = 80'h3fff8000000000000000; //  1
+            4'd1 : atan_coeff = 80'hbffdaaaaaaaaaaaaaaab; // -1/3
+            4'd2 : atan_coeff = 80'h3ffccccccccccccccccd; //  1/5
+            4'd3 : atan_coeff = 80'hbffc9249249249249249; // -1/7
+            4'd4 : atan_coeff = 80'h3ffbe38e38e38e38e38e; //  1/9
+            4'd5 : atan_coeff = 80'hbffbba2e8ba2e8ba2e8c; // -1/11
+            4'd6 : atan_coeff = 80'h3ffb9d89d89d89d89d8a; //  1/13
+            4'd7 : atan_coeff = 80'hbffb8888888888888889; // -1/15
+            4'd8 : atan_coeff = 80'h3ffaf0f0f0f0f0f0f0f1; //  1/17
+            4'd9 : atan_coeff = 80'hbffad79435e50d79435e; // -1/19
+            4'd10: atan_coeff = 80'h3ffac30c30c30c30c30c; //  1/21
+            default: atan_coeff = 80'h3fff8000000000000000;
+        endcase
+    endfunction
+
     // ----- combinational helpers -------------------------------------------
     // count leading zeros of a 64-bit significand (0..63)
     function [6:0] clz64(input [63:0] v);
@@ -162,6 +195,7 @@ module fpu_transcendental (
     wire b_nan  = (bExp==15'h7FFF) &&  (|bSig[62:0]);
     wire b_inf  = (bExp==15'h7FFF) && ~(|bSig[62:0]);
     wire b_zero = (bExp==15'h0)    && ~(|bSig);
+    wire b_den  = (bExp==15'h0)    &&  (|bSig);
     wire b_snan = b_nan && ~bSig[62];
     wire propagate_snan = a_snan | b_snan;
     wire [79:0] prop_nan = a_nan ? {a[79],15'h7FFF,1'b1,a[62:0]}
@@ -174,16 +208,23 @@ module fpu_transcendental (
                                       : $signed({2'b0,aExp});
 
     // ----- micro-sequencer phases ------------------------------------------
-    localparam [4:0]
-        P_IDLE  = 5'd0,
-        E_XLN2  = 5'd1, E_LMUL = 5'd2, E_LADD = 5'd3, E_FINAL = 5'd4,  // F2XM1
-        LG_XP1  = 5'd5, LG_XM1 = 5'd6, LG_DSET = 5'd7, LG_DWAIT = 5'd8,// log
-        LG_U2   = 5'd9, LG_HMUL= 5'd10,LG_HADD = 5'd11,
-        LG_PL   = 5'd12,LG_L2  = 5'd13,LG_EADD = 5'd14,LG_BMUL = 5'd15,
-        PP_BIG  = 5'd16,PP_XP2 = 5'd17,
-        P_DONE  = 5'd18;
+    localparam [5:0]
+        P_IDLE  = 6'd0,
+        E_XLN2  = 6'd1, E_LMUL = 6'd2, E_LADD = 6'd3, E_FINAL = 6'd4,  // F2XM1
+        LG_XP1  = 6'd5, LG_XM1 = 6'd6, LG_DSET = 6'd7, LG_DWAIT = 6'd8,// log
+        LG_U2   = 6'd9, LG_HMUL= 6'd10,LG_HADD = 6'd11,
+        LG_PL   = 6'd12,LG_L2  = 6'd13,LG_EADD = 6'd14,LG_BMUL = 6'd15,
+        PP_BIG  = 6'd16,PP_XP2 = 6'd17,
+        P_DONE  = 6'd18,
+        // FPATAN (T-3): ratio divide -> octant correction -> OddPoly -> sign
+        AT_DSET = 6'd19, AT_DWAIT= 6'd20,                              // shared div
+        AT_C4_XP1=6'd21, AT_C4_XM1=6'd22,                             // +pi/4 corr
+        AT_C6_MUL=6'd23, AT_C6_ADD=6'd24, AT_C6_SUB=6'd25,            // +pi/6 corr
+        AT_P_X2 = 6'd26, AT_P_MUL= 6'd27, AT_P_ADD= 6'd28, AT_P_OUT=6'd29, // poly
+        AT_CORR = 6'd30, AT_SWAP = 6'd31, AT_SWAPW= 6'd32,            // +corr / pi/2-x
+        AT_SIGN = 6'd33, AT_PIW  = 6'd34;                             // quadrant +/-pi
 
-    reg [4:0]  phase;
+    reg [5:0]  phase;
     reg [4:0]  settle;
     reg [3:0]  cnt;       // Horner index
     reg [79:0] t_reg;     // F2XM1 t ; log: u^2
@@ -194,6 +235,14 @@ module fpu_transcendental (
     reg [79:0] expd_reg;  // ExpDiff as floatx80
     reg        want_ed;   // add ExpDiff after l2 (FYL2X / FYL2XP1-big)
     reg [79:0] a_reg_hold; // ST(0) latched (FYL2XP1 small-arg divide numerator)
+
+    // FPATAN (T-3) state
+    reg [79:0] x_reg;     // running reduced value / poly argument
+    reg        swap_reg;  // |a|<=|b| -> result = pi/2 - x
+    reg [1:0]  add_corr;  // 0 none, 1 +pi/4, 2 +pi/6
+    reg        at_step;   // 0 = ratio divide, 1 = octant-correction divide
+    reg        at_zsign;  // aSign ^ bSign (negate magnitude result)
+    reg        at_bsign;  // bSign (quadrant +/- pi selector)
 
     // reduce a normalized (rExp,rSig) -> xred + ExpDiff helper, used at two
     // entry points (FYL2X start from a, FYL2XP1-big from a+1).
@@ -304,8 +353,49 @@ module fpu_transcendental (
                             phase  <= PP_XP2;
                         end
                     end
+                    else if (cmdex == CMDEX_FPATAN) begin
+                        // atan2(ST1,ST0): a=ST0 (x), b=ST1 (y).  Result -> ST1, pop.
+                        if (a_nan | b_nan) begin
+                            z <= prop_nan; flags <= propagate_snan ? 6'b000001 : 6'd0;
+                            phase <= P_DONE;
+                        end else if (b_inf) begin
+                            // a=Inf too -> aSign?3pi/4:pi/4 ; else pi/2  (sign bSign)
+                            if (a_inf) z <= aSign ? {bSign, THREEPI4[78:0]} : {bSign, PI4_80[78:0]};
+                            else       z <= {bSign, PI2_80[78:0]};
+                            flags <= (a_den) ? 6'b000010 : 6'd0; phase <= P_DONE;
+                        end else if (a_inf) begin
+                            // aSign?pi:0  (sign bSign)
+                            z <= aSign ? {bSign, PI80[78:0]} : {bSign, 79'd0};
+                            flags <= (b_den) ? 6'b000010 : 6'd0; phase <= P_DONE;
+                        end else if (b_zero) begin
+                            // return_PI_or_ZERO: aSign?pi:0  (sign bSign)
+                            z <= aSign ? {bSign, PI80[78:0]} : {bSign, 79'd0};
+                            flags <= 6'd0; phase <= P_DONE;
+                        end else if (a_zero) begin
+                            z <= {bSign, PI2_80[78:0]}; flags <= 6'd0; phase <= P_DONE; // pi/2
+                        end else begin
+                            // ---- finite-normal path: ratio = min(|a|,|b|)/max ----
+                            at_zsign <= aSign ^ bSign;
+                            at_bsign <= bSign;
+                            add_corr <= 2'd0;
+                            // |a| > |b| ?
+                            if ((aExp > bExp) || (aExp == bExp && aSig > bSig)) begin
+                                arith_a <= {1'b0, b[78:0]}; // x = |b|/|a|, no swap
+                                arith_b <= {1'b0, a[78:0]};
+                                swap_reg <= 1'b0;
+                            end else begin
+                                arith_a <= {1'b0, a[78:0]}; // x = |a|/|b|, swap
+                                arith_b <= {1'b0, b[78:0]};
+                                swap_reg <= 1'b1;
+                            end
+                            arith_op <= KIND_DIV; settle <= WAIT; at_step <= 1'b0;
+                            flags <= (a_den | b_den) ? 6'b100010 : 6'b100000; // PE(+DE)
+                            phase <= AT_DSET;
+                        end
+                    end
                     else begin
-                        // T-3..T-5 not yet implemented: passthrough ST(0)
+                        // T-4..T-5 (FSIN/FCOS/FSINCOS/FPTAN) not yet implemented:
+                        // passthrough ST(0)
                         z <= a; flags <= 6'd0; phase <= P_DONE;
                     end
                 end
@@ -393,6 +483,120 @@ module fpu_transcendental (
                 end else settle<=settle-5'd1;
                 LG_BMUL: if (settle==0) begin z<=arith_z; phase<=P_DONE; end
                          else settle<=settle-5'd1;
+
+                // ---------------- FPATAN (T-3) ---------------------------
+                // shared divide launch (ratio + both octant corrections)
+                AT_DSET: if (settle==0) begin div_start<=1'b1; phase<=AT_DWAIT; end
+                         else settle<=settle-5'd1;
+                AT_DWAIT: if (div_done) begin
+                    x_reg <= div_z;                         // reduced x (for poly outer)
+                    if (at_step == 1'b0) begin
+                        // ratio result -> tiny? octant correction? straight poly?
+                        if (div_z[78:64] <= 15'h3FD7) begin
+                            // |x| <= 2^-40: atan(x) ~ x, skip poly
+                            phase <= AT_SWAP;
+                        end else if ((div_z[78:64] > 15'h3FFE) ||
+                                     (div_z[78:64]==15'h3FFE && div_z[63:0]>=64'hC000000000000000)) begin
+                            // 3/4 <= x < 1: x=(x-1)/(x+1) + pi/4
+                            add_corr <= 2'd1;
+                            arith_a <= div_z; arith_b <= ONE; arith_op <= KIND_ADD;
+                            settle <= WAIT; phase <= AT_C4_XP1;   // den = x+1 first
+                        end else if (div_z[78:64] >= 15'h3FFD) begin
+                            // 1/4 <= x < 3/4: x=(x*sqrt3-1)/(x+sqrt3) + pi/6
+                            add_corr <= 2'd2;
+                            arith_a <= div_z; arith_b <= SQRT3_80; arith_op <= KIND_MUL;
+                            settle <= WAIT; phase <= AT_C6_MUL;   // t1 = x*sqrt3
+                        end else begin
+                            // x < 1/4: no correction -> poly directly
+                            arith_a <= div_z; arith_b <= div_z; arith_op <= KIND_MUL;
+                            settle <= WAIT; phase <= AT_P_X2;      // x^2
+                        end
+                    end else begin
+                        // octant-correction divide done -> poly
+                        arith_a <= div_z; arith_b <= div_z; arith_op <= KIND_MUL;
+                        settle <= WAIT; phase <= AT_P_X2;
+                    end
+                end
+                // +pi/4 correction: x = (x-1)/(x+1)
+                AT_C4_XP1: if (settle==0) begin
+                    den_reg <= arith_z;                     // x+1
+                    arith_a <= x_reg; arith_b <= NEG_ONE; arith_op <= KIND_ADD;
+                    settle <= WAIT; phase <= AT_C4_XM1;     // x-1
+                end else settle<=settle-5'd1;
+                AT_C4_XM1: if (settle==0) begin
+                    arith_a <= arith_z; arith_b <= den_reg; arith_op <= KIND_DIV;
+                    settle <= WAIT; at_step <= 1'b1; phase <= AT_DSET;
+                end else settle<=settle-5'd1;
+                // +pi/6 correction: x = (x*sqrt3 - 1)/(x + sqrt3)
+                AT_C6_MUL: if (settle==0) begin
+                    t_reg <= arith_z;                       // x*sqrt3
+                    arith_a <= x_reg; arith_b <= SQRT3_80; arith_op <= KIND_ADD;
+                    settle <= WAIT; phase <= AT_C6_ADD;     // x+sqrt3
+                end else settle<=settle-5'd1;
+                AT_C6_ADD: if (settle==0) begin
+                    den_reg <= arith_z;                     // x+sqrt3
+                    arith_a <= t_reg; arith_b <= NEG_ONE; arith_op <= KIND_ADD;
+                    settle <= WAIT; phase <= AT_C6_SUB;     // (x*sqrt3)-1
+                end else settle<=settle-5'd1;
+                AT_C6_SUB: if (settle==0) begin
+                    arith_a <= arith_z; arith_b <= den_reg; arith_op <= KIND_DIV;
+                    settle <= WAIT; at_step <= 1'b1; phase <= AT_DSET;
+                end else settle<=settle-5'd1;
+                // OddPoly(x, atan_arr, 11): x * Horner(x^2, arr[10..0])
+                AT_P_X2: if (settle==0) begin
+                    t_reg <= arith_z;                       // x^2
+                    arith_a <= atan_coeff(4'd10); arith_b <= arith_z; arith_op <= KIND_MUL;
+                    cnt <= 4'd10; settle <= WAIT; phase <= AT_P_MUL;
+                end else settle<=settle-5'd1;
+                AT_P_MUL: if (settle==0) begin
+                    arith_a <= arith_z; arith_b <= atan_coeff(cnt-4'd1); arith_op <= KIND_ADD;
+                    settle <= WAIT; phase <= AT_P_ADD;
+                end else settle<=settle-5'd1;
+                AT_P_ADD: if (settle==0) begin
+                    if (cnt==4'd1) begin
+                        arith_a <= x_reg; arith_b <= arith_z; arith_op <= KIND_MUL; // outer x*
+                        settle <= WAIT; phase <= AT_P_OUT;
+                    end else begin
+                        arith_a <= arith_z; arith_b <= t_reg; arith_op <= KIND_MUL; // *x^2
+                        cnt <= cnt-4'd1; settle <= WAIT; phase <= AT_P_MUL;
+                    end
+                end else settle<=settle-5'd1;
+                AT_P_OUT: if (settle==0) begin
+                    case (add_corr)
+                        2'd1: begin arith_a<=arith_z; arith_b<=PI4_80; arith_op<=KIND_ADD;
+                                    settle<=WAIT; phase<=AT_CORR; end
+                        2'd2: begin arith_a<=arith_z; arith_b<=PI6_80; arith_op<=KIND_ADD;
+                                    settle<=WAIT; phase<=AT_CORR; end
+                        default: begin x_reg<=arith_z; phase<=AT_SWAP; end
+                    endcase
+                end else settle<=settle-5'd1;
+                AT_CORR: if (settle==0) begin x_reg<=arith_z; phase<=AT_SWAP; end
+                         else settle<=settle-5'd1;
+                // swap: result = pi/2 - x   (pi/2 + (-x))
+                AT_SWAP: begin
+                    if (swap_reg) begin
+                        arith_a <= PI2_80; arith_b <= {~x_reg[79], x_reg[78:0]};
+                        arith_op <= KIND_ADD; settle <= WAIT; phase <= AT_SWAPW;
+                    end else phase <= AT_SIGN;
+                end
+                AT_SWAPW: if (settle==0) begin x_reg<=arith_z; phase<=AT_SIGN; end
+                          else settle<=settle-5'd1;
+                // quadrant: apply zsign, then +/- pi per bSign vs result sign
+                AT_SIGN: begin
+                    if (~at_bsign & at_zsign) begin
+                        // result negative but b>=0 -> + pi
+                        arith_a <= {at_zsign, x_reg[78:0]}; arith_b <= PI80;
+                        arith_op <= KIND_ADD; settle <= WAIT; phase <= AT_PIW;
+                    end else if (at_bsign & ~at_zsign) begin
+                        // result positive but b<0 -> - pi
+                        arith_a <= {at_zsign, x_reg[78:0]}; arith_b <= {~PI80[79],PI80[78:0]};
+                        arith_op <= KIND_ADD; settle <= WAIT; phase <= AT_PIW;
+                    end else begin
+                        z <= {at_zsign, x_reg[78:0]}; phase <= P_DONE;
+                    end
+                end
+                AT_PIW: if (settle==0) begin z<=arith_z; phase<=P_DONE; end
+                        else settle<=settle-5'd1;
 
                 P_DONE: begin done<=1'b1; phase<=P_IDLE; end
                 default: phase<=P_IDLE;

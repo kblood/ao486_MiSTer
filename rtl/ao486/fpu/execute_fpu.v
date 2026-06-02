@@ -522,10 +522,11 @@ module execute_fpu (
     // second operand and write ST(1):=y*log2(...) then pop ST(0) — exactly the
     // FADDP control shape with i forced to 1.  So they force src_lat=1 (read
     // ST(1)->b_lat AND target abs_stsrc=ST(1)), dst_is_sti_lat=1, pop_after_lat=1.
-    // F2XM1 (in-place ST0) and the still-passthrough T-3..T-5 stubs keep the
-    // default no-pop in-place routing.  FPATAN (CMDEX 3, also 2-src/pop) joins
-    // this set when T-3 lands — NOT now, or its passthrough would corrupt TOP.
-    wire is_transc_log     = is_transc && ((exe_cmdex == 4'd1) || (exe_cmdex == 4'd4));
+    // F2XM1 (in-place ST0) and the still-passthrough T-4..T-5 stubs keep the
+    // default no-pop in-place routing.  FPATAN (CMDEX 3) is also 2-src/pop and
+    // joins this set now that T-3 (iter 189) computes a real result.
+    wire is_transc_log     = is_transc && ((exe_cmdex == 4'd1) || (exe_cmdex == 4'd3) ||
+                                           (exe_cmdex == 4'd4));
 
     // PR-2b.3o (iter 46): comparison ops on ST(0) vs ST(i).  Dispatched via
     // the new `CMD_fpu_cmp` (7'd120).  Both operands are read via the
