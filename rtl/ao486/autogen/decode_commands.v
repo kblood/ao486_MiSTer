@@ -421,6 +421,21 @@ wire cond_226 = dec_ready_modregrm_one   && decoder[7:0] == 8'hD9 && decoder[15:
 // family as FRNDINT (cond_221, D9 FC): CMD_fpu_unary / CMDEX_FSQRT, consumes the
 // ModRM byte, single source ST(0) (no src_lat override inside execute_fpu).
 wire cond_227 = dec_ready_modregrm_one   && decoder[7:0] == 8'hD9 && decoder[15:8] == 8'hFA; // FSQRT  (D9 FA)
+// PR-2c.T (iter 185+): x87 TRANSCENDENTAL group — all 2-byte, prefix D9,
+// reg-form (full ModRM byte: opcode decoder[7:0], 2nd byte decoder[15:8]).
+// Dispatched to the NEW CMD_fpu_transcendental code (each with its own CMDEX)
+// and placed ABOVE cond_67 in every cascade so they win over the legacy
+// no-op catch-all.  Single-source ops (F2XM1/FSIN/FCOS/FSINCOS) take ST(0);
+// two-source ops (FYL2X/FPATAN/FYL2XP1) force src_lat=1 in execute_fpu.
+// See research/design_transcendentals.md.
+wire cond_238 = dec_ready_modregrm_one   && decoder[7:0] == 8'hD9 && decoder[15:8] == 8'hF0; // F2XM1   (D9 F0)
+wire cond_239 = dec_ready_modregrm_one   && decoder[7:0] == 8'hD9 && decoder[15:8] == 8'hF1; // FYL2X   (D9 F1)
+wire cond_240 = dec_ready_modregrm_one   && decoder[7:0] == 8'hD9 && decoder[15:8] == 8'hF2; // FPTAN   (D9 F2)
+wire cond_241 = dec_ready_modregrm_one   && decoder[7:0] == 8'hD9 && decoder[15:8] == 8'hF3; // FPATAN  (D9 F3)
+wire cond_242 = dec_ready_modregrm_one   && decoder[7:0] == 8'hD9 && decoder[15:8] == 8'hF9; // FYL2XP1 (D9 F9)
+wire cond_243 = dec_ready_modregrm_one   && decoder[7:0] == 8'hD9 && decoder[15:8] == 8'hFE; // FSIN    (D9 FE)
+wire cond_244 = dec_ready_modregrm_one   && decoder[7:0] == 8'hD9 && decoder[15:8] == 8'hFF; // FCOS    (D9 FF)
+wire cond_245 = dec_ready_modregrm_one   && decoder[7:0] == 8'hD9 && decoder[15:8] == 8'hFB; // FSINCOS (D9 FB)
 // PR-2b.5v (iter 140): FILD m32 (DB /0), FILD m16 (DF /0), FILD m64 (DF /5) —
 // signed-integer memory loads, mem-form (mod != 11).  Same byte layout as the
 // FLD m32/m64 mem-form loads (cond_206/207): opcode in decoder[7:0], modrm in
@@ -537,6 +552,14 @@ assign dec_cmd =
     (cond_225 && ~cond_4)? ( `CMD_fpu_unary) :  // PR-2b.5r iter 135: FPREM  (D9 F8)
     (cond_226 && ~cond_4)? ( `CMD_fpu_unary) :  // PR-2b.5r iter 135: FPREM1 (D9 F5)
     (cond_227 && ~cond_4)? ( `CMD_fpu_unary) :  // PR-2b.5t iter 137: FSQRT  (D9 FA)
+    (cond_238 && ~cond_4)? ( `CMD_fpu_transcendental) :  // PR-2c.T: F2XM1   (D9 F0)
+    (cond_239 && ~cond_4)? ( `CMD_fpu_transcendental) :  // PR-2c.T: FYL2X   (D9 F1)
+    (cond_240 && ~cond_4)? ( `CMD_fpu_transcendental) :  // PR-2c.T: FPTAN   (D9 F2)
+    (cond_241 && ~cond_4)? ( `CMD_fpu_transcendental) :  // PR-2c.T: FPATAN  (D9 F3)
+    (cond_242 && ~cond_4)? ( `CMD_fpu_transcendental) :  // PR-2c.T: FYL2XP1 (D9 F9)
+    (cond_243 && ~cond_4)? ( `CMD_fpu_transcendental) :  // PR-2c.T: FSIN    (D9 FE)
+    (cond_244 && ~cond_4)? ( `CMD_fpu_transcendental) :  // PR-2c.T: FCOS    (D9 FF)
+    (cond_245 && ~cond_4)? ( `CMD_fpu_transcendental) :  // PR-2c.T: FSINCOS (D9 FB)
     (cond_165 && ~cond_4)? ( `CMD_fpu_unary) :
     (cond_166 && ~cond_4)? ( `CMD_fpu_unary) :
     (cond_167 && ~cond_4)? ( `CMD_fpu_cmp) :
@@ -1004,6 +1027,14 @@ assign consume_modregrm_one =
     (cond_225 && ~cond_4)? (`TRUE) :  // PR-2b.5r iter 135: FPREM  consume_modregrm_one
     (cond_226 && ~cond_4)? (`TRUE) :  // PR-2b.5r iter 135: FPREM1 consume_modregrm_one
     (cond_227 && ~cond_4)? (`TRUE) :  // PR-2b.5t iter 137: FSQRT  consume_modregrm_one
+    (cond_238 && ~cond_4)? (`TRUE) :  // PR-2c.T: F2XM1   consume_modregrm_one
+    (cond_239 && ~cond_4)? (`TRUE) :  // PR-2c.T: FYL2X
+    (cond_240 && ~cond_4)? (`TRUE) :  // PR-2c.T: FPTAN
+    (cond_241 && ~cond_4)? (`TRUE) :  // PR-2c.T: FPATAN
+    (cond_242 && ~cond_4)? (`TRUE) :  // PR-2c.T: FYL2XP1
+    (cond_243 && ~cond_4)? (`TRUE) :  // PR-2c.T: FSIN
+    (cond_244 && ~cond_4)? (`TRUE) :  // PR-2c.T: FCOS
+    (cond_245 && ~cond_4)? (`TRUE) :  // PR-2c.T: FSINCOS
     (cond_165 && ~cond_4)? (`TRUE) :
     (cond_166 && ~cond_4)? (`TRUE) :
     (cond_167 && ~cond_4)? (`TRUE) :
@@ -1232,6 +1263,14 @@ assign dec_cmdex =
     (cond_225 && ~cond_4)? ( `CMDEX_FPREM) :  // PR-2b.5r iter 135: FPREM  (D9 F8)
     (cond_226 && ~cond_4)? ( `CMDEX_FPREM1) :  // PR-2b.5r iter 135: FPREM1 (D9 F5)
     (cond_227 && ~cond_4)? ( `CMDEX_FSQRT) :  // PR-2b.5t iter 137: FSQRT  (D9 FA)
+    (cond_238 && ~cond_4)? ( `CMDEX_F2XM1) :    // PR-2c.T: F2XM1   (D9 F0)
+    (cond_239 && ~cond_4)? ( `CMDEX_FYL2X) :    // PR-2c.T: FYL2X   (D9 F1)
+    (cond_240 && ~cond_4)? ( `CMDEX_FPTAN) :    // PR-2c.T: FPTAN   (D9 F2)
+    (cond_241 && ~cond_4)? ( `CMDEX_FPATAN) :   // PR-2c.T: FPATAN  (D9 F3)
+    (cond_242 && ~cond_4)? ( `CMDEX_FYL2XP1) :  // PR-2c.T: FYL2XP1 (D9 F9)
+    (cond_243 && ~cond_4)? ( `CMDEX_FSIN) :     // PR-2c.T: FSIN    (D9 FE)
+    (cond_244 && ~cond_4)? ( `CMDEX_FCOS) :     // PR-2c.T: FCOS    (D9 FF)
+    (cond_245 && ~cond_4)? ( `CMDEX_FSINCOS) :  // PR-2c.T: FSINCOS (D9 FB)
     (cond_165 && ~cond_4)? ( `CMDEX_FABS) :
     (cond_166 && ~cond_4)? ( `CMDEX_FXAM) :
     (cond_167 && ~cond_4)? ( `CMDEX_FCOM) :

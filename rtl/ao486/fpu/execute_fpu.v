@@ -503,6 +503,21 @@ module execute_fpu (
     wire is_fsqrt          = (exe_cmd  == `CMD_fpu_unary) &&
                              (exe_cmdex == `CMDEX_FSQRT);
 
+    // PR-2c.T (iter 185+): x87 TRANSCENDENTAL group (F2XM1/FYL2X/FPTAN/FPATAN/
+    // FYL2XP1/FSIN/FCOS/FSINCOS) — own CMD_fpu_transcendental code (7'd127).
+    // These USED to fall through decode to the cond_67 -> CMDEX_ESC_STEP_0
+    // silent no-op (an unimplemented reg-form x87 op does NOT #UD), so wrong
+    // values propagated and real FP workloads (FX Fighter) crashed downstream.
+    // T-0 (this slice): route them to a DETERMINISTIC passthrough — ST(0) is
+    // left unchanged and NO exception flag is raised (no worse than the old
+    // no-op, but now properly dispatched, elaboration-clean, and with NO new
+    // datapath / zero ALM cost).  T-1 replaces the passthrough arm in the
+    // rf_wr_data mux with a real fpu_transcendental engine (Horner poly walk
+    // over a coeff ROM) gated by a new S_TRANSCWAIT wait state.  The group flag
+    // is enough for T-0; per-op decode (is_f2xm1 etc.) lands with the engine in
+    // T-1.  See research/design_transcendentals.md.
+    wire is_transc         = (exe_cmd == `CMD_fpu_transcendental);
+
     // PR-2b.3o (iter 46): comparison ops on ST(0) vs ST(i).  Dispatched via
     // the new `CMD_fpu_cmp` (7'd120).  Both operands are read via the
     // existing fetch path; no regfile data writeback (rf_wr_en gated off);
@@ -1127,6 +1142,7 @@ module execute_fpu (
     reg        is_fprem1_lat;    // PR-2b.5r (iter 135)
     wire       is_fprem_any_lat = is_fprem_lat | is_fprem1_lat;  // PR-2b.5r iter 135
     reg        is_fsqrt_lat;     // PR-2b.5t (iter 137)
+    reg        is_transc_lat;    // PR-2c.T (iter 185+) — transcendental group, T-0 passthrough stub
     // PR-2b.3o: cmp-family latches.  is_cmp_lat covers all four ops and
     // is used to (a) gate rf_wr_en off (no data writeback), (b) drive
     // cc_we in S_RETIRE, (c) override flags_lat with the cmp-only IE
@@ -1399,6 +1415,7 @@ module execute_fpu (
             is_fprem_lat    <= 1'b0;    // PR-2b.5r iter 135
             is_fprem1_lat   <= 1'b0;    // PR-2b.5r iter 135
             is_fsqrt_lat    <= 1'b0;    // PR-2b.5t iter 137
+            is_transc_lat   <= 1'b0;    // PR-2c.T iter 185+
             is_cmp_lat      <= 1'b0;
             is_fucom_lat    <= 1'b0;
             is_cmpi_lat     <= 1'b0;
@@ -1463,6 +1480,7 @@ module execute_fpu (
                         is_fprem_lat   <= is_fprem;     // PR-2b.5r iter 135
                         is_fprem1_lat  <= is_fprem1;    // PR-2b.5r iter 135
                         is_fsqrt_lat   <= is_fsqrt;     // PR-2b.5t iter 137
+                        is_transc_lat  <= is_transc;    // PR-2c.T iter 185+
                         is_cmp_lat     <= is_cmp_now;
                         is_fucom_lat   <= is_cmp_unord_now;
                         is_cmpi_lat    <= is_cmpi_now;
@@ -1642,7 +1660,10 @@ module execute_fpu (
                             state <= S_BCDLOADWAIT;
                         end else begin
                             z_lat     <= sum_pre;
-                            flags_lat <= flags_compute;
+                            // PR-2c.T (iter 185+): transcendental T-0 passthrough raises
+                            // NO exception (the real engine in T-1 will produce proper
+                            // PE/UE/IE/C2 flags).  Everything else keeps flags_compute.
+                            flags_lat <= is_transc_lat ? 6'd0 : flags_compute;
                             state     <= S_POST;
                         end
                     end else begin
@@ -2700,6 +2721,7 @@ module execute_fpu (
                         is_fxtract_lat     ? extract_exp :    // PR-2b.5q iter 131: exponent -> ST(0) at S_RETIRE
                         is_fprem_any_lat   ? rem_z :          // PR-2b.5r iter 135: remainder -> ST(0) no-pop
                         is_fsqrt_lat       ? sqrt_z :         // PR-2b.5t iter 137: sqrt(ST(0)) -> ST(0) no-pop
+                        is_transc_lat      ? a_lat :          // PR-2c.T iter 185+: TRANSCENDENTAL passthrough stub (T-0) — ST(0) unchanged; real engine lands in T-1
                         is_ffree_lat       ? b_lat :          // PR-2b.3r FFREE: preserve ST(i) data
                         is_fcmov_lat       ? b_lat :          // PR-2b.3t FCMOV taken: ST(0) <- ST(i)
                                              z_lat;
@@ -2762,6 +2784,13 @@ module execute_fpu (
     wire [1:0] fsqrt_tag = (sqrt_z[78:0] == 79'd0)     ? 2'b01 :  // Zero
                            (sqrt_z[78:64] == 15'h7FFF) ? 2'b10 :  // NaN/Inf
                                                          2'b00;   // Valid
+    // PR-2c.T (iter 185+): transcendental T-0 passthrough writes ST(0)=a_lat
+    // unchanged, so classify the UNCHANGED ST(0) operand (Zero / NaN-Inf /
+    // denormal-Special / Valid).  Real per-result tags arrive with the T-1 engine.
+    wire [1:0] transc_tag = (a_lat[78:0]  == 79'd0)     ? 2'b01 :  // Zero
+                            (a_lat[78:64] == 15'h7FFF)  ? 2'b10 :  // NaN/Inf
+                            (a_lat[78:64] == 15'h0)     ? 2'b10 :  // denormal/pseudo-denormal -> Special
+                                                          2'b00;   // Valid
     assign rf_wr_tag  = (state == S_POP)    ? 2'b11         :  // Empty
                         (state == S_POP2)   ? 2'b11         :  // PR-2b.3q: Empty (second pop)
                         (state == S_XTRACT2)? extract_sig_tag :  // PR-2b.5q iter 131: significand tag (guard first)
@@ -2779,6 +2808,7 @@ module execute_fpu (
                         is_fxtract_lat      ? extract_exp_tag :// PR-2b.5q iter 131: exponent tag at S_RETIRE
                         is_fprem_any_lat    ? fprem_tag     :  // PR-2b.5r iter 135: classify remainder result
                         is_fsqrt_lat        ? fsqrt_tag     :  // PR-2b.5t iter 137: classify sqrt result
+                        is_transc_lat       ? transc_tag    :  // PR-2c.T iter 185+: classify passthrough ST(0)
                         is_ffree_lat        ? 2'b11         :  // PR-2b.3r FFREE: Empty
                         is_fcmov_lat        ? stsrc_tag_lat :  // PR-2b.3t FCMOV taken: copy ST(i) tag
                                               2'b00;           // Valid (arith)

@@ -916,3 +916,26 @@
 // (int64_to_bcd) + sign byte and writes 10 bytes via the SAME 3-step (4+4+2)
 // write FSM as FSTP m80 (shared is_fstp_m80_op in write.v), then pops.
 `define CMDEX_FBSTP           4'd10
+
+// PR-2c.T (iter 185+): x87 TRANSCENDENTAL group — F2XM1/FYL2X/FPTAN/FPATAN/
+// FYL2XP1/FSIN/FCOS/FSINCOS (all 2-byte, prefix D9, reg-form).  These were
+// silently no-op'd via the cond_67 -> CMDEX_ESC_STEP_0 catch-all (an
+// unimplemented reg-form x87 op does NOT #UD), so wrong values propagated and
+// real FP workloads (FX Fighter) crashed downstream.  Dispatched via a NEW
+// primary CMD code with its own fresh 4-bit CMDEX namespace — the proven split
+// pattern (cf. CMD_fpu_cmp/cmov).  CMD_fpu_unary had only 6 free CMDEX slots and
+// we need 8; a dedicated code also dodges the 4-bit truncation trap (see the
+// CMD_fpu_unary note above).  NOTE: 7'd127 is the LAST 7-bit CMD value — the CMD
+// namespace is FULL after this; any future op group must reclaim or widen it.
+// All flow through a single shared, clocked fpu_transcendental engine in
+// execute_fpu.v (Horner poly walker over a coeff ROM, time-multiplexing the
+// existing mul/add + seq_divider).  See research/design_transcendentals.md.
+`define CMD_fpu_transcendental 7'd127
+`define CMDEX_F2XM1           4'd0
+`define CMDEX_FYL2X           4'd1
+`define CMDEX_FPTAN           4'd2
+`define CMDEX_FPATAN          4'd3
+`define CMDEX_FYL2XP1         4'd4
+`define CMDEX_FSIN            4'd5
+`define CMDEX_FCOS            4'd6
+`define CMDEX_FSINCOS         4'd7
