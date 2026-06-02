@@ -517,6 +517,15 @@ module execute_fpu (
     // is enough for T-0; per-op decode (is_f2xm1 etc.) lands with the engine in
     // T-1.  See research/design_transcendentals.md.
     wire is_transc         = (exe_cmd == `CMD_fpu_transcendental);
+    // PR-2c.T-2 (iter 188): FYL2X (CMDEX 1) + FYL2XP1 (CMDEX 4) are the first
+    // TWO-SOURCE, POP transcendentals: they read ST(1) (the y multiplier) as the
+    // second operand and write ST(1):=y*log2(...) then pop ST(0) — exactly the
+    // FADDP control shape with i forced to 1.  So they force src_lat=1 (read
+    // ST(1)->b_lat AND target abs_stsrc=ST(1)), dst_is_sti_lat=1, pop_after_lat=1.
+    // F2XM1 (in-place ST0) and the still-passthrough T-3..T-5 stubs keep the
+    // default no-pop in-place routing.  FPATAN (CMDEX 3, also 2-src/pop) joins
+    // this set when T-3 lands — NOT now, or its passthrough would corrupt TOP.
+    wire is_transc_log     = is_transc && ((exe_cmdex == 4'd1) || (exe_cmdex == 4'd4));
 
     // PR-2b.3o (iter 46): comparison ops on ST(0) vs ST(i).  Dispatched via
     // the new `CMD_fpu_cmp` (7'd120).  Both operands are read via the
@@ -836,7 +845,7 @@ module execute_fpu (
     // store.  FST keeps pop_after_lat=0 (no pop).
     // PR-2b.3r: FFREE writes to ST(i) too (tag-only Empty + b_lat data
     // preserve), so it joins dst_is_sti_now.
-    wire dst_is_sti_now = is_arith_de | is_fst_family | is_ffree;
+    wire dst_is_sti_now = is_arith_de | is_fst_family | is_ffree | is_transc_log; // PR-2c.T-2
     // PR-2b.3o: FCOMP / FUCOMP arm a pop using the existing pop_after_lat
     // mechanism (one cycle in S_POP that bumps TOP and clears the old
     // ST(0) tag).  Unlike arith DE-pops, the cmp path also has cc_we
@@ -848,7 +857,8 @@ module execute_fpu (
                           is_fstp_m80 |                           // PR-2b.5a iter 113
                           is_fstp_m32 | is_fstp_m64 |             // PR-2b.5c/5d iter 116/117
                           is_fist_pop_now |                       // PR-2b.5w iter 141 (FISTP only)
-                          is_fbstp;                               // PR-2b.5z iter 152 (FBSTP always pops)
+                          is_fbstp |                              // PR-2b.5z iter 152 (FBSTP always pops)
+                          is_transc_log;                          // PR-2c.T-2 iter 188 (FYL2X/FYL2XP1 pop)
 
     wire op_active = exe_ready && is_op_active;
 
@@ -1148,7 +1158,8 @@ module execute_fpu (
     wire        transc_done;
     wire [79:0] transc_arith_a;  // engine -> shared-arith left operand
     wire [79:0] transc_arith_b;  // engine -> shared-arith right operand
-    wire        transc_arith_is_mul;
+    wire [1:0]  transc_arith_op; // PR-2c.T-2 (iter 188): KIND_ADD/MUL/DIV request
+    wire        transc_div_start;// PR-2c.T-2: engine pulse to launch shared u_div
     // PR-2b.3n: unary control-op latches.  Captured at S_IDLE→S_FETCH_A.
     // FCHS/FABS override rf_wr_data with a bit-79-toggled / bit-79-cleared
     // copy of a_lat; FXAM suppresses rf_wr_en and pulses cc_we instead.
@@ -1303,7 +1314,13 @@ module execute_fpu (
     // Still a NATURAL 1-cycle pulse (cnt==0 holds for exactly one cycle before the
     // state advances to S_DIVWAIT), so each primitive latches operands exactly once.
     wire        arith_wait_done = (state == S_ARITHWAIT) && (arith_wait_cnt == 4'd0);
-    wire        div_start = arith_wait_done && (kind_lat == KIND_DIV);
+    // PR-2c.T-2 (iter 188): the transcendental engine launches the SHARED u_div
+    // for FYL2X/FYL2XP1's divide step.  transc_div_start is a 1-cycle pulse that
+    // is high ONLY during S_TRANSCWAIT (the engine's LG_DSET->LG_DWAIT edge),
+    // with op_a/op_b already settled WAIT cycles, so u_div latches the engine's
+    // numerator/denominator exactly once.  is_transc ops carry kind_lat=KIND_ADD
+    // (not DIV), so the first term stays 0 for them — the two never overlap.
+    wire        div_start = (arith_wait_done && (kind_lat == KIND_DIV)) || transc_div_start;
     wire        div_done;
 
     // PR-2b.5x (iter 146, synth-unblock Slice 3b): the floatx80_remainder primitive
@@ -1477,7 +1494,7 @@ module execute_fpu (
                         // b_lat; all other ops take the modrm.rm source index.
                         // PR-2b.5r (iter 135): FPREM/FPREM1 likewise read the implicit
                         // ST(1) divisor — same src_lat=1 override (the FSCALE trap).
-                        src_lat        <= (is_fscale | is_fprem_any) ? 3'd1 : exe_modregrm_rm_3b;
+                        src_lat        <= (is_fscale | is_fprem_any | is_transc_log) ? 3'd1 : exe_modregrm_rm_3b;
                         kind_lat       <= kind_now;
                         reverse_lat    <= reverse_now;
                         dst_is_sti_lat <= dst_is_sti_now;
@@ -1998,9 +2015,12 @@ module execute_fpu (
     // engine runs, follow its per-step mul/add request so the shared rounder,
     // pack_subn, and add/sub selection produce the result of the op the engine
     // asked for.  mul_or_addsub_z (below) then carries that result back to it.
-    wire [1:0] eff_kind = transc_running
-                            ? (transc_arith_is_mul ? KIND_MUL : KIND_ADD)
-                            : kind_lat;
+    // PR-2c.T-2 (iter 188): the engine now also requests KIND_DIV (FYL2X's
+    // u=(x-1)/(x+1) and FYL2XP1's u=x/(x+2)).  eff_kind=KIND_DIV routes pr_*_div
+    // to the shared rounder so u_div's shared_round_z is the divide triple; it
+    // is held across the divide (the engine keeps arith_op=KIND_DIV until
+    // div_done).  KIND_ADD/KIND_MUL behave exactly as in T-1.
+    wire [1:0] eff_kind = transc_running ? transc_arith_op : kind_lat;
 
     // PR-2b.5u (iter 139): precision-control field PC = CW[9:8] drives the
     // four arith primitives' shared rounder narrowing path.  The live cw is
@@ -2301,7 +2321,8 @@ module execute_fpu (
     assign flags_pre = (kind_lat == KIND_DIV) ? div_flags : mul_or_addsub_flags;
 
     // PR-2c.T-1 (iter 187): the transcendental engine.  Owns NO arithmetic — it
-    // drives operand/op-kind requests (transc_arith_a/b, transc_arith_is_mul) that
+    // drives operand/op-kind requests (transc_arith_a/b, transc_arith_op + the
+    // shared u_div via transc_div_start) that
     // execute_fpu injects into the shared mul/add via the op_a/op_b + eff_kind
     // muxes above, and samples the settled, rounded result mul_or_addsub_z.  The
     // engine's result-capture registers (u_transc|t_reg, arith_a/arith_b chain)
@@ -2314,10 +2335,14 @@ module execute_fpu (
         .start        (transc_start),
         .cmdex        (exe_cmdex),
         .a            (a_lat),
+        .b            (b_lat),                 // PR-2c.T-2: ST(1) for FYL2X/FYL2XP1
         .arith_a      (transc_arith_a),
         .arith_b      (transc_arith_b),
-        .arith_is_mul (transc_arith_is_mul),
+        .arith_op     (transc_arith_op),       // PR-2c.T-2: 2-bit KIND request
         .arith_z      (mul_or_addsub_z),
+        .div_start    (transc_div_start),      // PR-2c.T-2: launch shared u_div
+        .div_z        (div_z),
+        .div_done     (div_done),
         .done         (transc_done),
         .z            (transc_z),
         .flags        (transc_flags)
