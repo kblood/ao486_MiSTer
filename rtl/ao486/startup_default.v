@@ -40,8 +40,8 @@
 `define STARTUP_CR0_NE `FALSE
 `define STARTUP_CR0_WP `FALSE
 `define STARTUP_CR0_AM `FALSE
-`define STARTUP_CR0_NW `TRUE
-`define STARTUP_CR0_CD `TRUE
+`define STARTUP_CR0_NW `FALSE  // iter-184: boot caches ENABLED (was TRUE=authentic-486-reset). The Bochs BIOS never clears CD/NW, so data-side L2 caching stayed off all session; clearing here is what a real 486 BIOS does in POST. Gates ChkCPU/SpeedSys "L1 Enabled" report + data L2. See research/design_cache_and_cpu.md.
+`define STARTUP_CR0_CD `FALSE  // iter-184: see STARTUP_CR0_NW above.
 `define STARTUP_CR0_PG `FALSE
 
 `define STARTUP_CR3 32'd0
