@@ -100,6 +100,12 @@ set_multicycle_path -from {emu:emu|reset*} -hold 1
 # strobes the write-stage capture (store_ready) at S_RETIRE — >=12 cycles after a_lat is
 # latched (S_FETCH_B -> S_COMPUTE -> S_ARITHWAIT(12) -> S_POST -> S_RETIRE).  FPU-private
 # (only FPU stores write it, all FSM-serialized >=18 cyc apart), so -to-only is safe.
+# u_transc|{arith_a,arith_b,t_reg,z} (PR-2c.T-1 iter 187): the transcendental engine
+# captures the SHARED mul/add result (mul_or_addsub_z, the same ~106 ns floatx80 cone)
+# into these regs each Horner step; the engine dwells WAIT(=12) cycles per step exactly
+# like S_ARITHWAIT, so -to these capture regs is the identical multicycle.  The engine's
+# control regs (phase/settle/cnt/done) are fed by trivial FSM logic, stay single-cycle,
+# and are deliberately EXCLUDED here.
 set fpu_dst [get_registers {*u_execute_fpu|z_lat* *u_execute_fpu|flags_lat* *u_fpu_csr|* *u_fpu_regfile|* \
                             *u_div|a_reg* *u_div|b_reg* \
                             *u_div|a_sign_reg* *u_div|a_exp_reg* *u_div|a_sig_reg* \
@@ -111,6 +117,7 @@ set fpu_dst [get_registers {*u_execute_fpu|z_lat* *u_execute_fpu|flags_lat* *u_f
                             *u_floatx80_sqrt|a_sign_n_reg* *u_floatx80_sqrt|a_exp_n_reg* *u_floatx80_sqrt|a_sig_n_reg* \
                             *u_int64_to_bcd|val_reg* \
                             *u_bcd_to_int64|bcd_reg* \
+                            *u_transc|arith_a* *u_transc|arith_b* *u_transc|t_reg* *u_transc|z* \
                             *write_inst|wr_fpu_store_data*}]
 set_multicycle_path -to $fpu_dst -setup 12
 set_multicycle_path -to $fpu_dst -hold  11

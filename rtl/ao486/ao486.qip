@@ -42,6 +42,7 @@ set_global_assignment -name VERILOG_FILE [file join $::quartus(qip_path) memory/
 set_global_assignment -name VERILOG_FILE [file join $::quartus(qip_path) fpu/fpu_core.v ]
 set_global_assignment -name VERILOG_FILE [file join $::quartus(qip_path) fpu/fpu_csr.v ]
 set_global_assignment -name VERILOG_FILE [file join $::quartus(qip_path) fpu/fpu_regfile.v ]
+set_global_assignment -name VERILOG_FILE [file join $::quartus(qip_path) fpu/fpu_transcendental.v ]
 set_global_assignment -name VERILOG_FILE [file join $::quartus(qip_path) fpu/floatx80_nan_handle.v ]
 set_global_assignment -name VERILOG_FILE [file join $::quartus(qip_path) fpu/floatx80_inf_handle.v ]
 set_global_assignment -name VERILOG_FILE [file join $::quartus(qip_path) fpu/floatx80_zero_handle.v ]

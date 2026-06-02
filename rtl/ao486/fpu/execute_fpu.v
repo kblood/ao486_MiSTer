@@ -863,7 +863,11 @@ module execute_fpu (
     // outside this module reads `state` directly — the TB references it via
     // hierarchical paths and compares to specific values, which still work
     // under the wider encoding (Verilog promotes the narrower literal).
-    localparam [3:0]
+    // PR-2c.T-1 (iter 187): widened [3:0]->[4:0] to make room for S_TRANSCWAIT
+    // = 5'd16 (the transcendental engine's multi-cycle wait).  All 16 slots 0..15
+    // were already consumed through S_BCDLOADWAIT.  No code outside this module
+    // reads `state` except the TB via hierarchical compare, which is width-tolerant.
+    localparam [4:0]
         S_IDLE    = 4'd0,
         S_FETCH_A = 4'd1,   // present rd_idx for ST(0); data lands next cycle
         S_FETCH_B = 4'd2,   // latch ST(0); present rd_idx for ST(src)
@@ -947,6 +951,13 @@ module execute_fpu (
                             // flags_lat<=flags_compute and advances to S_POST.  Paired
                             // with set_multicycle_path -setup/-hold to z_lat+flags_lat
                             // in ao486.sdc.  Invisible to outputs (gated S_RETIRE...).
+        S_TRANSCWAIT  = 5'd16, // PR-2c.T-1 (iter 187): transcendental engine wait.
+                            // For is_transc_lat ops the S_ARITHWAIT terminal cycle
+                            // pulses transc_start and parks here.  u_transc time-
+                            // multiplexes the SHARED mul/add over the Horner poly
+                            // (~30 arith steps, each WAIT cycles); on transc_done
+                            // z_lat<=transc_z / flags_lat<=transc_flags and advance
+                            // to S_POST.  Invisible to outputs (gated S_RETIRE/...).
         S_BCDLOADWAIT = 4'd15; // iter-168 (Slice 1, bcd_to_int64 sequentialize):
                             // FBLD-only multi-cycle wait.  bcd_to_int64 is now
                             // CLOCKED Horner (18 cycles).  For is_fbld_lat ops the
@@ -964,7 +975,7 @@ module execute_fpu (
                                        // flags_pre paths settle (12*11.11ns=133ns);
                                        // MUST match the SDC multicycle N in ao486.sdc.
 
-    reg [3:0]  state;
+    reg [4:0]  state;          // PR-2c.T-1: widened for S_TRANSCWAIT (5'd16)
     reg [3:0]  arith_wait_cnt;  // PR-2c.12 (iter 165): S_ARITHWAIT down-counter
 
     // Latched operands + result.
@@ -1127,6 +1138,17 @@ module execute_fpu (
     // driven by the instance further below.  sqrt_flags = {PE,UE,OE,ZE,DE,IE}.
     wire [79:0] sqrt_z;
     wire [5:0]  sqrt_flags;
+    // PR-2c.T-1 (iter 187): transcendental engine (u_transc) interface.  The
+    // engine owns no arith — it drives operand/op-kind requests to the SHARED
+    // u_mul/u_add and samples mul_or_addsub_z.  Forward-declared (Gotcha #9):
+    // op_a/op_b and the eff_kind rounder-selection read these BEFORE the engine
+    // instance (which lives below mul_or_addsub_z's declaration).
+    wire [79:0] transc_z;        // F2XM1 result (held after transc_done)
+    wire [5:0]  transc_flags;    // {PE,UE,OE,ZE,DE,IE}
+    wire        transc_done;
+    wire [79:0] transc_arith_a;  // engine -> shared-arith left operand
+    wire [79:0] transc_arith_b;  // engine -> shared-arith right operand
+    wire        transc_arith_is_mul;
     // PR-2b.3n: unary control-op latches.  Captured at S_IDLE→S_FETCH_A.
     // FCHS/FABS override rf_wr_data with a bit-79-toggled / bit-79-cleared
     // copy of a_lat; FXAM suppresses rf_wr_en and pulses cc_we instead.
@@ -1305,6 +1327,16 @@ module execute_fpu (
     // rail) and is_fprem_any_lat=0, so div_start/rem_start stay 0 for it.
     wire        sqrt_start = arith_wait_done && is_fsqrt_lat;  // PR-2c.13: see div_start
     wire        sqrt_done;
+
+    // PR-2c.T-1 (iter 187): transcendental engine start/run signals.  transc_start
+    // is a NATURAL 1-cycle pulse — high only during the terminal S_ARITHWAIT cycle
+    // of a transcendental op, right before it parks in S_TRANSCWAIT; u_transc
+    // (idle then) latches a_lat exactly once.  transc_running gates the op_a/op_b
+    // operand injection + the eff_kind rounder override to the engine's requests
+    // (and is false for every non-transcendental op, so the shared arith path is
+    // bit-identical to before for them).
+    wire        transc_start   = arith_wait_done && is_transc_lat;
+    wire        transc_running = is_transc_lat && (state == S_TRANSCWAIT);
 
     // PR-2c.10 (iter 163, synth-unblock FBSTP BCD): int64_to_bcd is now CLOCKED
     // (Slice 1, d105a8f).  bcd_start is a NATURAL 1-cycle pulse — high only during
@@ -1658,12 +1690,17 @@ module execute_fpu (
                             // settled fbld_bcd; on bcd_load_done the S_BCDLOADWAIT
                             // arm captures b_lat<=fbld_x80 and advances to S_POST.
                             state <= S_BCDLOADWAIT;
+                        end else if (is_transc_lat) begin
+                            // PR-2c.T-1 (iter 187): the transcendental engine takes
+                            // over.  transc_start pulsed THIS cycle (via arith_wait_done)
+                            // so u_transc latched a_lat; it now time-multiplexes the
+                            // shared mul/add over the Horner poly.  z_lat/flags_lat are
+                            // captured from transc_z/transc_flags on transc_done in
+                            // S_TRANSCWAIT — NOT here (the engine result isn't ready).
+                            state <= S_TRANSCWAIT;
                         end else begin
                             z_lat     <= sum_pre;
-                            // PR-2c.T (iter 185+): transcendental T-0 passthrough raises
-                            // NO exception (the real engine in T-1 will produce proper
-                            // PE/UE/IE/C2 flags).  Everything else keeps flags_compute.
-                            flags_lat <= is_transc_lat ? 6'd0 : flags_compute;
+                            flags_lat <= flags_compute;
                             state     <= S_POST;
                         end
                     end else begin
@@ -1724,6 +1761,23 @@ module execute_fpu (
                 S_SQRTWAIT: begin
                     if (sqrt_done) begin
                         flags_lat <= sqrt_flags;
+                        state     <= S_POST;
+                    end
+                end
+
+                // S_TRANSCWAIT (PR-2c.T-1 iter 187): hold while u_transc runs the
+                // transcendental.  transc_start was pulsed in the terminal S_ARITHWAIT
+                // cycle that preceded this state, so the engine latched a_lat; it now
+                // drives the shared mul/add through op_a/op_b + eff_kind (gated on
+                // transc_running = is_transc_lat && state==S_TRANSCWAIT) for its ~30
+                // Horner steps.  On transc_done, transc_z / transc_flags are valid and
+                // HELD (the engine parks in P_IDLE without clearing them), so the
+                // S_RETIRE arms reading transc_z (rf_wr_data, transc_tag) stay valid.
+                // fpu_busy stays high throughout (state != S_IDLE); no output fires here.
+                S_TRANSCWAIT: begin
+                    if (transc_done) begin
+                        z_lat     <= transc_z;
+                        flags_lat <= transc_flags;
                         state     <= S_POST;
                     end
                 end
@@ -1931,9 +1985,22 @@ module execute_fpu (
     wire [79:0] arith_b = is_mem_form_lat
                               ? (((state == S_COMPUTE) || (state == S_ARITHWAIT)) ? mem_z : b_lat)
                               : ((state == S_COMPUTE) ? rf_rd_data : b_lat);
-    wire [79:0] op_a = reverse_lat ? arith_b : arith_a;
-    wire [79:0] op_b = reverse_lat ? arith_a : arith_b;
+    // PR-2c.T-1 (iter 187): during S_TRANSCWAIT the transcendental engine drives
+    // the SHARED mul/add operands (it has none of its own), so inject its request
+    // ahead of the normal arith_a/arith_b view.  transc_running is false for every
+    // non-transcendental op (and during the rest of a transc op's own fetch/
+    // compute), so this mux is a transparent pass-through for all existing ops.
+    wire [79:0] op_a = transc_running ? transc_arith_a : (reverse_lat ? arith_b : arith_a);
+    wire [79:0] op_b = transc_running ? transc_arith_b : (reverse_lat ? arith_a : arith_b);
     // sum_pre / flags_pre are forward-declared above the FSM.
+
+    // PR-2c.T-1: rounder/primitive-select kind.  Normally kind_lat; while the
+    // engine runs, follow its per-step mul/add request so the shared rounder,
+    // pack_subn, and add/sub selection produce the result of the op the engine
+    // asked for.  mul_or_addsub_z (below) then carries that result back to it.
+    wire [1:0] eff_kind = transc_running
+                            ? (transc_arith_is_mul ? KIND_MUL : KIND_ADD)
+                            : kind_lat;
 
     // PR-2b.5u (iter 139): precision-control field PC = CW[9:8] drives the
     // four arith primitives' shared rounder narrowing path.  The live cw is
@@ -2135,13 +2202,13 @@ module execute_fpu (
     // route to sub when op signs differ).  This guarantees the rounder
     // always sees the pre-round triple of the SAME primitive whose z is
     // about to be selected by sum_pre.
-    wire arith_pick_sub = (op_a[79] ^ op_b[79]) ^ kind_lat[0];
+    wire arith_pick_sub = (op_a[79] ^ op_b[79]) ^ eff_kind[0];   // PR-2c.T-1: eff_kind
     reg               shared_pr_sign;
     reg signed [16:0] shared_pr_exp;
     reg        [63:0] shared_pr_sig0;
     reg        [63:0] shared_pr_sig1;
     always @* begin
-        case (kind_lat)
+        case (eff_kind)                                          // PR-2c.T-1: eff_kind
             KIND_DIV: begin
                 shared_pr_sign = pr_sign_div;
                 shared_pr_exp  = pr_exp_div;
@@ -2224,14 +2291,37 @@ module execute_fpu (
     wire [79:0] rem_rps_z_in  = pks_z_out;
     wire        rem_rps_pe_in = pks_pe_out;
 
-    wire use_sub_primitive = (op_a[79] ^ op_b[79]) ^ kind_lat[0];
+    wire use_sub_primitive = (op_a[79] ^ op_b[79]) ^ eff_kind[0];   // PR-2c.T-1: eff_kind
     wire [79:0] addsub_z     = use_sub_primitive ? sub_z     : add_z;
     wire [5:0]  addsub_flags = use_sub_primitive ? sub_flags : add_flags;
-    wire [79:0] mul_or_addsub_z     = (kind_lat == KIND_MUL) ? mul_z     : addsub_z;
-    wire [5:0]  mul_or_addsub_flags = (kind_lat == KIND_MUL) ? mul_flags : addsub_flags;
+    wire [79:0] mul_or_addsub_z     = (eff_kind == KIND_MUL) ? mul_z     : addsub_z;   // PR-2c.T-1
+    wire [5:0]  mul_or_addsub_flags = (eff_kind == KIND_MUL) ? mul_flags : addsub_flags;
 
     assign sum_pre   = (kind_lat == KIND_DIV) ? div_z     : mul_or_addsub_z;
     assign flags_pre = (kind_lat == KIND_DIV) ? div_flags : mul_or_addsub_flags;
+
+    // PR-2c.T-1 (iter 187): the transcendental engine.  Owns NO arithmetic — it
+    // drives operand/op-kind requests (transc_arith_a/b, transc_arith_is_mul) that
+    // execute_fpu injects into the shared mul/add via the op_a/op_b + eff_kind
+    // muxes above, and samples the settled, rounded result mul_or_addsub_z.  The
+    // engine's result-capture registers (u_transc|t_reg, arith_a/arith_b chain)
+    // are covered by the destination-anchored arith multicycle in ao486.sdc (the
+    // -to *u_execute_fpu|u_transc|* clause added there).  start pulses at the
+    // terminal S_ARITHWAIT cycle (transc_start); done returns us to S_POST.
+    fpu_transcendental u_transc (
+        .clk          (clk),
+        .rst          (~rst_n | exe_reset | init),
+        .start        (transc_start),
+        .cmdex        (exe_cmdex),
+        .a            (a_lat),
+        .arith_a      (transc_arith_a),
+        .arith_b      (transc_arith_b),
+        .arith_is_mul (transc_arith_is_mul),
+        .arith_z      (mul_or_addsub_z),
+        .done         (transc_done),
+        .z            (transc_z),
+        .flags        (transc_flags)
+    );
 
     // PR-2c.12 (iter 165): per-op flags cascade extracted verbatim from the old
     // S_COMPUTE `flags_lat <= ...` ternary so S_COMPUTE and S_ARITHWAIT capture
@@ -2721,7 +2811,7 @@ module execute_fpu (
                         is_fxtract_lat     ? extract_exp :    // PR-2b.5q iter 131: exponent -> ST(0) at S_RETIRE
                         is_fprem_any_lat   ? rem_z :          // PR-2b.5r iter 135: remainder -> ST(0) no-pop
                         is_fsqrt_lat       ? sqrt_z :         // PR-2b.5t iter 137: sqrt(ST(0)) -> ST(0) no-pop
-                        is_transc_lat      ? a_lat :          // PR-2c.T iter 185+: TRANSCENDENTAL passthrough stub (T-0) — ST(0) unchanged; real engine lands in T-1
+                        is_transc_lat      ? transc_z :       // PR-2c.T-1 iter 187: TRANSCENDENTAL result from u_transc (held after transc_done; z_lat also holds it)
                         is_ffree_lat       ? b_lat :          // PR-2b.3r FFREE: preserve ST(i) data
                         is_fcmov_lat       ? b_lat :          // PR-2b.3t FCMOV taken: ST(0) <- ST(i)
                                              z_lat;
@@ -2784,13 +2874,14 @@ module execute_fpu (
     wire [1:0] fsqrt_tag = (sqrt_z[78:0] == 79'd0)     ? 2'b01 :  // Zero
                            (sqrt_z[78:64] == 15'h7FFF) ? 2'b10 :  // NaN/Inf
                                                          2'b00;   // Valid
-    // PR-2c.T (iter 185+): transcendental T-0 passthrough writes ST(0)=a_lat
-    // unchanged, so classify the UNCHANGED ST(0) operand (Zero / NaN-Inf /
-    // denormal-Special / Valid).  Real per-result tags arrive with the T-1 engine.
-    wire [1:0] transc_tag = (a_lat[78:0]  == 79'd0)     ? 2'b01 :  // Zero
-                            (a_lat[78:64] == 15'h7FFF)  ? 2'b10 :  // NaN/Inf
-                            (a_lat[78:64] == 15'h0)     ? 2'b10 :  // denormal/pseudo-denormal -> Special
-                                                          2'b00;   // Valid
+    // PR-2c.T-1 (iter 187): classify the ENGINE RESULT transc_z (held after
+    // transc_done) into the Intel SDM tag word: Zero / NaN-Inf-Special /
+    // denormal-Special / Valid.  F2XM1 of a finite |x|<1 is finite normal (Valid);
+    // the -1.0->-0.5 / +/-0->+/-0 / Inf/NaN special results classify here too.
+    wire [1:0] transc_tag = (transc_z[78:0]  == 79'd0)     ? 2'b01 :  // Zero
+                            (transc_z[78:64] == 15'h7FFF)  ? 2'b10 :  // NaN/Inf
+                            (transc_z[78:64] == 15'h0)     ? 2'b10 :  // denormal/pseudo-denormal -> Special
+                                                             2'b00;   // Valid
     assign rf_wr_tag  = (state == S_POP)    ? 2'b11         :  // Empty
                         (state == S_POP2)   ? 2'b11         :  // PR-2b.3q: Empty (second pop)
                         (state == S_XTRACT2)? extract_sig_tag :  // PR-2b.5q iter 131: significand tag (guard first)
