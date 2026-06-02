@@ -792,6 +792,7 @@ module execute_fpu (
                             is_fxtract |                              // PR-2b.5q iter 131
                             is_fprem_any |                            // PR-2b.5r iter 135
                             is_fsqrt |                                // PR-2b.5t iter 137
+                            is_transc |                               // PR-2c.T iter 192: x87 transcendental group (F2XM1..FSINCOS) — WITHOUT this the op never leaves S_IDLE and silently no-ops; the unit TBs drive the engine directly so they never exercised this dispatch gate (latent since T-0)
                             is_ffree | is_fnop | is_fdecstp | is_fincstp |
                             is_fcmov_now;
     // Control-op predicate: ops whose result is a regfile-data move,
