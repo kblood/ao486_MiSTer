@@ -12,8 +12,14 @@
 //   T-3 (iter 189): FPATAN (D9 F3)  ST1 <- atan2(ST1,ST0), pop
 //   T-4 (iter 190): FSIN   (D9 FE)  ST0 <- sin(ST0)
 //                   FCOS   (D9 FF)  ST0 <- cos(ST0)
-// The remaining two (FPTAN/FSINCOS) still route here and take the deterministic
-// PASSTHROUGH (ST0 unchanged) until T-5 lands.
+//   T-5 (iter 191): FPTAN  (D9 F2)  ST0 <- tan(ST0), push 1.0  (z=tan, z2=1.0)
+//                   FSINCOS(D9 FB)  ST0 <- sin(ST0), push cos  (z=sin, z2=cos)
+// FPTAN/FSINCOS reuse the T-4 trig kernel (the engine already produces both
+// sin(r) and cos(r) every call); they output a SECOND result `z2` for the value
+// execute_fpu PUSHES onto the new stack top, and FPTAN does one extra divide
+// tan=sin/cos via the shared divider.  Out-of-range (|x|>=2^63) -> C2=1, ST0
+// unchanged, NO push (execute_fpu gates the push on ~c2).  The whole D9 Fx
+// transcendental group is now complete.
 //
 // FSIN/FCOS argument reduction (research/design_transcendentals.md, T-4 study):
 // Bochs reduces x mod pi/2 in 128-bit integer precision; we keep the Option-X80
@@ -78,8 +84,9 @@ module fpu_transcendental (
 
     output reg         done,           // 1-cycle pulse: z/flags valid
     output reg  [79:0] z,
+    output reg  [79:0] z2,              // 2nd result (FSINCOS cos / FPTAN 1.0) -> pushed top
     output reg  [5:0]  flags,           // {PE,UE,OE,ZE,DE,IE}
-    output reg         c2               // SW C2: 1 = FSIN/FCOS arg out of range
+    output reg         c2               // SW C2: 1 = FSIN/FCOS/FPTAN/FSINCOS arg out of range
 );
 
     // op-kind encoding -- MUST match execute_fpu.v's KIND_* localparams.
@@ -87,7 +94,8 @@ module fpu_transcendental (
 
     // CMDEX selectors (research/design_transcendentals.md §5).
     localparam [3:0] CMDEX_F2XM1 = 4'd0, CMDEX_FYL2X = 4'd1, CMDEX_FPATAN = 4'd3,
-                     CMDEX_FYL2XP1 = 4'd4, CMDEX_FSIN = 4'd5, CMDEX_FCOS = 4'd6;
+                     CMDEX_FYL2XP1 = 4'd4, CMDEX_FSIN = 4'd5, CMDEX_FCOS = 4'd6,
+                     CMDEX_FPTAN = 4'd2, CMDEX_FSINCOS = 4'd7;
 
     // Settle dwell per shared-arith op (>= ARITH_WAIT_CYCLES / sdc -setup N).
     localparam [4:0] WAIT = 5'd12;
@@ -348,7 +356,9 @@ module fpu_transcendental (
         TR_X2   = 6'd40,                                              // rr = r*r
         TR_S_MUL= 6'd41, TR_S_ADD= 6'd42, TR_S_OUT= 6'd43,           // sin Horner+outer
         TR_C_MUL= 6'd44, TR_C_ADD= 6'd45,                            // cos Horner
-        TR_QUAD = 6'd46;                                             // quadrant select
+        TR_QUAD = 6'd46,                                             // quadrant select
+        // FPTAN (T-5): tan = sin_sel / cos_sel via the shared divider
+        TR_TDSET= 6'd47, TR_TDWAIT= 6'd48;
 
     reg [5:0]  phase;
     reg [4:0]  settle;
@@ -370,8 +380,9 @@ module fpu_transcendental (
     reg        at_zsign;  // aSign ^ bSign (negate magnitude result)
     reg        at_bsign;  // bSign (quadrant +/- pi selector)
 
-    // FSIN/FCOS (T-4) state
-    reg        want_cos_reg; // 0 = sin(ST0), 1 = cos(ST0)
+    // FSIN/FCOS (T-4) + FPTAN/FSINCOS (T-5) state
+    reg [1:0]  trig_op;      // 0=FSIN, 1=FCOS, 2=FSINCOS, 3=FPTAN
+    reg        want_cos_reg; // 0 = sin(ST0), 1 = cos(ST0)  (kept for FSIN/FCOS)
     reg [1:0]  qq_reg;       // quadrant = q & 3
     reg [79:0] qhiS_reg;     // q hi chunk (mult of 2^32) as floatx80
     reg [79:0] qloF_reg;     // q lo chunk (< 2^32) as floatx80
@@ -382,6 +393,14 @@ module fpu_transcendental (
     //                           idx 0,1 -> HP0 ; 2,3 -> HP1 ; 4,5 -> HP2.
     wire [79:0] red_chunk = red_idx[0] ? qloF_reg : qhiS_reg;
     wire [79:0] red_P     = (red_idx < 3'd2) ? HP0 : (red_idx < 3'd4) ? HP1 : HP2;
+    // quadrant-selected sin(x)/cos(x) from the reduced poly results sin_reg/cos_reg.
+    // FSIN(x)=[sin,cos,-sin,-cos][qq] ; FCOS(x)=[cos,-sin,-cos,sin][qq].
+    wire [79:0] neg_sin_w = {~sin_reg[79], sin_reg[78:0]};
+    wire [79:0] neg_cos_w = {~cos_reg[79], cos_reg[78:0]};
+    wire [79:0] sin_sel_w = (qq_reg==2'd0) ? sin_reg  : (qq_reg==2'd1) ? cos_reg :
+                            (qq_reg==2'd2) ? neg_sin_w : neg_cos_w;
+    wire [79:0] cos_sel_w = (qq_reg==2'd0) ? cos_reg  : (qq_reg==2'd1) ? neg_sin_w :
+                            (qq_reg==2'd2) ? neg_cos_w : sin_reg;
 
     // reduce a normalized (rExp,rSig) -> xred + ExpDiff helper, used at two
     // entry points (FYL2X start from a, FYL2XP1-big from a+1).
@@ -532,19 +551,26 @@ module fpu_transcendental (
                             phase <= AT_DSET;
                         end
                     end
-                    else if (cmdex == CMDEX_FSIN || cmdex == CMDEX_FCOS) begin
+                    else if (cmdex == CMDEX_FSIN || cmdex == CMDEX_FCOS ||
+                             cmdex == CMDEX_FPTAN || cmdex == CMDEX_FSINCOS) begin
                         want_cos_reg <= (cmdex == CMDEX_FCOS);
+                        trig_op <= (cmdex == CMDEX_FSIN)    ? 2'd0 :
+                                   (cmdex == CMDEX_FCOS)    ? 2'd1 :
+                                   (cmdex == CMDEX_FSINCOS) ? 2'd2 : 2'd3; // FPTAN
                         if (a_nan) begin
-                            z <= {a[79],15'h7FFF,1'b1,a[62:0]};
+                            z  <= {a[79],15'h7FFF,1'b1,a[62:0]};
+                            z2 <= {a[79],15'h7FFF,1'b1,a[62:0]};  // FSINCOS/FPTAN push QNaN too
                             flags <= a_snan ? 6'b000001 : 6'd0; phase <= P_DONE;
                         end else if (a_inf) begin
-                            z <= DEFNAN; flags <= 6'b000001; phase <= P_DONE; // #IA
+                            z <= DEFNAN; z2 <= DEFNAN; flags <= 6'b000001; phase <= P_DONE; // #IA
                         end else if (aExp == 15'h0) begin
-                            // zero -> sin=a / cos=1 ; denormal -> same (+PE+DE)
-                            z <= (cmdex == CMDEX_FCOS) ? ONE : a;
+                            // zero -> sin=a / cos=1 / tan=a ; pushed value (z2) = 1.0
+                            // FSINCOS: ST0<-sin(a)=a, push cos=1 ; FPTAN: ST0<-tan(a)=a, push 1
+                            z  <= (cmdex == CMDEX_FCOS) ? ONE : a;
+                            z2 <= ONE;
                             flags <= a_den ? 6'b100010 : 6'd0; phase <= P_DONE;
                         end else if (aExp >= 15'h403E) begin
-                            // |x| >= 2^63 : x87 out-of-range -> ST0 unchanged, C2=1
+                            // |x| >= 2^63 : x87 out-of-range -> ST0 unchanged, C2=1, NO push
                             z <= a; flags <= 6'd0; c2 <= 1'b1; phase <= P_DONE;
                         end else if (aExp < 15'h3FFE) begin
                             // |x| < 0.5 : q=0, r=x -> straight to poly (rr = x*x)
@@ -558,7 +584,7 @@ module fpu_transcendental (
                         end
                     end
                     else begin
-                        // T-5 (FSINCOS/FPTAN) not yet implemented: passthrough ST(0)
+                        // (no remaining transcendental opcodes) passthrough ST(0)
                         z <= a; flags <= 6'd0; phase <= P_DONE;
                     end
                 end
@@ -827,21 +853,27 @@ module fpu_transcendental (
                         cnt<=cnt-4'd1; settle<=WAIT; phase<=TR_C_MUL;
                     end
                 end else settle<=settle-5'd1;
-                // quadrant select.  FSIN: [sin,cos,-sin,-cos][qq].
-                //                    FCOS: [cos,-sin,-cos,sin][qq].
+                // quadrant select + per-op routing.
+                //   FSIN    -> z = sin(x)
+                //   FCOS    -> z = cos(x)
+                //   FSINCOS -> z = sin(x) (old ST0), z2 = cos(x) (pushed)
+                //   FPTAN   -> z = sin(x)/cos(x) (divide), z2 = 1.0 (pushed)
                 TR_QUAD: begin
-                    case ({want_cos_reg, qq_reg})
-                        3'b0_00: z <= sin_reg;
-                        3'b0_01: z <= cos_reg;
-                        3'b0_10: z <= {~sin_reg[79], sin_reg[78:0]};
-                        3'b0_11: z <= {~cos_reg[79], cos_reg[78:0]};
-                        3'b1_00: z <= cos_reg;
-                        3'b1_01: z <= {~sin_reg[79], sin_reg[78:0]};
-                        3'b1_10: z <= {~cos_reg[79], cos_reg[78:0]};
-                        3'b1_11: z <= sin_reg;
+                    case (trig_op)
+                        2'd0: begin z <= sin_sel_w; phase <= P_DONE; end       // FSIN
+                        2'd1: begin z <= cos_sel_w; phase <= P_DONE; end       // FCOS
+                        2'd2: begin z <= sin_sel_w; z2 <= cos_sel_w; phase <= P_DONE; end // FSINCOS
+                        default: begin                                         // FPTAN: tan=sin/cos
+                            arith_a <= sin_sel_w; arith_b <= cos_sel_w;
+                            arith_op <= KIND_DIV; settle <= WAIT; z2 <= ONE;
+                            phase <= TR_TDSET;
+                        end
                     endcase
-                    phase <= P_DONE;
                 end
+                // FPTAN divide handshake: tan = sin_sel / cos_sel via shared u_div
+                TR_TDSET: if (settle==0) begin div_start<=1'b1; phase<=TR_TDWAIT; end
+                          else settle<=settle-5'd1;
+                TR_TDWAIT: if (div_done) begin z<=div_z; phase<=P_DONE; end
 
                 P_DONE: begin done<=1'b1; phase<=P_IDLE; end
                 default: phase<=P_IDLE;

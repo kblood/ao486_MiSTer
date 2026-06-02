@@ -527,12 +527,18 @@ module execute_fpu (
     // joins this set now that T-3 (iter 189) computes a real result.
     wire is_transc_log     = is_transc && ((exe_cmdex == 4'd1) || (exe_cmdex == 4'd3) ||
                                            (exe_cmdex == 4'd4));
-    // PR-2c.T-4 (iter 190): FSIN (CMDEX 5) / FCOS (CMDEX 6) are ONE-source,
-    // in-place ST(0) writers (NOT in is_transc_log -> no pop, no ST(1) read).
-    // They additionally set SW.C2 (1 = argument out of range, |x|>=2^63) via the
-    // existing FXAM/cmp cc_we path — NOT the late-pulse EFLAGS override — because
-    // C2 is an FPU status-word bit, not an integer EFLAG.
-    wire is_transc_trig    = is_transc && ((exe_cmdex == 4'd5) || (exe_cmdex == 4'd6));
+    // PR-2c.T-4/T-5: the four TRIG transcendentals — FSIN (5), FCOS (6), FPTAN
+    // (2), FSINCOS (7) — are ONE-source reads of ST(0) (NOT in is_transc_log -> no
+    // ST(1) read) and set SW.C2 (1 = arg out of range, |x|>=2^63) via the existing
+    // FXAM/cmp cc_we path (C2 is an FPU SW bit, not an integer EFLAG).
+    wire is_transc_trig    = is_transc && ((exe_cmdex == 4'd5) || (exe_cmdex == 4'd6) ||
+                                           (exe_cmdex == 4'd2) || (exe_cmdex == 4'd7));
+    // PR-2c.T-5 (iter 191): FPTAN (2) / FSINCOS (7) compute a SECOND result and
+    // PUSH it onto the stack (FSINCOS: ST0<-sin, push cos ; FPTAN: ST0<-tan, push
+    // 1.0).  They write ST0 at S_RETIRE then push the engine's z2 at S_TRANSCPUSH
+    // (mirrors the FXTRACT S_XTRACT2 push) — UNLESS out-of-range (C2=1), where the
+    // x87 leaves ST0 unchanged and does NOT push.
+    wire is_transc_push    = is_transc && ((exe_cmdex == 4'd2) || (exe_cmdex == 4'd7));
 
     // PR-2b.3o (iter 46): comparison ops on ST(0) vs ST(i).  Dispatched via
     // the new `CMD_fpu_cmp` (7'd120).  Both operands are read via the
@@ -975,6 +981,13 @@ module execute_fpu (
                             // (~30 arith steps, each WAIT cycles); on transc_done
                             // z_lat<=transc_z / flags_lat<=transc_flags and advance
                             // to S_POST.  Invisible to outputs (gated S_RETIRE/...).
+        S_TRANSCPUSH  = 5'd17, // PR-2c.T-5 (iter 191): FPTAN/FSINCOS push leg.
+                            // S_RETIRE writes the 1st result (sin/tan) to ST(0) with
+                            // no TOP change; S_TRANSCPUSH writes the 2nd result z2_lat
+                            // (cos / 1.0) to abs_new_top and pulses top_we (top_din =
+                            // top_lat - 1) to PUSH.  fpu_done pulses here.  Mirrors
+                            // S_XTRACT2.  Skipped when out-of-range (transc_c2_lat) —
+                            // then ST0 is left unchanged and S_RETIRE is terminal.
         S_BCDLOADWAIT = 4'd15; // iter-168 (Slice 1, bcd_to_int64 sequentialize):
                             // FBLD-only multi-cycle wait.  bcd_to_int64 is now
                             // CLOCKED Horner (18 cycles).  For is_fbld_lat ops the
@@ -1164,6 +1177,7 @@ module execute_fpu (
     wire [5:0]  transc_flags;    // {PE,UE,OE,ZE,DE,IE}
     wire        transc_done;
     wire        transc_c2;       // PR-2c.T-4: FSIN/FCOS arg out-of-range -> SW.C2
+    wire [79:0] transc_z2;       // PR-2c.T-5: FPTAN/FSINCOS pushed result (cos / 1.0)
     wire [79:0] transc_arith_a;  // engine -> shared-arith left operand
     wire [79:0] transc_arith_b;  // engine -> shared-arith right operand
     wire [1:0]  transc_arith_op; // PR-2c.T-2 (iter 188): KIND_ADD/MUL/DIV request
@@ -1184,8 +1198,10 @@ module execute_fpu (
     wire       is_fprem_any_lat = is_fprem_lat | is_fprem1_lat;  // PR-2b.5r iter 135
     reg        is_fsqrt_lat;     // PR-2b.5t (iter 137)
     reg        is_transc_lat;    // PR-2c.T (iter 185+) — transcendental group, T-0 passthrough stub
-    reg        is_transc_trig_lat;// PR-2c.T-4 (iter 190) — FSIN/FCOS: pulse cc_we to set SW.C2
+    reg        is_transc_trig_lat;// PR-2c.T-4 (iter 190) — FSIN/FCOS/FPTAN/FSINCOS: pulse cc_we to set SW.C2
     reg        transc_c2_lat;    // PR-2c.T-4 — captured C2 from engine on transc_done
+    reg        is_transc_push_lat;// PR-2c.T-5 (iter 191) — FPTAN/FSINCOS: push z2 onto new top
+    reg [79:0] z2_lat;           // PR-2c.T-5 — captured 2nd result (pushed value)
     // PR-2b.3o: cmp-family latches.  is_cmp_lat covers all four ops and
     // is used to (a) gate rf_wr_en off (no data writeback), (b) drive
     // cc_we in S_RETIRE, (c) override flags_lat with the cmp-only IE
@@ -1477,6 +1493,7 @@ module execute_fpu (
             is_transc_lat   <= 1'b0;    // PR-2c.T iter 185+
             is_transc_trig_lat <= 1'b0; // PR-2c.T-4 iter 190
             transc_c2_lat   <= 1'b0;    // PR-2c.T-4 iter 190
+            is_transc_push_lat <= 1'b0; // PR-2c.T-5 iter 191
             is_cmp_lat      <= 1'b0;
             is_fucom_lat    <= 1'b0;
             is_cmpi_lat     <= 1'b0;
@@ -1550,6 +1567,7 @@ module execute_fpu (
                         is_fsqrt_lat   <= is_fsqrt;     // PR-2b.5t iter 137
                         is_transc_lat  <= is_transc;    // PR-2c.T iter 185+
                         is_transc_trig_lat <= is_transc_trig; // PR-2c.T-4 iter 190
+                        is_transc_push_lat <= is_transc_push; // PR-2c.T-5 iter 191
                         is_cmp_lat     <= is_cmp_now;
                         is_fucom_lat   <= is_cmp_unord_now;
                         is_cmpi_lat    <= is_cmpi_now;
@@ -1816,6 +1834,7 @@ module execute_fpu (
                         z_lat     <= transc_z;
                         flags_lat <= transc_flags;
                         transc_c2_lat <= transc_c2;  // PR-2c.T-4: latch FSIN/FCOS C2
+                        z2_lat    <= transc_z2;      // PR-2c.T-5: latch FPTAN/FSINCOS pushed value
                         state     <= S_POST;
                     end
                 end
@@ -1889,6 +1908,12 @@ module execute_fpu (
                     // suppresses BOTH writes (consistent with the pop gate).
                     else if (is_fxtract_lat && ~es_now)
                         state <= S_XTRACT2;
+                    // PR-2c.T-5 (iter 191): FPTAN/FSINCOS write the 1st result to
+                    // ST(0) this cycle, then S_TRANSCPUSH pushes z2.  Skip the push
+                    // (and the whole 2nd write) when out-of-range (C2=1): ST0 stays
+                    // unchanged (z_lat==a) and S_RETIRE is terminal.
+                    else if (is_transc_push_lat && ~transc_c2_lat && ~es_now)
+                        state <= S_TRANSCPUSH;
                     else if (pop_after_lat && ~es_now)
                         state <= S_POP;
                     else
@@ -1926,6 +1951,14 @@ module execute_fpu (
                 // completing the PUSH.  fpu_done pulses here.  TOP is now
                 // top_lat - 1.
                 S_XTRACT2: begin
+                    state <= S_IDLE;
+                end
+
+                // S_TRANSCPUSH (PR-2c.T-5 iter 191): second leg of FPTAN/FSINCOS.
+                // z2_lat was written to abs_new_top and top_we pulsed (top_din =
+                // top_lat - 1) in the Outputs block this cycle, completing the PUSH.
+                // fpu_done pulses here.  TOP is now top_lat - 1.
+                S_TRANSCPUSH: begin
                     state <= S_IDLE;
                 end
 
@@ -2366,6 +2399,7 @@ module execute_fpu (
         .div_done     (div_done),
         .done         (transc_done),
         .z            (transc_z),
+        .z2           (transc_z2),             // PR-2c.T-5: FPTAN/FSINCOS pushed result
         .flags        (transc_flags),
         .c2           (transc_c2)              // PR-2c.T-4: FSIN/FCOS out-of-range
     );
@@ -2469,9 +2503,11 @@ module execute_fpu (
                       ((state == S_POP) && ~pop_twice_lat) ||
                       (state == S_FXCH2) ||
                       (state == S_XTRACT2) ||
+                      (state == S_TRANSCPUSH) ||                      // PR-2c.T-5 iter 191
                       ((state == S_RETIRE) && !is_fxch_lat
                                            && !(pop_after_lat && ~es_now)
-                                           && !(is_fxtract_lat && ~es_now));
+                                           && !(is_fxtract_lat && ~es_now)
+                                           && !(is_transc_push_lat && ~transc_c2_lat && ~es_now));
 
     // PR-2c.26 (iter 179): the m32 + m64 NARROWING converters are now SHARED.
     // FST/FSTP m32 and FST/FSTP m64 never co-occur, so a single runtime-muxed
@@ -2777,6 +2813,7 @@ module execute_fpu (
     assign top_din              = (state == S_POP)  ? (top_lat + 3'd1) :
                                   (state == S_POP2) ? (top_lat + 3'd2) :
                                   (state == S_XTRACT2) ? abs_new_top   :  // PR-2b.5q iter 131: FXTRACT push (top_lat-1)
+                                  (state == S_TRANSCPUSH) ? abs_new_top :  // PR-2c.T-5 iter 191: FPTAN/FSINCOS push
                                   (is_fld_lat |
                                    is_fld_mem_lat |
                                    is_fld_m80_lat |                       // PR-2b.5g iter 124
@@ -2788,6 +2825,7 @@ module execute_fpu (
     assign top_we               = (state == S_POP) ||
                                   (state == S_POP2) ||
                                   (state == S_XTRACT2) ||                 // PR-2b.5q iter 131: FXTRACT push
+                                  (state == S_TRANSCPUSH) ||              // PR-2c.T-5 iter 191: FPTAN/FSINCOS push
                                   ((state == S_RETIRE) && (is_fld_lat |
                                                            is_fld_mem_lat |    // PR-2b.4k iter 77
                                                            is_fld_m80_lat |    // PR-2b.5g iter 124
@@ -2825,6 +2863,7 @@ module execute_fpu (
                         (state == S_XTRACT2)? abs_new_top :   // PR-2b.5q iter 131: significand -> pushed ST(0)
                                                               // (S_RETIRE writes the exponent to ST(0) via the
                                                               // abs_st0 fall-through below)
+                        (state == S_TRANSCPUSH)? abs_new_top :// PR-2c.T-5 iter 191: z2 -> pushed ST(0)
                         is_fxch_lat         ? abs_st0     :
                         (is_fld_lat |
                          is_fld_mem_lat |
@@ -2843,6 +2882,8 @@ module execute_fpu (
     assign rf_wr_data = (state == S_XTRACT2) ? extract_sig :  // PR-2b.5q iter 131: significand -> pushed ST(0)
                                                               // (guard first: is_fxtract_lat is still true here, but
                                                               //  the exponent arm below must only fire at S_RETIRE)
+                        (state == S_TRANSCPUSH) ? z2_lat :    // PR-2c.T-5 iter 191: 2nd result (cos/1.0) -> pushed ST(0)
+                                                              // (is_transc_lat still true; S_RETIRE wrote transc_z to ST0)
                         (state == S_FXCH2) ? a_lat :
                         is_fxch_lat        ? b_lat :
                         is_fld_lat         ? b_lat :          // old ST(i) data (reg-form)
@@ -2929,9 +2970,17 @@ module execute_fpu (
                             (transc_z[78:64] == 15'h7FFF)  ? 2'b10 :  // NaN/Inf
                             (transc_z[78:64] == 15'h0)     ? 2'b10 :  // denormal/pseudo-denormal -> Special
                                                              2'b00;   // Valid
+    // PR-2c.T-5 (iter 191): classify the SECOND (pushed) result z2_lat for
+    // FSINCOS (cos) / FPTAN (1.0).  cos is finite normal/Zero; the 1.0 const
+    // is Valid; NaN/Inf passthroughs on the special paths classify here too.
+    wire [1:0] transc_z2_tag = (z2_lat[78:0]  == 79'd0)     ? 2'b01 :  // Zero
+                               (z2_lat[78:64] == 15'h7FFF)  ? 2'b10 :  // NaN/Inf
+                               (z2_lat[78:64] == 15'h0)     ? 2'b10 :  // denormal/pseudo-denormal -> Special
+                                                              2'b00;   // Valid
     assign rf_wr_tag  = (state == S_POP)    ? 2'b11         :  // Empty
                         (state == S_POP2)   ? 2'b11         :  // PR-2b.3q: Empty (second pop)
                         (state == S_XTRACT2)? extract_sig_tag :  // PR-2b.5q iter 131: significand tag (guard first)
+                        (state == S_TRANSCPUSH)? transc_z2_tag :  // PR-2c.T-5 iter 191: pushed 2nd-result tag (cos/1.0)
                         (state == S_FXCH2)  ? st0_tag_lat   :  // FXCH tag swap
                         is_fxch_lat         ? stsrc_tag_lat :  // first FXCH write
                         is_fld_lat          ? stsrc_tag_lat :  // copy ST(i) tag (reg-form FLD)
@@ -2978,7 +3027,8 @@ module execute_fpu (
                         (state == S_POP) ||
                         (state == S_POP2) ||    // PR-2b.3q: second tag-Empty write
                         (state == S_FXCH2) ||
-                        (state == S_XTRACT2);   // PR-2b.5q iter 131: significand push write
+                        (state == S_XTRACT2) ||  // PR-2b.5q iter 131: significand push write
+                        (state == S_TRANSCPUSH); // PR-2c.T-5 iter 191: FSINCOS/FPTAN 2nd-result push write
 
     //--------------------------------------------------------------------
     // PR-2b.3n: FXAM classification on a_lat.  Intel SDM Vol 1 §8.3.5 /
