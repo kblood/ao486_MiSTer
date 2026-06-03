@@ -100,44 +100,89 @@ module fpu_transcendental (
     // Settle dwell per shared-arith op (>= ARITH_WAIT_CYCLES / sdc -setup N).
     localparam [4:0] WAIT = 5'd12;
 
-    // ----- F2XM1 coefficient ROM: exp_arr[i] = floatx80(1/(i+1)!) -----------
-    function [79:0] exp_coeff(input [3:0] i);
-        case (i)
-            4'd0 : exp_coeff = 80'h3fff8000000000000000; // 1/1!
-            4'd1 : exp_coeff = 80'h3ffe8000000000000000; // 1/2!
-            4'd2 : exp_coeff = 80'h3ffcaaaaaaaaaaaaaaab; // 1/3!
-            4'd3 : exp_coeff = 80'h3ffaaaaaaaaaaaaaaaab; // 1/4!
-            4'd4 : exp_coeff = 80'h3ff88888888888888889; // 1/5!
-            4'd5 : exp_coeff = 80'h3ff5b60b60b60b60b60b; // 1/6!
-            4'd6 : exp_coeff = 80'h3ff2d00d00d00d00d00d; // 1/7!
-            4'd7 : exp_coeff = 80'h3fefd00d00d00d00d00d; // 1/8!
-            4'd8 : exp_coeff = 80'h3fecb8ef1d2ab6399c7d; // 1/9!
-            4'd9 : exp_coeff = 80'h3fe993f27dbbc4fae397; // 1/10!
-            4'd10: exp_coeff = 80'h3fe5d7322b3faa271c7f; // 1/11!
-            4'd11: exp_coeff = 80'h3fe28f76c77fc6c4bdaa; // 1/12!
-            4'd12: exp_coeff = 80'h3fdeb092309d43684be5; // 1/13!
-            4'd13: exp_coeff = 80'h3fdac9cba54603e4e906; // 1/14!
-            4'd14: exp_coeff = 80'h3fd6d73f9f399dc0f88f; // 1/15!
-            default: exp_coeff = 80'h3fff8000000000000000;
-        endcase
-    endfunction
-
-    // ----- FYL2X coefficient ROM: ln_arr[i], floatx80-truncated -------------
-    // OddPoly over u^2: 1, 1/3, 1/5, 1/7, ... 1/17 (indices 0..8).
-    function [79:0] ln_coeff(input [3:0] i);
-        case (i)
-            4'd0 : ln_coeff = 80'h3fff8000000000000000; // 1
-            4'd1 : ln_coeff = 80'h3ffdaaaaaaaaaaaaaaab; // 1/3
-            4'd2 : ln_coeff = 80'h3ffccccccccccccccccd; // 1/5
-            4'd3 : ln_coeff = 80'h3ffc9249249249249249; // 1/7
-            4'd4 : ln_coeff = 80'h3ffbe38e38e38e38e38e; // 1/9
-            4'd5 : ln_coeff = 80'h3ffbba2e8ba2e8ba2e8c; // 1/11
-            4'd6 : ln_coeff = 80'h3ffb9d89d89d89d89d8a; // 1/13
-            4'd7 : ln_coeff = 80'h3ffb8888888888888889; // 1/15
-            4'd8 : ln_coeff = 80'h3ffaf0f0f0f0f0f0f0f1; // 1/17
-            default: ln_coeff = 80'h3fff8000000000000000;
-        endcase
-    endfunction
+    // ----- unified transcendental coefficient ROM (iter-192 area dedup) ------
+    // The 5 per-op coeff tables (exp/ln/atan/sin/cos) used to be combinational
+    // case lookups, which on Cyclone V synthesize to ALMs (async memory maps to
+    // logic cells) -- ~the ALM overflow that kept the group from fitting.  Pack
+    // them into ONE SYNCHRONOUS ROM (bank=op, idx=Horner index) so Quartus maps
+    // the constants into M10K instead of ALMs.  The read is REGISTERED (coeff_q,
+    // 1-cycle latency) and prefetched during the WAIT=12 settle dwell before
+    // arith_b consumes it, so the value is bit-IDENTICAL to the old functions.
+    // Address = {bank[2:0], idx[3:0]} : bank0=exp(0..14) bank1=ln(0..8)
+    // bank2=atan(0..10) bank3=sin(0..10) bank4=cos(0..10).  Read logic + bank
+    // select live after the phase/cnt decls (they reference them).
+    (* ramstyle = "M10K" *) reg [79:0] coeff_rom [0:127];
+    initial begin
+        // bank 0 -- F2XM1 exp_arr[i] = 1/(i+1)!
+        coeff_rom[  0] = 80'h3fff8000000000000000; // 1/1!
+        coeff_rom[  1] = 80'h3ffe8000000000000000; // 1/2!
+        coeff_rom[  2] = 80'h3ffcaaaaaaaaaaaaaaab; // 1/3!
+        coeff_rom[  3] = 80'h3ffaaaaaaaaaaaaaaaab; // 1/4!
+        coeff_rom[  4] = 80'h3ff88888888888888889; // 1/5!
+        coeff_rom[  5] = 80'h3ff5b60b60b60b60b60b; // 1/6!
+        coeff_rom[  6] = 80'h3ff2d00d00d00d00d00d; // 1/7!
+        coeff_rom[  7] = 80'h3fefd00d00d00d00d00d; // 1/8!
+        coeff_rom[  8] = 80'h3fecb8ef1d2ab6399c7d; // 1/9!
+        coeff_rom[  9] = 80'h3fe993f27dbbc4fae397; // 1/10!
+        coeff_rom[ 10] = 80'h3fe5d7322b3faa271c7f; // 1/11!
+        coeff_rom[ 11] = 80'h3fe28f76c77fc6c4bdaa; // 1/12!
+        coeff_rom[ 12] = 80'h3fdeb092309d43684be5; // 1/13!
+        coeff_rom[ 13] = 80'h3fdac9cba54603e4e906; // 1/14!
+        coeff_rom[ 14] = 80'h3fd6d73f9f399dc0f88f; // 1/15!
+        // bank 1 -- FYL2X ln_arr[i] = 1/(2i+1)  (OddPoly over u^2)
+        coeff_rom[ 16] = 80'h3fff8000000000000000; // 1
+        coeff_rom[ 17] = 80'h3ffdaaaaaaaaaaaaaaab; // 1/3
+        coeff_rom[ 18] = 80'h3ffccccccccccccccccd; // 1/5
+        coeff_rom[ 19] = 80'h3ffc9249249249249249; // 1/7
+        coeff_rom[ 20] = 80'h3ffbe38e38e38e38e38e; // 1/9
+        coeff_rom[ 21] = 80'h3ffbba2e8ba2e8ba2e8c; // 1/11
+        coeff_rom[ 22] = 80'h3ffb9d89d89d89d89d8a; // 1/13
+        coeff_rom[ 23] = 80'h3ffb8888888888888889; // 1/15
+        coeff_rom[ 24] = 80'h3ffaf0f0f0f0f0f0f0f1; // 1/17
+        // bank 2 -- FPATAN atan_arr[i] = (-1)^i/(2i+1)  (OddPoly over x^2)
+        coeff_rom[ 32] = 80'h3fff8000000000000000; //  1
+        coeff_rom[ 33] = 80'hbffdaaaaaaaaaaaaaaab; // -1/3
+        coeff_rom[ 34] = 80'h3ffccccccccccccccccd; //  1/5
+        coeff_rom[ 35] = 80'hbffc9249249249249249; // -1/7
+        coeff_rom[ 36] = 80'h3ffbe38e38e38e38e38e; //  1/9
+        coeff_rom[ 37] = 80'hbffbba2e8ba2e8ba2e8c; // -1/11
+        coeff_rom[ 38] = 80'h3ffb9d89d89d89d89d8a; //  1/13
+        coeff_rom[ 39] = 80'hbffb8888888888888889; // -1/15
+        coeff_rom[ 40] = 80'h3ffaf0f0f0f0f0f0f0f1; //  1/17
+        coeff_rom[ 41] = 80'hbffad79435e50d79435e; // -1/19
+        coeff_rom[ 42] = 80'h3ffac30c30c30c30c30c; //  1/21
+        // bank 3 -- FSIN sin_arr[i] = (-1)^i/(2i+1)!  (OddPoly over r^2, outer *r)
+        coeff_rom[ 48] = 80'h3fff8000000000000000; //  1
+        coeff_rom[ 49] = 80'hbffcaaaaaaaaaaaaaaab; // -1/3!
+        coeff_rom[ 50] = 80'h3ff88888888888888889; //  1/5!
+        coeff_rom[ 51] = 80'hbff2d00d00d00d00d00d; // -1/7!
+        coeff_rom[ 52] = 80'h3fecb8ef1d2ab6399c7d; //  1/9!
+        coeff_rom[ 53] = 80'hbfe5d7322b3faa271c7f; // -1/11!
+        coeff_rom[ 54] = 80'h3fdeb092309d43684be5; //  1/13!
+        coeff_rom[ 55] = 80'hbfd6d73f9f399dc0f88f; // -1/15!
+        coeff_rom[ 56] = 80'h3fceca963b81856a5359; //  1/17!
+        coeff_rom[ 57] = 80'hbfc697a4da340a0ab926; // -1/19!
+        coeff_rom[ 58] = 80'h3fbdb8dc77b6e7ab8c5f; //  1/21!
+        // bank 4 -- FCOS cos_arr[i] = (-1)^i/(2i)!  (EvenPoly over r^2)
+        coeff_rom[ 64] = 80'h3fff8000000000000000; //  1
+        coeff_rom[ 65] = 80'hbffe8000000000000000; // -1/2!
+        coeff_rom[ 66] = 80'h3ffaaaaaaaaaaaaaaaab; //  1/4!
+        coeff_rom[ 67] = 80'hbff5b60b60b60b60b60b; // -1/6!
+        coeff_rom[ 68] = 80'h3fefd00d00d00d00d00d; //  1/8!
+        coeff_rom[ 69] = 80'hbfe993f27dbbc4fae397; // -1/10!
+        coeff_rom[ 70] = 80'h3fe28f76c77fc6c4bdaa; //  1/12!
+        coeff_rom[ 71] = 80'hbfdac9cba54603e4e906; // -1/14!
+        coeff_rom[ 72] = 80'h3fd2d73f9f399dc0f88f; //  1/16!
+        coeff_rom[ 73] = 80'hbfcab413c31dcbecbbde; // -1/18!
+        coeff_rom[ 74] = 80'h3fc1f2a15d201011283d; //  1/20!
+    end
+    // Horner-seed constants (highest-order term, constant index -> literals,
+    // fold to constants, never hit the ROM):
+    localparam [79:0] EXP_SEED  = 80'h3fd6d73f9f399dc0f88f; // exp_coeff(14)=1/15!
+    localparam [79:0] LN_SEED   = 80'h3ffaf0f0f0f0f0f0f0f1; // ln_coeff(8)=1/17
+    localparam [79:0] ATAN_SEED = 80'h3ffac30c30c30c30c30c; // atan_coeff(10)=1/21
+    localparam [79:0] SIN_SEED  = 80'h3fbdb8dc77b6e7ab8c5f; // sin_coeff(10)=1/21!
+    localparam [79:0] COS_SEED  = 80'h3fc1f2a15d201011283d; // cos_coeff(10)=1/20!
 
     localparam [79:0] LN2      = 80'h3ffeb17217f7d1cf79ac; // ln2
     localparam [79:0] LN2INV2  = 80'h4000b8aa3b295c17f0bc; // 2/ln2
@@ -157,25 +202,6 @@ module fpu_transcendental (
     localparam [79:0] THREEPI4  = 80'h400096cbe3f9990e91a8; //  3pi/4
     localparam [79:0] SQRT3_80  = 80'h3fffddb3d742c265539e; //  sqrt(3)
 
-    // ----- FPATAN coefficient ROM: atan_arr[i], floatx80-truncated ---------
-    // OddPoly over x^2: 1, -1/3, 1/5, -1/7, ... 1/21 (indices 0..10).
-    function [79:0] atan_coeff(input [3:0] i);
-        case (i)
-            4'd0 : atan_coeff = 80'h3fff8000000000000000; //  1
-            4'd1 : atan_coeff = 80'hbffdaaaaaaaaaaaaaaab; // -1/3
-            4'd2 : atan_coeff = 80'h3ffccccccccccccccccd; //  1/5
-            4'd3 : atan_coeff = 80'hbffc9249249249249249; // -1/7
-            4'd4 : atan_coeff = 80'h3ffbe38e38e38e38e38e; //  1/9
-            4'd5 : atan_coeff = 80'hbffbba2e8ba2e8ba2e8c; // -1/11
-            4'd6 : atan_coeff = 80'h3ffb9d89d89d89d89d8a; //  1/13
-            4'd7 : atan_coeff = 80'hbffb8888888888888889; // -1/15
-            4'd8 : atan_coeff = 80'h3ffaf0f0f0f0f0f0f0f1; //  1/17
-            4'd9 : atan_coeff = 80'hbffad79435e50d79435e; // -1/19
-            4'd10: atan_coeff = 80'h3ffac30c30c30c30c30c; //  1/21
-            default: atan_coeff = 80'h3fff8000000000000000;
-        endcase
-    endfunction
-
     // ----- FSIN/FCOS argument-reduction constants (T-4) --------------------
     // 2/pi, and a 3-part Cody-Waite pi/2: HP0,HP1 have their low 32 significand
     // bits zeroed so qchunk*HPi (each <=32 sig bits) is EXACT; HP2 carries the
@@ -184,42 +210,6 @@ module fpu_transcendental (
     localparam [79:0] HP0 = 80'h3fffc90fdaa200000000;         // pi/2 hi   (lo32=0)
     localparam [79:0] HP1 = 80'h3fdd85a308d300000000;         // pi/2 mid  (lo32=0)
     localparam [79:0] HP2 = 80'h3fba98cc51701b839a25;         // pi/2 lo   (full)
-
-    // ----- FSIN poly ROM: sin_arr[i] (OddPoly over r^2, outer *r) ----------
-    function [79:0] sin_coeff(input [3:0] i);
-        case (i)
-            4'd0 : sin_coeff = 80'h3fff8000000000000000; //  1
-            4'd1 : sin_coeff = 80'hbffcaaaaaaaaaaaaaaab; // -1/3!
-            4'd2 : sin_coeff = 80'h3ff88888888888888889; //  1/5!
-            4'd3 : sin_coeff = 80'hbff2d00d00d00d00d00d; // -1/7!
-            4'd4 : sin_coeff = 80'h3fecb8ef1d2ab6399c7d; //  1/9!
-            4'd5 : sin_coeff = 80'hbfe5d7322b3faa271c7f; // -1/11!
-            4'd6 : sin_coeff = 80'h3fdeb092309d43684be5; //  1/13!
-            4'd7 : sin_coeff = 80'hbfd6d73f9f399dc0f88f; // -1/15!
-            4'd8 : sin_coeff = 80'h3fceca963b81856a5359; //  1/17!
-            4'd9 : sin_coeff = 80'hbfc697a4da340a0ab926; // -1/19!
-            4'd10: sin_coeff = 80'h3fbdb8dc77b6e7ab8c5f; //  1/21!
-            default: sin_coeff = 80'h3fff8000000000000000;
-        endcase
-    endfunction
-
-    // ----- FCOS poly ROM: cos_arr[i] (EvenPoly over r^2, no outer mul) ------
-    function [79:0] cos_coeff(input [3:0] i);
-        case (i)
-            4'd0 : cos_coeff = 80'h3fff8000000000000000; //  1
-            4'd1 : cos_coeff = 80'hbffe8000000000000000; // -1/2!
-            4'd2 : cos_coeff = 80'h3ffaaaaaaaaaaaaaaaab; //  1/4!
-            4'd3 : cos_coeff = 80'hbff5b60b60b60b60b60b; // -1/6!
-            4'd4 : cos_coeff = 80'h3fefd00d00d00d00d00d; //  1/8!
-            4'd5 : cos_coeff = 80'hbfe993f27dbbc4fae397; // -1/10!
-            4'd6 : cos_coeff = 80'h3fe28f76c77fc6c4bdaa; //  1/12!
-            4'd7 : cos_coeff = 80'hbfdac9cba54603e4e906; // -1/14!
-            4'd8 : cos_coeff = 80'h3fd2d73f9f399dc0f88f; //  1/16!
-            4'd9 : cos_coeff = 80'hbfcab413c31dcbecbbde; // -1/18!
-            4'd10: cos_coeff = 80'h3fc1f2a15d201011283d; //  1/20!
-            default: cos_coeff = 80'h3fff8000000000000000;
-        endcase
-    endfunction
 
     // ----- combinational helpers -------------------------------------------
     // count leading zeros of a 64-bit significand (0..63)
@@ -363,6 +353,21 @@ module fpu_transcendental (
     reg [5:0]  phase;
     reg [4:0]  settle;
     reg [3:0]  cnt;       // Horner index
+
+    // Synchronous coeff-ROM read (iter-192 area dedup).  The active Horner MUL
+    // phase picks the bank; the index is always cnt-1 (every loop reads
+    // coeff(cnt-1)).  coeff_addr is stable for the whole WAIT=12 dwell, so the
+    // 1-cycle-latency coeff_q is valid long before arith_b<=coeff_q consumes it
+    // at settle==0 -> bit-identical to the old combinational lookups.
+    reg  [79:0] coeff_q;
+    wire [2:0]  coeff_bank = (phase == LG_HMUL)  ? 3'd1 :   // FYL2X ln
+                             (phase == AT_P_MUL) ? 3'd2 :   // FPATAN atan
+                             (phase == TR_S_MUL) ? 3'd3 :   // FSIN sin
+                             (phase == TR_C_MUL) ? 3'd4 :   // FCOS cos
+                                                   3'd0;    // E_LMUL / default exp
+    wire [6:0]  coeff_addr = {coeff_bank, (cnt - 4'd1)};    // bank*16 + (cnt-1)
+    always @(posedge clk) coeff_q <= coeff_rom[coeff_addr];
+
     reg [79:0] t_reg;     // F2XM1 t ; log: u^2
     reg [79:0] u_reg;     // log: u (OddPoly outer factor)
     reg [79:0] den_reg;   // log: divide denominator (x+1 or a+2)
@@ -591,11 +596,11 @@ module fpu_transcendental (
 
                 // ---------------- F2XM1 (unchanged math) -----------------
                 E_XLN2: if (settle==0) begin
-                    t_reg<=arith_z; arith_a<=exp_coeff(4'd14); arith_b<=arith_z;
+                    t_reg<=arith_z; arith_a<=EXP_SEED; arith_b<=arith_z;
                     arith_op<=KIND_MUL; cnt<=4'd14; settle<=WAIT; phase<=E_LMUL;
                 end else settle<=settle-5'd1;
                 E_LMUL: if (settle==0) begin
-                    arith_a<=arith_z; arith_b<=exp_coeff(cnt-4'd1);
+                    arith_a<=arith_z; arith_b<=coeff_q;
                     arith_op<=KIND_ADD; settle<=WAIT; phase<=E_LADD;
                 end else settle<=settle-5'd1;
                 E_LADD: if (settle==0) begin
@@ -637,11 +642,11 @@ module fpu_transcendental (
                 end
                 LG_U2: if (settle==0) begin
                     t_reg<=arith_z;              // u^2
-                    arith_a<=ln_coeff(4'd8); arith_b<=arith_z; arith_op<=KIND_MUL;
+                    arith_a<=LN_SEED; arith_b<=arith_z; arith_op<=KIND_MUL;
                     cnt<=4'd8; settle<=WAIT; phase<=LG_HMUL;
                 end else settle<=settle-5'd1;
                 LG_HMUL: if (settle==0) begin
-                    arith_a<=arith_z; arith_b<=ln_coeff(cnt-4'd1); arith_op<=KIND_ADD;
+                    arith_a<=arith_z; arith_b<=coeff_q; arith_op<=KIND_ADD;
                     settle<=WAIT; phase<=LG_HADD;
                 end else settle<=settle-5'd1;
                 LG_HADD: if (settle==0) begin
@@ -734,11 +739,11 @@ module fpu_transcendental (
                 // OddPoly(x, atan_arr, 11): x * Horner(x^2, arr[10..0])
                 AT_P_X2: if (settle==0) begin
                     t_reg <= arith_z;                       // x^2
-                    arith_a <= atan_coeff(4'd10); arith_b <= arith_z; arith_op <= KIND_MUL;
+                    arith_a <= ATAN_SEED; arith_b <= arith_z; arith_op <= KIND_MUL;
                     cnt <= 4'd10; settle <= WAIT; phase <= AT_P_MUL;
                 end else settle<=settle-5'd1;
                 AT_P_MUL: if (settle==0) begin
-                    arith_a <= arith_z; arith_b <= atan_coeff(cnt-4'd1); arith_op <= KIND_ADD;
+                    arith_a <= arith_z; arith_b <= coeff_q; arith_op <= KIND_ADD;
                     settle <= WAIT; phase <= AT_P_ADD;
                 end else settle<=settle-5'd1;
                 AT_P_ADD: if (settle==0) begin
@@ -820,11 +825,11 @@ module fpu_transcendental (
                 // rr settled -> start sin Horner: acc = sin[10]*rr
                 TR_X2: if (settle==0) begin
                     t_reg<=arith_z;                  // rr
-                    arith_a<=sin_coeff(4'd10); arith_b<=arith_z; arith_op<=KIND_MUL;
+                    arith_a<=SIN_SEED; arith_b<=arith_z; arith_op<=KIND_MUL;
                     cnt<=4'd10; settle<=WAIT; phase<=TR_S_MUL;
                 end else settle<=settle-5'd1;
                 TR_S_MUL: if (settle==0) begin
-                    arith_a<=arith_z; arith_b<=sin_coeff(cnt-4'd1); arith_op<=KIND_ADD;
+                    arith_a<=arith_z; arith_b<=coeff_q; arith_op<=KIND_ADD;
                     settle<=WAIT; phase<=TR_S_ADD;
                 end else settle<=settle-5'd1;
                 TR_S_ADD: if (settle==0) begin
@@ -839,11 +844,11 @@ module fpu_transcendental (
                 // sin(r) done -> start cos Horner: acc = cos[10]*rr
                 TR_S_OUT: if (settle==0) begin
                     sin_reg<=arith_z;
-                    arith_a<=cos_coeff(4'd10); arith_b<=t_reg; arith_op<=KIND_MUL;
+                    arith_a<=COS_SEED; arith_b<=t_reg; arith_op<=KIND_MUL;
                     cnt<=4'd10; settle<=WAIT; phase<=TR_C_MUL;
                 end else settle<=settle-5'd1;
                 TR_C_MUL: if (settle==0) begin
-                    arith_a<=arith_z; arith_b<=cos_coeff(cnt-4'd1); arith_op<=KIND_ADD;
+                    arith_a<=arith_z; arith_b<=coeff_q; arith_op<=KIND_ADD;
                     settle<=WAIT; phase<=TR_C_ADD;
                 end else settle<=settle-5'd1;
                 TR_C_ADD: if (settle==0) begin
