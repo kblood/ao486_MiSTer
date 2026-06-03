@@ -44,6 +44,16 @@ package opl3_pkg;
     localparam CLK_FREQ = 24.576e6;
     localparam DAC_OUTPUT_WIDTH = 16;
     localparam INSTANTIATE_TIMERS = 1; // set to 1 to use timers, 0 to save area
+    // AUDIO_SILENT build (frees ~1.1k ALUTs to fit the full x87 transcendental
+    // FPU): drop the FM operator/channel datapath but KEEP host_if + timers, so
+    // Adlib still detects (status port 388h still transitions 0x00->0xC0 via the
+    // real timers; the operators only produce sound, not detection state).  The
+    // single VERILOG_MACRO AUDIO_SILENT in ao486.qsf also gates sys/audio_out.
+`ifdef AUDIO_SILENT
+    localparam INSTANTIATE_CHANNELS = 0; // present-but-silent: no FM operators
+`else
+    localparam INSTANTIATE_CHANNELS = 1;
+`endif
     localparam NUM_LEDS = 0; // connected to kon bank 0 starting at 0
     localparam INSTANTIATE_SAMPLE_SYNC_TO_DAC_CLK = 0;
 

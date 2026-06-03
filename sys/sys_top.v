@@ -1562,6 +1562,20 @@ pll_audio pll_audio
 );
 
 wire spdif;
+`ifdef AUDIO_SILENT
+// AUDIO_SILENT build: drop the audio output stage (~1.4k ALUTs) to fit the full
+// x87 transcendental FPU.  All audio pins are tied to silence.  This is pure
+// OUTPUT removal and has NO effect on sound-card detection — the OPL timers, the
+// SB DSP, and DMA/IRQ all live in the core (emu), not in this output stage.
+assign HDMI_SCLK  = 1'b0;
+assign HDMI_LRCLK = 1'b0;
+assign HDMI_I2S   = 1'b0;
+`ifndef MISTER_DUAL_SDRAM
+assign analog_l   = 1'b0;
+assign analog_r   = 1'b0;
+`endif
+assign spdif      = 1'b0;
+`else
 audio_out audio_out
 (
 	.reset(reset | areset),
@@ -1598,6 +1612,7 @@ audio_out audio_out
 `endif
 	.spdif(spdif)
 );
+`endif
 
 
 `ifndef MISTER_DISABLE_ALSA

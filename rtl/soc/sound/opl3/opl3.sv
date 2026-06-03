@@ -84,9 +84,24 @@ module opl3
         .*
     );
 
-    channels channels (
-        .*
-    );
+    /*
+     * AUDIO_SILENT (INSTANTIATE_CHANNELS=0): drop the FM operator/channel
+     * datapath (~1.1k ALUTs) and tie the sample outputs to silence.  host_if +
+     * timers above are untouched, so Adlib detection still works; only sound
+     * generation is removed.  Mirrors the INSTANTIATE_TIMERS generate below.
+     */
+    generate
+    if (INSTANTIATE_CHANNELS)
+        channels channels (
+            .*
+        );
+    else
+        always_comb begin
+            sample_valid = 0;
+            sample_l     = 0;
+            sample_r     = 0;
+        end
+    endgenerate
 
     leds leds (
         .*

@@ -948,6 +948,25 @@ wire mt32_use  = mt32_available & ~mt32_disable;
 wire mt32_mute = mt32_available &  mt32_disable;
 
 wire [6:0] mt32_out;
+`ifdef NO_MT32PI
+// iter-193: gate MT32-pi (~215 ALUTs) to recover the last ~7 LABs needed to fit
+// the full x87 transcendental FPU.  MT-32-pi requires a Raspberry Pi daughter-
+// board; with it gated out we tie every mt32pi output to idle.  OPL/SB music and
+// the normal MPU-401 MIDI path are unaffected (mt32_available=0 -> use/mute=0).
+// Reversible via the NO_MT32PI macro in ao486.qsf.
+assign mt32_out        = 7'h7F;   // USER port idle (high / inactive)
+assign midi_rx         = 1'b1;    // MIDI UART RX idle
+assign mt32_i2s_l      = 16'd0;
+assign mt32_i2s_r      = 16'd0;
+assign mt32_available  = 1'b0;    // not present -> mt32_use = mt32_mute = 0
+assign mt32_newmode    = 1'b0;
+assign mt32_mode       = 8'd0;
+assign mt32_rom        = 8'd0;
+assign mt32_sf         = 8'd0;
+assign mt32_lcd_en     = 1'b0;    // no LCD overlay -> video passes normal RGB
+assign mt32_lcd_pix    = 1'b0;
+assign mt32_lcd_update = 1'b0;
+`else
 mt32pi mt32pi
 (
 	.*,
@@ -956,6 +975,7 @@ mt32pi mt32pi
 	.USER_OUT(mt32_out),
 	.midi_tx(mpu_tx | mt32_mute)
 );
+`endif
 
 reg mt32_info_req;
 reg [3:0] mt32_info_disp;

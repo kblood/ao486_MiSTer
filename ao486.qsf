@@ -55,6 +55,10 @@ set_global_assignment -name PHYSICAL_SYNTHESIS_ASYNCHRONOUS_SIGNAL_PIPELINING ON
 set_global_assignment -name ALM_REGISTER_PACKING_EFFORT MEDIUM
 set_global_assignment -name OPTIMIZE_POWER_DURING_SYNTHESIS OFF
 set_global_assignment -name ROUTER_REGISTER_DUPLICATION ON
+# iter-193 NOTE: tried NEVER to pack tighter for the last 5 LABs — BACKFIRED
+# (4196->4211, ALMs rose 41482->41647: physical synthesis spread more to
+# compensate). Reverted to ALWAYS (the 4196 best). High-density fitter knobs are
+# non-monotone here; the working lever for the last LABs is the SEED below.
 set_global_assignment -name FITTER_AGGRESSIVE_ROUTABILITY_OPTIMIZATION ALWAYS
 # PR-2c.9 (iter 164): full-FPU build fits on resources (94% ALM, 84% M10K) but
 # fit RED on localized routing congestion (peak 69% interconnect, region
@@ -120,6 +124,24 @@ set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_ADAPTIVE=1"
 # decision). alsa was the I2S non-SB audio path nothing in current testing
 # exercises.
 set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_ALSA=1"
+
+# AUDIO_SILENT (iter-193): the single switch that frees area for the FULL x87
+# transcendental FPU by making audio "present but silent":
+#   * opl3_pkg.sv  -> INSTANTIATE_CHANNELS=0 : drops the OPL3 FM operator datapath
+#     (~1.1k ALUTs) but KEEPS host_if + timers, so Adlib still DETECTS (port 388h
+#     status still transitions 0x00->0xC0). SoundBlaster DSP/DMA/IRQ are untouched,
+#     so SB also detects and transfers complete (no detection hangs).
+#   * sys_top.v    -> drops the audio_out output stage (~1.4k ALUTs); audio pins
+#     tied to silence.
+# Net ~2.5k ALUTs freed -> the full transcendental group fits. Comment this line
+# out (or set 0) to restore full audio (then the full FPU build will not fit).
+set_global_assignment -name VERILOG_MACRO "AUDIO_SILENT=1"
+
+# NO_MT32PI (iter-193): gate out the MT-32-pi MIDI synth (~215 ALUTs) to recover
+# the last ~7 LABs the full transcendental FPU needs (build was 4196/4191, 5 over).
+# MT-32-pi needs a Raspberry Pi daughterboard; all its outputs are tied to idle in
+# ao486.sv. OPL/SB and normal MPU-401 MIDI are unaffected. Comment out to restore.
+set_global_assignment -name VERILOG_MACRO "NO_MT32PI=1"
 
 source sys/sys.tcl
 source sys/sys_analog.tcl

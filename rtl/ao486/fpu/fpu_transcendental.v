@@ -374,6 +374,17 @@ module fpu_transcendental (
     wire [6:0]  coeff_addr = {coeff_bank, (cnt - 4'd1)};    // bank*16 + (cnt-1)
     always @(posedge clk) coeff_q <= coeff_rom[coeff_addr];
 
+    // iter-193 area dedup: time-multiplex the single int64_to_fx80 converter
+    // (clz64 + variable barrel shift, the engine's most expensive helper) across
+    // TR_QMUL (q hi chunk) and TR_QF (q lo chunk) instead of instantiating it
+    // TWICE in one cycle.  arith_z (the q = x*(2/pi) product) is held stable
+    // across both cycles (no new arith is issued between them), so q_int_w is
+    // identical -> bit-exact with the old 2-instance version, -1 barrel shifter
+    // (~30 LABs).  Reuses the previously-dead TR_QF state as the second cycle.
+    wire signed [63:0] qconv_in  = (phase == TR_QMUL) ? q_hi_from_int(q_int_w)
+                                                      : q_lo_from_int(q_int_w);
+    wire        [79:0] qconv_out = int64_to_fx80(qconv_in);
+
     reg [79:0] t_reg;     // F2XM1 t ; log: u^2
     reg [79:0] u_reg;     // log: u (OddPoly outer factor)
     reg [79:0] den_reg;   // log: divide denominator (x+1 or a+2)
@@ -803,11 +814,16 @@ module fpu_transcendental (
                 // quadrant, kick off the 3-part Cody-Waite reduction.
                 TR_QMUL: if (settle==0) begin
                     qq_reg   <= q_int_w & 64'd3;
-                    qhiS_reg <= int64_to_fx80(q_hi_from_int(q_int_w));
-                    qloF_reg <= int64_to_fx80(q_lo_from_int(q_int_w));
+                    qhiS_reg <= qconv_out;           // int64_to_fx80(q_hi) this cycle
                     x_reg    <= a_reg_hold;          // r := x
-                    red_idx  <= 3'd0; phase <= TR_RIS;
+                    phase    <= TR_QF;               // q lo chunk next cycle (shared conv)
                 end else settle<=settle-5'd1;
+                // second half of the time-muxed q split: qconv_in now selects
+                // q_lo (phase!=TR_QMUL), so qconv_out = int64_to_fx80(q_lo).
+                TR_QF: begin
+                    qloF_reg <= qconv_out;
+                    red_idx  <= 3'd0; phase <= TR_RIS;
+                end
                 // issue qchunk * HPi  (red_idx selects chunk + Pi)
                 TR_RIS: begin
                     arith_a<=red_chunk; arith_b<=red_P; arith_op<=KIND_MUL;
