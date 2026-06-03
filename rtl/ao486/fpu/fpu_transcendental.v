@@ -280,24 +280,30 @@ module fpu_transcendental (
 
     // q split helpers: hi = q with low 32 bits cleared, lo = low 32 bits;
     // sign preserved (truncate toward zero -- NOT floor -- so |q| splits cleanly).
-    function signed [63:0] q_hi_signed(input [79:0] qf);
-        reg signed [63:0] qi; reg s; reg [63:0] mag, himag;
+    // iter-192 dedup: split helpers take the ALREADY-computed integer qi so the
+    // expensive fx80_to_int64 (variable shift + round) is evaluated ONCE (q_int_w
+    // below) instead of three times.  Bit-identical: q_*_from_int(fx80_to_int64(qf))
+    // == the old q_*_signed(qf).
+    function signed [63:0] q_hi_from_int(input signed [63:0] qi);
+        reg s; reg [63:0] mag, himag;
         begin
-            qi = fx80_to_int64(qf);
             s = qi[63]; mag = s ? (~qi + 64'd1) : qi;
             himag = {mag[63:32], 32'b0};            // (|q|>>32)<<32
-            q_hi_signed = s ? -$signed(himag) : $signed(himag);
+            q_hi_from_int = s ? -$signed(himag) : $signed(himag);
         end
     endfunction
-    function signed [63:0] q_lo_signed(input [79:0] qf);
-        reg signed [63:0] qi; reg s; reg [63:0] mag, lomag;
+    function signed [63:0] q_lo_from_int(input signed [63:0] qi);
+        reg s; reg [63:0] mag, lomag;
         begin
-            qi = fx80_to_int64(qf);
             s = qi[63]; mag = s ? (~qi + 64'd1) : qi;
             lomag = {32'b0, mag[31:0]};
-            q_lo_signed = s ? -$signed(lomag) : $signed(lomag);
+            q_lo_from_int = s ? -$signed(lomag) : $signed(lomag);
         end
     endfunction
+
+    // iter-192 dedup: the ONE shared fx80->int64 conversion of the q product,
+    // consumed by qq/qhi/qlo in TR_QMUL (was 3 separate fx80_to_int64 cones).
+    wire signed [63:0] q_int_w = fx80_to_int64(arith_z);
 
     // ----- operand classification (off a/b directly, valid at start) --------
     wire        aSign = a[79];          wire        bSign = b[79];
@@ -796,9 +802,9 @@ module fpu_transcendental (
                 // qf = x*(2/pi) settled -> round to int q, split hi/lo, latch
                 // quadrant, kick off the 3-part Cody-Waite reduction.
                 TR_QMUL: if (settle==0) begin
-                    qq_reg   <= fx80_to_int64(arith_z) & 64'd3;
-                    qhiS_reg <= int64_to_fx80(q_hi_signed(arith_z));
-                    qloF_reg <= int64_to_fx80(q_lo_signed(arith_z));
+                    qq_reg   <= q_int_w & 64'd3;
+                    qhiS_reg <= int64_to_fx80(q_hi_from_int(q_int_w));
+                    qloF_reg <= int64_to_fx80(q_lo_from_int(q_int_w));
                     x_reg    <= a_reg_hold;          // r := x
                     red_idx  <= 3'd0; phase <= TR_RIS;
                 end else settle<=settle-5'd1;
