@@ -106,7 +106,26 @@ set_multicycle_path -from {emu:emu|reset*} -hold 1
 # like S_ARITHWAIT, so -to these capture regs is the identical multicycle.  The engine's
 # control regs (phase/settle/cnt/done) are fed by trivial FSM logic, stay single-cycle,
 # and are deliberately EXCLUDED here.
+#
+# PR-2c.T-FIX (iter 196): the iter-187+ list above (arith_a/arith_b/t_reg/z) was
+# INCOMPLETE — it omitted the rest of the engine's deep-arith capture registers.  This
+# was latent because STA had never run on a PLACED transcendental design: iter-165/166
+# (timing closed) PREDATE the engine, and every fit since (192-195) failed to route, so
+# this is the first routed full-transcendental STA.  It exposed a -110.279 ns single-cycle
+# WSS into u_transc|qloF_reg (TNS -168 us across qhiS/qloF/x/sin/cos/expd/xred/u/den/qq).
+# Every one of these latches arith_z (or div_z) ONLY at the terminal `settle==0` cycle of
+# its phase (fpu_transcendental.v: `PHASE: if(settle==0) <reg><=arith_z; settle<=WAIT;`),
+# i.e. WAIT=12 cycles after arith_a/arith_b load — IDENTICAL discipline to t_reg/z, so
+# the SAME -setup 12 multicycle applies and is sound.  Phase advance is driven purely by
+# the `settle`/`cnt` counters (NEVER by arith_z), so phase/settle/cnt/arith_op/add_corr
+# stay correctly SINGLE-cycle and are EXCLUDED.  b_reg/a_reg_hold are FPU-private operand
+# holds (latched from a/b at P_IDLE start, held stable the whole op) — -to-only is safe.
+# z2 is already covered by the existing `*u_transc|z*` glob.
 set fpu_dst [get_registers {*u_execute_fpu|z_lat* *u_execute_fpu|flags_lat* *u_fpu_csr|* *u_fpu_regfile|* \
+                            *u_transc|x_reg* *u_transc|xred_reg* *u_transc|expd_reg* \
+                            *u_transc|u_reg* *u_transc|den_reg* *u_transc|qq_reg* \
+                            *u_transc|qhiS_reg* *u_transc|qloF_reg* *u_transc|sin_reg* *u_transc|cos_reg* \
+                            *u_transc|b_reg* *u_transc|a_reg_hold* \
                             *u_div|a_reg* *u_div|b_reg* \
                             *u_div|a_sign_reg* *u_div|a_exp_reg* *u_div|a_sig_reg* \
                             *u_div|b_sign_reg* *u_div|b_exp_reg* *u_div|b_sig_reg* \
@@ -121,6 +140,41 @@ set fpu_dst [get_registers {*u_execute_fpu|z_lat* *u_execute_fpu|flags_lat* *u_f
                             *write_inst|wr_fpu_store_data*}]
 set_multicycle_path -to $fpu_dst -setup 12
 set_multicycle_path -to $fpu_dst -hold  11
+
+# PR-2c.T-FIX2 (iter 196): the transcendental engine's FSM-CONTROL regs are ALSO fed
+# by the deep shared-arith cone, not just the data captures above.  In the FPATAN/FSIN/
+# FCOS terminal phases the next-state / arith_op / add_corr decision is a function of the
+# settled arith result (e.g. AT_DWAIT routes on the divider/ratio magnitude; AT_P_OUT on
+# add_corr), so STA saw a -71 ns single-cycle path bcd_to_int64|val -> shared Add4 ->
+# u_transc|{phase,settle,arith_op,add_corr}.  SOUND to multicycle because the engine holds
+# arith_a/arith_b stable for the WAIT(=12) dwell before EVERY decision, and transc_start
+# only fires at arith_wait_done (execute_fpu.v:1382) = 12 cycles after a_lat latches, so the
+# P_IDLE dispatch is itself >=12 cycles past a_lat stabilizing (same proof the arith
+# multicycle above relies on).  div_z is the SEQUENTIAL divider's REGISTERED output (shallow
+# compare), so it is not the binding path.
+# MUST be SOURCE-anchored, NOT destination-anchored: settle and cnt are COUNTERS that
+# decrement EVERY cycle (settle<=settle-1 / cnt<=cnt-1) and phase HOLDS each dwell cycle.
+# Those self-loops (settle->settle, cnt->cnt, phase->phase) MUST stay single-cycle.  So
+# relax only paths INTO the FSM regs whose LAUNCH is a deep-datapath register (everything in
+# u_execute_fpu EXCEPT the three FSM-state regs themselves); the counter self-loops launch
+# from settle/cnt/phase and are excluded from -from, so they keep their 1-cycle check.
+# -from spans all THREE deep-cone feeder modules (execute_fpu + fpu_regfile + fpu_csr,
+# the same set the FCOMI eflags multicycle below uses) because the shared-arith operands
+# arith_a/arith_b are loaded from the regfile read data (u_fpu_regfile|rd_data) and CSR
+# precision/rounding as well as execute_fpu latches — u_fpu_regfile/u_fpu_csr are SIBLINGS
+# of u_execute_fpu under execute, NOT inside it, so {*u_execute_fpu|*} alone misses them.
+# -to spans ALL of u_transc: the engine is a dwell machine — VERIFIED that cnt, red_idx and
+# phase update ONLY at settle==0 boundaries (fpu_transcendental.v), so settle is the ONE
+# truly per-cycle register.  Every other u_transc reg (control bits swap_reg/at_step/
+# at_zsign/at_bsign/want_*/trig_op/red_idx AND the data captures) is written only at a dwell
+# boundary >=12 cycles after its deep operand stabilized.  So -to {all u_transc}, -from {the
+# deep feeders MINUS settle/cnt/phase} relaxes exactly the deep cones while the settle->settle
+# decrement (and cnt/phase self-steps) launch from the excluded self set and keep 1-cycle.
+set fpu_fsm_self [get_registers {*u_transc|settle* *u_transc|cnt* *u_transc|phase*}]
+set fpu_fsm_src  [remove_from_collection [get_registers {*u_execute_fpu|* *u_fpu_regfile|* *u_fpu_csr|*}] $fpu_fsm_self]
+set fpu_fsm_dst  [get_registers {*u_transc|*}]
+set_multicycle_path -from $fpu_fsm_src -to $fpu_fsm_dst -setup 12
+set_multicycle_path -from $fpu_fsm_src -to $fpu_fsm_dst -hold  11
 
 # FCOMI / FUCOMI integer-EFLAGS writeback.  These ops drive cflag/pflag/zflag in
 # the integer write_register_inst directly from execute_fpu's compare result

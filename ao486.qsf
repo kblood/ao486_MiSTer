@@ -17,7 +17,11 @@ set_global_assignment -name LAST_QUARTUS_VERSION "17.0.2 Lite Edition"
 
 set_global_assignment -name GENERATE_RBF_FILE ON
 set_global_assignment -name PROJECT_OUTPUT_DIRECTORY output_files
-set_global_assignment -name NUM_PARALLEL_PROCESSORS ALL
+# iter-194 (2026-06-03): capped from ALL (32 cores) -> 8. Two hard machine crashes
+# occurred during quartus_fit with ALL cores pinned at 100% for 30+ min (thermal/
+# power/RAM). Fit barely scales past ~8 cores; capping trades a little speed for
+# stability. Raise back to ALL if the crashes turn out to be unrelated.
+set_global_assignment -name NUM_PARALLEL_PROCESSORS 8
 set_global_assignment -name SAVE_DISK_SPACE OFF
 set_global_assignment -name SMART_RECOMPILE ON
 set_global_assignment -name MIN_CORE_JUNCTION_TEMP "-40"
@@ -31,7 +35,29 @@ set_global_assignment -name FITTER_EFFORT "STANDARD FIT"
 set_global_assignment -name OPTIMIZATION_MODE "HIGH PERFORMANCE EFFORT"
 set_global_assignment -name ALLOW_POWER_UP_DONT_CARE ON
 set_global_assignment -name QII_AUTO_PACKED_REGISTERS "SPARSE AUTO"
+# iter-194 (2026-06-03): AREA pivot. The full transcendental group placed at 98.8%
+# ALM and FAILED TO ROUTE (err170143) — a density/congestion wall, not LAB overflow.
+# Silicon runs at 56 MHz (huge slack vs the 90 MHz these knobs chase), so trade the
+# timing-driven logic/register REPLICATION back for area + routability. KEEP retiming
+# (line below; load-bearing for non-FPU paths per iter-165d) and the *_FOR_AREA /
+# REMOVE_REDUNDANT options ON. To revert to the 90 MHz set: LCELL_INSERTION->ON,
+# COMBO_LOGIC->ON, EFFORT->EXTRA, REGISTER_DUPLICATION->ON, TECHNIQUE->SPEED, plus
+# ASYNC_PIPELINING->ON and ROUTER_REGISTER_DUPLICATION->ON further down.
+# iter-194b: kept ON (router-side congestion tool). Turning it OFF with the AREA
+# synthesis made the router THRASH 6h on routing; the area win comes from synthesis
+# (OPTIMIZATION_TECHNIQUE AREA + physical-synth off), not from starving the router.
+# iter-196b (2026-06-04): TECHNIQUE AREA -> SPEED + COMBO_LOGIC ON.  AREA was only ever a
+# crutch for the 92% route-thrash (iter-194/195); NOHDMI dropped us to 88% AND physically
+# removed the congested ascal neighbour, so AREA is no longer needed and was actively
+# poisoning CPU timing: the iter-196 AREA build ROUTED but STA showed a -28.7 ns single-cycle
+# wall on cs_cache->mc_eip (58 logic levels, 54 ns) — AREA left that combinational cone
+# unrestructured.  Under SPEED the SAME path closed <11 ns at iter-165/166 (met 90 MHz on the
+# CPU).  Keep the *_FOR_AREA / REMOVE_REDUNDANT options below ON to cap area regrowth so it
+# still routes at ~88-90%.  REGISTER_DUPLICATION/ASYNC_PIPELINING left OFF (area).  Revert to
+# AREA only if SPEED fails to route.
 set_global_assignment -name ROUTER_LCELL_INSERTION_AND_LOGIC_DUPLICATION ON
+# iter-196c: EFFORT NORMAL->EXTRA + REGISTER_DUPLICATION ON to attack the residual
+# decoder->microcode wall (-13.2 ns @56.25). Affordable now (89% ALM, congestion low).
 set_global_assignment -name PHYSICAL_SYNTHESIS_COMBO_LOGIC ON
 set_global_assignment -name PHYSICAL_SYNTHESIS_EFFORT EXTRA
 set_global_assignment -name PHYSICAL_SYNTHESIS_REGISTER_DUPLICATION ON
@@ -47,7 +73,7 @@ set_global_assignment -name PRE_MAPPING_RESYNTHESIS ON
 set_global_assignment -name ROUTER_CLOCKING_TOPOLOGY_ANALYSIS ON
 set_global_assignment -name ECO_OPTIMIZE_TIMING ON
 set_global_assignment -name PERIPHERY_TO_CORE_PLACEMENT_AND_ROUTING_OPTIMIZATION ON
-set_global_assignment -name PHYSICAL_SYNTHESIS_ASYNCHRONOUS_SIGNAL_PIPELINING ON
+set_global_assignment -name PHYSICAL_SYNTHESIS_ASYNCHRONOUS_SIGNAL_PIPELINING OFF
 # iter-172c (2026-06-01): SEED 3,4 fit RED on LAB density (19, 21 LABs short
 # at 95% ALM with sound block restored).  LOW->MEDIUM densifies ALM packing
 # (more registers per ALM, fewer LABs).  Timing risk: minor — current wall
@@ -111,7 +137,15 @@ set_global_assignment -name VERILOG_MACRO "MISTER_FB_PALETTE=1"
 # observe whether iter-166e is silicon-good. SoundBlaster remains dropped
 # (no room for both). Re-enable line below if a future iter regresses area
 # and we need NOHDMI again as an escape hatch.
-# set_global_assignment -name VERILOG_MACRO "MISTER_DEBUG_NOHDMI=1"
+#
+# iter-196 (2026-06-04): RE-ENABLED. The full x87 transcendental FPU + core
+# PLACES at ~92% ALM but will NOT ROUTE (localized congestion in the execute_fpu
+# cone). NOHDMI drops ascal + HDMI compositor (~2.3-2.8k ALM) to de-densify the
+# hot region. VERIFIED against sys_top.v: the analog VGA OSD is a SEPARATE
+# compositor (vga_osd, sys_top.v:1388) OUTSIDE the NOHDMI guard, so the MENU/F12
+# overlay STILL works on the DE10-nano analog VGA output. Only HDMI output +
+# screenshots are lost (we run analog VGA anyway). Revert: re-comment this line.
+set_global_assignment -name VERILOG_MACRO "MISTER_DEBUG_NOHDMI=1"
 
 # PR-2c.8 (iter 161): disable ascal's adaptive (polyphase) scaler to reclaim
 # ALMs for the x87 FPU fit.  HDMI output still works (nearest-neighbour scaling

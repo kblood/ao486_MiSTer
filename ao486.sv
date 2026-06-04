@@ -317,7 +317,10 @@ wire [21:0] gamma_bus;
 wire  [7:0] uart1_mode;
 wire [31:0] uart1_speed;
 
-hps_io #(.CONF_STR(CONF_STR), .CONF_STR_BRAM(0), .PS2DIV(2000), .PS2WE(1), .WIDE(1)) hps_io
+// iter-196: CONF_STR_BRAM 0->1 moves the config-string out of the LUT-mux
+// (~200-500 ALM) into an inferred M10K ROM (confstr_rom, hps_io.sv:240). Uses
+// M10K headroom (~80% util) to relieve the ALM/routing wall. Revert: set to 0.
+hps_io #(.CONF_STR(CONF_STR), .CONF_STR_BRAM(1), .PS2DIV(2000), .PS2WE(1), .WIDE(1)) hps_io
 (
 	.clk_sys(clk_sys),
 	.HPS_BUS(HPS_BUS),

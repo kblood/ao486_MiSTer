@@ -42,7 +42,7 @@ module  pll_0002(
 		.pll_dsm_out_sel("1st_order"),
 		.operation_mode("direct"),
 		.number_of_clocks(6),
-		.output_clock_frequency0("90.000000 MHz"),
+		.output_clock_frequency0("56.250000 MHz"),
 		.phase_shift0("0 ps"),
 		.duty_cycle0(50),
 		.output_clock_frequency1("60.000000 MHz"),
@@ -106,8 +106,14 @@ module  pll_0002(
 		.n_cnt_bypass_en("true"),
 		.m_cnt_odd_div_duty_en("false"),
 		.n_cnt_odd_div_duty_en("false"),
-		.c_cnt_hi_div0(5),
-		.c_cnt_lo_div0(5),
+		// iter-195: clk_sys (C0) compile-time target lowered 90 MHz (div 5+5=10)
+		// -> 56.25 MHz (div 8+8=16) so the fitter routes for the speed we actually
+		// run (silicon crashes at 90 MHz; we boot clk_req=3 = 56.25 MHz).  VCO stays
+		// 900 MHz (m_cnt + pll_output_clk_frequency untouched) so the runtime
+		// speed_div[] reconfig in ao486.sv is unaffected.  Revert: restore (5),(5)
+		// and output_clock_frequency0 "90.000000 MHz".
+		.c_cnt_hi_div0(8),
+		.c_cnt_lo_div0(8),
 		.c_cnt_prst0(1),
 		.c_cnt_ph_mux_prst0(0),
 		.c_cnt_in_src0("ph_mux_clk"),

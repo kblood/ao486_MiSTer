@@ -998,6 +998,23 @@ wire [15:0] sample_dma_r = {sample_dma[dma_format[1]][15] ^ ~dma_format[0], samp
 //wire [15:0] sample_dma_r_attenuated = {sample_dma_r[15], sample_dma_r[15:1]}; // (-6dB)
 
 always @(posedge clk) begin
+`ifdef AUDIO_SILENT
+	// PR-2c.6 (iter-195): present-but-silent Sound Blaster DSP.  The command FSM,
+	// DMA req/ack engine, dma_finished bookkeeping and the irq8/irq16 completion
+	// handshake (above) are ALL kept byte-for-byte intact, so SB auto-detection
+	// still passes and does NOT hang: DSP reset -> 0xAA, version query E1h, the
+	// identification command, AND the DMA-loopback-with-completion-IRQ probe that
+	// setup utilities run all behave exactly as on the full core.  Only the
+	// acoustic DAC feed is forced to silence here.  With sample_value_{l,r} tied
+	// to 0, the ADPCM decoders and the sample_dma assembly datapath lose all
+	// fan-out and synthesis prunes them as dead logic, reclaiming ALUTs for the
+	// x87 transcendental fit on the fixed DE10-nano (Cyclone V SE).  This mirrors
+	// the OPL3 INSTANTIATE_CHANNELS=0 gate (detection shell kept, synthesis
+	// dropped) and the iter-159 CMS/SAA1099 stub.  Reverse by removing the
+	// "AUDIO_SILENT=1" VERILOG_MACRO in ao486.qsf.
+	sample_value_l <= 16'd0;
+	sample_value_r <= 16'd0;
+`else
 	if((~speaker_on & sbp) | pause_active) begin
 		sample_value_l <= 0;
 		sample_value_r <= 0;
@@ -1017,6 +1034,7 @@ always @(posedge clk) begin
 		sample_value_l <= {~sample[15], sample[14:0]};
 		sample_value_r <= {~sample[15], sample[14:0]};
 	end
+`endif
 end
 
 //------------------------------------------------------------------------------
