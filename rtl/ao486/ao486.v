@@ -72,7 +72,10 @@ module ao486 (
 	output       [15:0] io_write_address,
 	output       [2:0]  io_write_length,
 	output       [31:0] io_write_data,
-	input               io_write_done
+	input               io_write_done,
+
+	// FPU activity trace (debug): {transc_retire, any_retire} 1-cycle pulses
+	output       [1:0]  fpu_trace_evt
 );
 
 //------------------------------------------------------------------------------
@@ -773,7 +776,8 @@ pipeline pipeline_inst(
     .io_write_address              (io_write_address),              //output [15:0]
     .io_write_length               (io_write_length),               //output [2:0]
     .io_write_data                 (io_write_data),                 //output [31:0]
-    .io_write_done                 (io_write_done)                  //input
+    .io_write_done                 (io_write_done),                 //input
+    .fpu_trace_evt                 (fpu_trace_evt)                  //output [1:0]
 );
 
 //------------------------------------------------------------------------------

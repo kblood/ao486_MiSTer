@@ -306,7 +306,10 @@ module execute(
     output      [31:0]  dst_final,
     
     output              exe_mult_overflow,
-    output      [31:0]  exe_stack_offset
+    output      [31:0]  exe_stack_offset,
+
+    // FPU activity trace (debug): {transc_retire, any_retire} 1-cycle pulses
+    output      [1:0]   fpu_trace_evt
 );
 
 //------------------------------------------------------------------------------
@@ -797,6 +800,8 @@ fpu_csr u_fpu_csr (
 // required (same vlog-2730 pattern as fpu_busy / sum_pre / flags_pre —
 // see HANDOFF Gotcha #9).
 wire        fpu_done;
+wire        fpu_done_transc;
+assign      fpu_trace_evt = {fpu_done_transc, fpu_done};
 wire [2:0]  fpu_rf_wr_idx;
 wire [79:0] fpu_rf_wr_data;
 wire [1:0]  fpu_rf_wr_tag;
@@ -884,6 +889,7 @@ execute_fpu u_execute_fpu (
     // Outputs
     .fpu_busy             (fpu_busy),
     .fpu_done             (fpu_done),
+    .fpu_done_transc      (fpu_done_transc),
     .exc_flags_set        (fpu_exec_exc_flags_set),
 
     .rf_wr_idx            (fpu_rf_wr_idx),

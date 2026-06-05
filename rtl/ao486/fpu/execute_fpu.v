@@ -174,6 +174,7 @@ module execute_fpu (
     //--------------------------------------------------------------------
     output              fpu_busy,
     output              fpu_done,            // 1-cycle pulse on RETIRE
+    output              fpu_done_transc,     // fpu_done qualified by is_transc_lat (debug trace)
 
     // Exception-flag OR-lane into the externally-instantiated fpu_csr.
     // Lit only during S_RETIRE; CSR OR's into its own exc_flags register
@@ -2509,6 +2510,11 @@ module execute_fpu (
                                            && !(pop_after_lat && ~es_now)
                                            && !(is_fxtract_lat && ~es_now)
                                            && !(is_transc_push_lat && ~transc_c2_lat && ~es_now));
+
+    // Debug trace qualifier: a transcendental op retiring this cycle. is_transc_lat
+    // is still asserted at every terminal state for the transcendental group, so
+    // this is a clean per-op pulse for the fpu_trace counter. See rtl/fpu_trace.v.
+    assign fpu_done_transc = fpu_done && is_transc_lat;
 
     // PR-2c.26 (iter 179): the m32 + m64 NARROWING converters are now SHARED.
     // FST/FSTP m32 and FST/FSTP m64 never co-occur, so a single runtime-muxed

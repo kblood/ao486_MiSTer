@@ -263,7 +263,10 @@ module pipeline(
     output      [15:0]  io_write_address,
     output      [2:0]   io_write_length,
     output      [31:0]  io_write_data,
-    input               io_write_done
+    input               io_write_done,
+
+    // FPU activity trace (debug): {transc_retire, any_retire} 1-cycle pulses
+    output      [1:0]   fpu_trace_evt
 );
 
 //------------------------------------------------------------------------------
@@ -1165,7 +1168,8 @@ execute execute_inst(
     .src_final                     (src_final),                     //output [31:0]
     .dst_final                     (dst_final),                     //output [31:0]
     .exe_mult_overflow             (exe_mult_overflow),             //output
-    .exe_stack_offset              (exe_stack_offset)               //output [31:0]
+    .exe_stack_offset              (exe_stack_offset),              //output [31:0]
+    .fpu_trace_evt                 (fpu_trace_evt)                  //output [1:0]
 );
 
 //------------------------------------------------------------------------------

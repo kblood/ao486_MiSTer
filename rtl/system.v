@@ -157,6 +157,11 @@ wire        mgmt_ide1_cs;
 wire        mgmt_fdd_cs;
 wire        mgmt_rtc_cs;
 
+// FPU activity trace (debug) — read-only counters on mgmt class 0xF7
+wire  [1:0] fpu_trace_evt;
+wire        mgmt_fputrace_cs;
+wire [15:0] mgmt_fputrace_readdata;
+
 wire        interrupt_done;
 wire        interrupt_do;
 wire  [7:0] interrupt_vector;
@@ -322,7 +327,9 @@ ao486 ao486
 	.dma_readdatavalid (dma_readdatavalid),
 	.dma_waitrequest   (dma_waitrequest),
 	.dma_write         (dma_write),
-	.dma_writedata     (dma_writedata)
+	.dma_writedata     (dma_writedata),
+
+	.fpu_trace_evt     (fpu_trace_evt)
 );
 
 always @(posedge clk_sys) begin
@@ -845,10 +852,25 @@ always @* begin
 	interrupt[15] = irq_15;
 end
 
-assign mgmt_ide0_cs  = (mgmt_address[15:8] == 8'hF0);
-assign mgmt_ide1_cs  = (mgmt_address[15:8] == 8'hF1);
-assign mgmt_fdd_cs   = (mgmt_address[15:8] == 8'hF2);
-assign mgmt_rtc_cs   = (mgmt_address[15:8] == 8'hF4);
-assign mgmt_readdata = mgmt_ide0_cs ? mgmt_ide0_readdata : mgmt_ide1_cs ? mgmt_ide1_readdata : mgmt_fdd_readdata;
+assign mgmt_ide0_cs     = (mgmt_address[15:8] == 8'hF0);
+assign mgmt_ide1_cs     = (mgmt_address[15:8] == 8'hF1);
+assign mgmt_fdd_cs      = (mgmt_address[15:8] == 8'hF2);
+assign mgmt_rtc_cs      = (mgmt_address[15:8] == 8'hF4);
+assign mgmt_fputrace_cs = (mgmt_address[15:8] == 8'hF7);
+assign mgmt_readdata = mgmt_ide0_cs     ? mgmt_ide0_readdata :
+                       mgmt_ide1_cs     ? mgmt_ide1_readdata :
+                       mgmt_fputrace_cs ? mgmt_fputrace_readdata :
+                                          mgmt_fdd_readdata;
+
+// FPU activity trace counters (debug). Drained read-only by Main_MiSTer over
+// the HPS bridge (UIO 0x62 @ addr 0xF7xx) independent of the running guest.
+fpu_trace fpu_trace
+(
+	.clk       (clk_sys),
+	.reset     (reset),
+	.evt       (fpu_trace_evt),
+	.word_idx  (mgmt_address[2:0]),
+	.readdata  (mgmt_fputrace_readdata)
+);
 
 endmodule
