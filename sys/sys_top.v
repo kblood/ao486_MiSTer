@@ -1503,11 +1503,18 @@ reg  [39:0] PhaseInc;
 	wire cs1 = vgas_en ? vgas_cs : vga_cs;
 	wire de1 = vgas_en ? vgas_de : vga_de;
 
-	assign VGA_VS = av_dis ? 1'bZ      :(((vgas_en ? (~vgas_vs ^ VS[12])                         : VGA_DISABLE ? 1'd1 : ~vga_vs) | csync_en) & subcarrier_out);
-	assign VGA_HS = av_dis ? 1'bZ      :  (vgas_en ? ((csync_en ? ~vgas_cs : ~vgas_hs) ^ HS[12]) : VGA_DISABLE ? 1'd1 : (csync_en ? ~vga_cs : ~vga_hs));
-	assign VGA_R  = av_dis ? 6'bZZZZZZ :   vgas_en ? vgas_o[23:18]                               : VGA_DISABLE ? 6'd0 : vga_o[23:18];
-	assign VGA_G  = av_dis ? 6'bZZZZZZ :   vgas_en ? vgas_o[15:10]                               : VGA_DISABLE ? 6'd0 : vga_o[15:10];
-	assign VGA_B  = av_dis ? 6'bZZZZZZ :   vgas_en ? vgas_o[7:2]                                 : VGA_DISABLE ? 6'd0 : vga_o[7:2]  ;
+	assign dbg_vga_pin_vs = av_dis ? 1'b1 :(((vgas_en ? (~vgas_vs ^ VS[12])                         : VGA_DISABLE ? 1'd1 : ~vga_vs) | csync_en) & subcarrier_out);
+	assign dbg_vga_pin_hs = av_dis ? 1'b1 :  (vgas_en ? ((csync_en ? ~vgas_cs : ~vgas_hs) ^ HS[12]) : VGA_DISABLE ? 1'd1 : (csync_en ? ~vga_cs : ~vga_hs));
+	assign dbg_vga_pin_r  = av_dis ? 6'd0 :   vgas_en ? vgas_o[23:18]                               : VGA_DISABLE ? 6'd0 : vga_o[23:18];
+	assign dbg_vga_pin_g  = av_dis ? 6'd0 :   vgas_en ? vgas_o[15:10]                               : VGA_DISABLE ? 6'd0 : vga_o[15:10];
+	assign dbg_vga_pin_b  = av_dis ? 6'd0 :   vgas_en ? vgas_o[7:2]                                 : VGA_DISABLE ? 6'd0 : vga_o[7:2];
+	assign dbg_vga_pin_de = av_dis ? 1'b0 : de1;
+
+	assign VGA_VS = av_dis ? 1'bZ      : dbg_vga_pin_vs;
+	assign VGA_HS = av_dis ? 1'bZ      : dbg_vga_pin_hs;
+	assign VGA_R  = av_dis ? 6'bZZZZZZ : dbg_vga_pin_r;
+	assign VGA_G  = av_dis ? 6'bZZZZZZ : dbg_vga_pin_g;
+	assign VGA_B  = av_dis ? 6'bZZZZZZ : dbg_vga_pin_b;
 
 	wire [1:0] vga_r  = vgas_en ? vgas_o[17:16] : VGA_DISABLE ? 2'd0 : vga_o[17:16];
 	wire [1:0] vga_g  = vgas_en ? vgas_o[9:8]   : VGA_DISABLE ? 2'd0 : vga_o[9:8];
@@ -1756,6 +1763,13 @@ reg  [1:0] sl_r;
 wire [1:0] sl = sl_r;
 always @(posedge clk_sys) sl_r <= FB_EN ? 2'b00 : scanlines;
 
+wire [5:0] dbg_vga_pin_r;
+wire [5:0] dbg_vga_pin_g;
+wire [5:0] dbg_vga_pin_b;
+wire       dbg_vga_pin_hs;
+wire       dbg_vga_pin_vs;
+wire       dbg_vga_pin_de;
+
 emu emu
 (
 	.CLK_50M(FPGA_CLK2_50),
@@ -1777,6 +1791,13 @@ emu emu
 `ifndef MISTER_DUAL_SDRAM
 	.VGA_DISABLE(VGA_DISABLE),
 `endif
+
+	.DBG_VGA_R(dbg_vga_pin_r),
+	.DBG_VGA_G(dbg_vga_pin_g),
+	.DBG_VGA_B(dbg_vga_pin_b),
+	.DBG_VGA_HS(dbg_vga_pin_hs),
+	.DBG_VGA_VS(dbg_vga_pin_vs),
+	.DBG_VGA_DE(dbg_vga_pin_de),
 
 	.HDMI_WIDTH(direct_video ? 12'd0 : hdmi_width),
 	.HDMI_HEIGHT(direct_video ? 12'd0 : hdmi_height),

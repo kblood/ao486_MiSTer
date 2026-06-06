@@ -54,6 +54,13 @@ module emu
 	output        VGA_SCALER, // Force VGA scaler
 	output        VGA_DISABLE, // analog out is off
 
+	input   [5:0] DBG_VGA_R,
+	input   [5:0] DBG_VGA_G,
+	input   [5:0] DBG_VGA_B,
+	input         DBG_VGA_HS,
+	input         DBG_VGA_VS,
+	input         DBG_VGA_DE,
+
 	input  [11:0] HDMI_WIDTH,
 	input  [11:0] HDMI_HEIGHT,
 	output        HDMI_FREEZE,
@@ -359,6 +366,9 @@ hps_io #(.CONF_STR(CONF_STR), .CONF_STR_BRAM(1), .PS2DIV(2000), .PS2WE(1), .WIDE
 );
 
 wire [15:0] mgmt_din;
+wire [15:0] sys_mgmt_din;        // system.v's mgmt readback (classes 0xF0..0xF7)
+wire [15:0] vidtrace_readdata;   // vid_trace readback (class 0xF8)
+wire [15:0] pintrace_readdata;   // final analog pin-side trace readback (class 0xF9)
 wire [15:0] mgmt_dout;
 wire [15:0] mgmt_addr;
 wire        mgmt_rd;
@@ -593,11 +603,34 @@ assign VGA_F1 = 0;
 assign VGA_SL = 0;
 assign VGA_SCALER = 1;
 assign CLK_VIDEO = clk_vga;
-assign CE_PIXEL = vga_ce;
 
 wire [7:0] r,g,b;
 wire       HSync,VSync;
-wire       ce_pix;
+
+// ---- Analog/CRT scandoubler -------------------------------------------------
+// The ao486 video core emits native VGA timing and relied entirely on ascal for
+// output. On NOHDMI (analog-only) builds there is no scaler, so low line-rate
+// modes (e.g. non-double-scanned 320x200 @ 15.74 kHz) fall below the ~31 kHz
+// floor of VGA/SVGA CRTs and the monitor drops sync. Add a scandoubler (via
+// video_mixer) that doubles ONLY the low line-rate modes up to ~31 kHz.
+
+// Engage the scandoubler exactly on the modes the core collapsed. The ao486 VGA
+// core deliberately strips vertical doublescan (vga.v: "undo vertical doublescan
+// ... omits odd lines"), expecting ascal to upscale it. On NOHDMI there is no
+// ascal. vga_flags[3] is the core's own "this mode was doublescan" flag
+// (vga.v: vga_flags[3] = vertical_doublescan) -- precisely the low modes to
+// re-double. Text/640x480/SVGA have vga_flags[3]=0 -> pass through.
+// Synchronise the clk_sys-domain flag into clk_vga (slow mode flag).
+// Scandoubler DISABLED: the real fix is in vga.v, which now keeps the odd lines
+// of doublescan modes so the core emits a full ~400-line / 31 kHz frame natively
+// (like the 320x400 modes that already passed through cleanly). The MiSTer
+// scandoubler mangled the ao486's partially-blanked DE-only timing (logger:
+// 320x200 in -> 720x400 garbage out, content lost), so we bypass it entirely and
+// run video_mixer as pure passthrough. vid_trace still records sd_en for proof.
+wire       sd_en = 1'b0;
+
+wire       hs_c, vs_c, hbl_c, vbl_c;
+wire [7:0] r_c, g_c, b_c;
 
 video_cleaner video_cleaner
 (
@@ -610,36 +643,87 @@ video_cleaner video_cleaner
 
 	.HSync(HSync),
 	.VSync(VSync),
+	.HBlank(~vga_de),
+	.VBlank(VSync),
 	.DE_in(vga_de),
 
-	.VGA_R(R),
-	.VGA_G(G),
-	.VGA_B(B),
-	.VGA_VS(vs),
-	.VGA_HS(hs),
-	.DE_out(de1)
+	.VGA_R(r_c),
+	.VGA_G(g_c),
+	.VGA_B(b_c),
+	.VGA_VS(vs_c),
+	.VGA_HS(hs_c),
+	.HBlank_out(hbl_c),
+	.VBlank_out(vbl_c)
 );
 
-wire hs,vs,de1;
-wire [7:0] R,G,B;
-
-gamma_fast gamma
+video_mixer #(.LINE_LENGTH(1024), .GAMMA(1)) video_mixer
 (
-	.clk_vid(CLK_VIDEO),
-	.ce_pix(CE_PIXEL),
+	.CLK_VIDEO(CLK_VIDEO),
+	.CE_PIXEL(CE_PIXEL),
+	.ce_pix(vga_ce),
+
+	.scandoubler(sd_en),
+	.hq2x(1'b0),
 
 	.gamma_bus(gamma_bus),
 
-	.HSync(hs),
-	.VSync(vs),
-	.DE(de1),
-	.RGB_in(mt32_lcd ? {{2{mt32_lcd_pix}},R[7:2], {2{mt32_lcd_pix}},G[7:2], {2{mt32_lcd_pix}},B[7:2]} : {R,G,B}),
+	.R(mt32_lcd ? {{2{mt32_lcd_pix}},r_c[7:2]} : r_c),
+	.G(mt32_lcd ? {{2{mt32_lcd_pix}},g_c[7:2]} : g_c),
+	.B(mt32_lcd ? {{2{mt32_lcd_pix}},b_c[7:2]} : b_c),
 
-	.HSync_out(VGA_HS),
-	.VSync_out(VGA_VS),
-	.DE_out(VGA_DE),
-	.RGB_out({VGA_R,VGA_G,VGA_B})
+	.HSync(hs_c),
+	.VSync(vs_c),
+	.HBlank(hbl_c),
+	// Do not derive VBlank from "no DE in this line": double-scanned VGA modes
+	// can intentionally contain inactive scanlines inside the visible field.
+	.VBlank(vs_c),
+
+	.HDMI_FREEZE(1'b0),
+	.freeze_sync(),
+
+	.VGA_R(VGA_R),
+	.VGA_G(VGA_G),
+	.VGA_B(VGA_B),
+	.VGA_VS(VGA_VS),
+	.VGA_HS(VGA_HS),
+	.VGA_DE(VGA_DE)
 );
+
+// ---- Video-mode logger (debug, mgmt class 0xF8) -----------------------------
+// Snapshots the core's native (IN) and post-scandoubler (OUT) video timing in
+// clk_vga cycles; Main_MiSTer drains it and logs only unique modes to
+// /tmp/ao486_vid.csv. Lets us SEE whether the scandoubler engaged on a given
+// mode instead of rebuilding blind. See rtl/vid_trace.v.
+vid_trace vid_trace
+(
+	.clk      (clk_vga),
+	.in_ce    (vga_ce),   .in_hs (HSync),  .in_vs (VSync),  .in_de (vga_de),
+	.in_r     (r),        .in_g  (g),      .in_b  (b),
+	.out_ce   (CE_PIXEL), .out_hs(VGA_HS), .out_vs(VGA_VS), .out_de(VGA_DE),
+	.out_r    (VGA_R),    .out_g (VGA_G),  .out_b (VGA_B),
+	.sd_en    (sd_en),
+	.word_idx (mgmt_addr[3:0]),
+	.readdata (vidtrace_readdata)
+);
+
+// Same trace format at the last stage we can observe before the physical VGA
+// pins: IN = mixer output, OUT = sys_top final analog mux/inversion/gating.
+vid_trace pin_trace
+(
+	.clk      (clk_vga),
+	.in_ce    (CE_PIXEL), .in_hs (VGA_HS),     .in_vs (VGA_VS),     .in_de (VGA_DE),
+	.in_r     (VGA_R),    .in_g  (VGA_G),      .in_b  (VGA_B),
+	.out_ce   (CE_PIXEL), .out_hs(DBG_VGA_HS), .out_vs(DBG_VGA_VS), .out_de(DBG_VGA_DE),
+	.out_r    ({DBG_VGA_R,2'b00}), .out_g({DBG_VGA_G,2'b00}), .out_b({DBG_VGA_B,2'b00}),
+	.sd_en    (sd_en),
+	.word_idx (mgmt_addr[3:0]),
+	.readdata (pintrace_readdata)
+);
+
+// Route class 0xF8 to vid_trace; everything else to system.v's mgmt readback.
+assign mgmt_din = (mgmt_addr[15:8] == 8'hF8) ? vidtrace_readdata :
+                  (mgmt_addr[15:8] == 8'hF9) ? pintrace_readdata :
+                                                sys_mgmt_din;
 
 wire  [7:0] vga_pal_a;
 wire [17:0] vga_pal_d;
@@ -811,7 +895,7 @@ system system
 	.joystick_mode        (status[13:12]),
 	.joystick_timed       (status[59:58]),
 
-	.mgmt_readdata        (mgmt_din),
+	.mgmt_readdata        (sys_mgmt_din),
 	.mgmt_writedata       (mgmt_dout),
 	.mgmt_address         (mgmt_addr),
 	.mgmt_write           (mgmt_wr),

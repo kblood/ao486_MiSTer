@@ -1690,7 +1690,7 @@ always @(posedge clk_vga) ce_video_reg <= ce_video;
 assign vga_ce = ce_video_reg & (
 	(vga_flags[1:0] == 3) ? ce_div3 : 
 	                        ~vga_lores | (                                                                                     // when in vga_lores mode (not 4x mode)...
-	                                        ~(vertical_doublescan & vert_cnt[0]) &                                             // undo vertical doublescan when active (omits odd lines)
+	                                        1'b1 & // NOHDMI/CRT FIX: keep odd lines so doublescan modes emit the full ~400-line / 31 kHz frame a CRT syncs directly (was: ~(vertical_doublescan & vert_cnt[0]) &)
 	                                        (attrib_pelclock_div2 ? pel_color_8bit_cnt : ~seq_dotclock_divided | ~dot_cnt_div) // undo horizontal pixel doubling when active (omits doubled pixels)
 	                                     )
 );
