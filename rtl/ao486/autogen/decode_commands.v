@@ -469,6 +469,119 @@ wire cond_237 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDF && decoder[13:
 assign consume_mem_offset =
     (cond_116 && ~cond_4)? (`TRUE) :
     1'd0;
+// ===== PR-2c.DECFIX (iter 206): x87 dispatch one-hot collapse =====
+// The ~100 mutually-exclusive FPU decode arms below were a serial priority
+// cascade that dominated the decode->microcode (mc_eip/mc_consumed) setup path
+// and pushed clk_sys 90 MHz WSS to -12.2 ns.  They are pairwise-disjoint over
+// every (D8..DF x modrm) input (exhaustively verified), so the cascade is
+// rewritten as a single balanced ONE-HOT select.  SOLE overlap D9 D0
+// (cond_162 FST_STi vs cond_175 FNOP) keeps original priority via & ~cond_162.
+// cond_67 (reg-form ESC catch-all) stays BELOW the group, unchanged.
+wire fpu_cmd_hit = cond_144 | cond_145 | cond_146 | cond_147 | cond_222 | cond_148 | cond_149 | cond_150 | cond_151 | cond_152 | cond_153 | cond_154 | cond_155 | cond_156 | cond_157 | cond_158 | cond_159 | cond_160 | cond_161 | cond_162 | cond_163 | cond_164 | cond_221 | cond_223 | cond_224 | cond_225 | cond_226 | cond_227 | cond_238 | cond_239 | cond_240 | cond_241 | cond_242 | cond_243 | cond_244 | cond_245 | cond_165 | cond_166 | cond_167 | cond_168 | cond_169 | cond_170 | cond_171 | cond_172 | cond_173 | cond_174 | cond_175 | cond_176 | cond_177 | cond_178 | cond_179 | cond_180 | cond_181 | cond_182 | cond_183 | cond_184 | cond_185 | cond_186 | cond_187 | cond_188 | cond_189 | cond_190 | cond_191 | cond_192 | cond_193 | cond_194 | cond_195 | cond_196 | cond_197 | cond_198 | cond_199 | cond_200 | cond_201 | cond_202 | cond_203 | cond_204 | cond_205 | cond_206 | cond_207 | cond_220 | cond_228 | cond_229 | cond_230 | cond_236 | cond_208 | cond_209 | cond_210 | cond_211 | cond_212 | cond_213 | cond_214 | cond_215 | cond_216 | cond_217 | cond_218 | cond_219 | cond_231 | cond_232 | cond_233 | cond_234 | cond_235 | cond_237;
+wire [6:0] fpu_cmd_val =
+    ({7{cond_144}} & (`CMD_fpu))
+  |     ({7{cond_145}} & (`CMD_fpu))
+  |     ({7{cond_146}} & (`CMD_fpu))
+  |     ({7{cond_147}} & (`CMD_fpu))
+  |     ({7{cond_222}} & (`CMD_fpu))
+  |     ({7{cond_148}} & (`CMD_fpu_arith))
+  |     ({7{cond_149}} & (`CMD_fpu_arith))
+  |     ({7{cond_150}} & (`CMD_fpu_arith))
+  |     ({7{cond_151}} & (`CMD_fpu_arith))
+  |     ({7{cond_152}} & (`CMD_fpu_arith))
+  |     ({7{cond_153}} & (`CMD_fpu_arith))
+  |     ({7{cond_154}} & (`CMD_fpu_arith))
+  |     ({7{cond_155}} & (`CMD_fpu_arith))
+  |     ({7{cond_156}} & (`CMD_fpu_arith))
+  |     ({7{cond_157}} & (`CMD_fpu_arith))
+  |     ({7{cond_158}} & (`CMD_fpu_arith))
+  |     ({7{cond_159}} & (`CMD_fpu_arith))
+  |     ({7{cond_160}} & (`CMD_fpu_arith))
+  |     ({7{cond_161}} & (`CMD_fpu_arith))
+  |     ({7{cond_162}} & (`CMD_fpu_arith))
+  |     ({7{cond_163}} & (`CMD_fpu_arith))
+  |     ({7{cond_164}} & (`CMD_fpu_unary))
+  |     ({7{cond_221}} & (`CMD_fpu_unary))
+  |     ({7{cond_223}} & (`CMD_fpu_unary))
+  |     ({7{cond_224}} & (`CMD_fpu_unary))
+  |     ({7{cond_225}} & (`CMD_fpu_unary))
+  |     ({7{cond_226}} & (`CMD_fpu_unary))
+  |     ({7{cond_227}} & (`CMD_fpu_unary))
+  |     ({7{cond_238}} & (`CMD_fpu_transcendental))
+  |     ({7{cond_239}} & (`CMD_fpu_transcendental))
+  |     ({7{cond_240}} & (`CMD_fpu_transcendental))
+  |     ({7{cond_241}} & (`CMD_fpu_transcendental))
+  |     ({7{cond_242}} & (`CMD_fpu_transcendental))
+  |     ({7{cond_243}} & (`CMD_fpu_transcendental))
+  |     ({7{cond_244}} & (`CMD_fpu_transcendental))
+  |     ({7{cond_245}} & (`CMD_fpu_transcendental))
+  |     ({7{cond_165}} & (`CMD_fpu_unary))
+  |     ({7{cond_166}} & (`CMD_fpu_unary))
+  |     ({7{cond_167}} & (`CMD_fpu_cmp))
+  |     ({7{cond_168}} & (`CMD_fpu_cmp))
+  |     ({7{cond_169}} & (`CMD_fpu_cmp))
+  |     ({7{cond_170}} & (`CMD_fpu_cmp))
+  |     ({7{cond_171}} & (`CMD_fpu_unary))
+  |     ({7{cond_172}} & (`CMD_fpu_cmp))
+  |     ({7{cond_173}} & (`CMD_fpu_cmp))
+  |     ({7{cond_174}} & (`CMD_fpu_stack_ctrl))
+  |     ({7{cond_175 & ~cond_162}} & (`CMD_fpu_stack_ctrl))
+  |     ({7{cond_176}} & (`CMD_fpu_stack_ctrl))
+  |     ({7{cond_177}} & (`CMD_fpu_stack_ctrl))
+  |     ({7{cond_178}} & (`CMD_fpu_cmov))
+  |     ({7{cond_179}} & (`CMD_fpu_cmov))
+  |     ({7{cond_180}} & (`CMD_fpu_cmov))
+  |     ({7{cond_181}} & (`CMD_fpu_cmov))
+  |     ({7{cond_182}} & (`CMD_fpu_cmov))
+  |     ({7{cond_183}} & (`CMD_fpu_cmov))
+  |     ({7{cond_184}} & (`CMD_fpu_cmov))
+  |     ({7{cond_185}} & (`CMD_fpu_cmov))
+  |     ({7{cond_186}} & (`CMD_fpu_cmp))
+  |     ({7{cond_187}} & (`CMD_fpu_cmp))
+  |     ({7{cond_188}} & (`CMD_fpu_cmp))
+  |     ({7{cond_189}} & (`CMD_fpu_cmp))
+  |     ({7{cond_190}} & (`CMD_fpu_arith_mem))
+  |     ({7{cond_191}} & (`CMD_fpu_arith_mem))
+  |     ({7{cond_192}} & (`CMD_fpu_arith_mem))
+  |     ({7{cond_193}} & (`CMD_fpu_arith_mem))
+  |     ({7{cond_194}} & (`CMD_fpu_arith_mem))
+  |     ({7{cond_195}} & (`CMD_fpu_arith_mem))
+  |     ({7{cond_196}} & (`CMD_fpu_arith_mem))
+  |     ({7{cond_197}} & (`CMD_fpu_arith_mem))
+  |     ({7{cond_198}} & (`CMD_fpu_arith_mem))
+  |     ({7{cond_199}} & (`CMD_fpu_arith_mem))
+  |     ({7{cond_200}} & (`CMD_fpu_arith_mem))
+  |     ({7{cond_201}} & (`CMD_fpu_arith_mem))
+  |     ({7{cond_202}} & (`CMD_fpu_arith_mem))
+  |     ({7{cond_203}} & (`CMD_fpu_arith_mem))
+  |     ({7{cond_204}} & (`CMD_fpu_arith_mem))
+  |     ({7{cond_205}} & (`CMD_fpu_arith_mem))
+  |     ({7{cond_206}} & (`CMD_fpu_load_mem))
+  |     ({7{cond_207}} & (`CMD_fpu_load_mem))
+  |     ({7{cond_220}} & (`CMD_fpu_load_mem))
+  |     ({7{cond_228}} & (`CMD_fpu_load_mem))
+  |     ({7{cond_229}} & (`CMD_fpu_load_mem))
+  |     ({7{cond_230}} & (`CMD_fpu_load_mem))
+  |     ({7{cond_236}} & (`CMD_fpu_load_mem))
+  |     ({7{cond_208}} & (`CMD_fpu_const))
+  |     ({7{cond_209}} & (`CMD_fpu_const))
+  |     ({7{cond_210}} & (`CMD_fpu_const))
+  |     ({7{cond_211}} & (`CMD_fpu_const))
+  |     ({7{cond_212}} & (`CMD_fpu_const))
+  |     ({7{cond_213}} & (`CMD_fpu_const))
+  |     ({7{cond_214}} & (`CMD_fpu_const))
+  |     ({7{cond_215}} & (`CMD_fpu_store_mem))
+  |     ({7{cond_216}} & (`CMD_fpu_store_mem))
+  |     ({7{cond_217}} & (`CMD_fpu_store_mem))
+  |     ({7{cond_218}} & (`CMD_fpu_store_mem))
+  |     ({7{cond_219}} & (`CMD_fpu_store_mem))
+  |     ({7{cond_231}} & (`CMD_fpu_store_mem))
+  |     ({7{cond_232}} & (`CMD_fpu_store_mem))
+  |     ({7{cond_233}} & (`CMD_fpu_store_mem))
+  |     ({7{cond_234}} & (`CMD_fpu_store_mem))
+  |     ({7{cond_235}} & (`CMD_fpu_store_mem))
+  |     ({7{cond_237}} & (`CMD_fpu_store_mem));
+
 assign dec_cmd =
     (cond_0 && ~cond_1)? ( `CMD_XADD) :
     (cond_3 && ~cond_4)? ( `CMD_JCXZ) :
@@ -524,114 +637,7 @@ assign dec_cmd =
     // PR-2b.4i (iter 60): cond_67 reg-form catch-all moved BELOW the
     // PR-1a / PR-2b cond_144..205 arms so the more-specific decode
     // wins.  See the cascade tail after cond_205 below.
-    (cond_144 && ~cond_4)? ( `CMD_fpu) :
-    (cond_145 && ~cond_4)? ( `CMD_fpu) :
-    (cond_146 && ~cond_4)? ( `CMD_fpu) :
-    (cond_147 && ~cond_4)? ( `CMD_fpu) :
-    (cond_222 && ~cond_4)? ( `CMD_fpu) :  // PR-2b.5o iter 129: FLDCW m16 (D9 /5)
-    (cond_148 && ~cond_4)? ( `CMD_fpu_arith) :
-    (cond_149 && ~cond_4)? ( `CMD_fpu_arith) :
-    (cond_150 && ~cond_4)? ( `CMD_fpu_arith) :
-    (cond_151 && ~cond_4)? ( `CMD_fpu_arith) :
-    (cond_152 && ~cond_4)? ( `CMD_fpu_arith) :
-    (cond_153 && ~cond_4)? ( `CMD_fpu_arith) :
-    (cond_154 && ~cond_4)? ( `CMD_fpu_arith) :
-    (cond_155 && ~cond_4)? ( `CMD_fpu_arith) :
-    (cond_156 && ~cond_4)? ( `CMD_fpu_arith) :
-    (cond_157 && ~cond_4)? ( `CMD_fpu_arith) :
-    (cond_158 && ~cond_4)? ( `CMD_fpu_arith) :
-    (cond_159 && ~cond_4)? ( `CMD_fpu_arith) :
-    (cond_160 && ~cond_4)? ( `CMD_fpu_arith) :
-    (cond_161 && ~cond_4)? ( `CMD_fpu_arith) :
-    (cond_162 && ~cond_4)? ( `CMD_fpu_arith) :
-    (cond_163 && ~cond_4)? ( `CMD_fpu_arith) :
-    (cond_164 && ~cond_4)? ( `CMD_fpu_unary) :
-    (cond_221 && ~cond_4)? ( `CMD_fpu_unary) :
-    (cond_223 && ~cond_4)? ( `CMD_fpu_unary) :  // PR-2b.5p iter 130: FSCALE (D9 FD)
-    (cond_224 && ~cond_4)? ( `CMD_fpu_unary) :  // PR-2b.5q iter 131: FXTRACT (D9 F4)
-    (cond_225 && ~cond_4)? ( `CMD_fpu_unary) :  // PR-2b.5r iter 135: FPREM  (D9 F8)
-    (cond_226 && ~cond_4)? ( `CMD_fpu_unary) :  // PR-2b.5r iter 135: FPREM1 (D9 F5)
-    (cond_227 && ~cond_4)? ( `CMD_fpu_unary) :  // PR-2b.5t iter 137: FSQRT  (D9 FA)
-    (cond_238 && ~cond_4)? ( `CMD_fpu_transcendental) :  // PR-2c.T: F2XM1   (D9 F0)
-    (cond_239 && ~cond_4)? ( `CMD_fpu_transcendental) :  // PR-2c.T: FYL2X   (D9 F1)
-    (cond_240 && ~cond_4)? ( `CMD_fpu_transcendental) :  // PR-2c.T: FPTAN   (D9 F2)
-    (cond_241 && ~cond_4)? ( `CMD_fpu_transcendental) :  // PR-2c.T: FPATAN  (D9 F3)
-    (cond_242 && ~cond_4)? ( `CMD_fpu_transcendental) :  // PR-2c.T: FYL2XP1 (D9 F9)
-    (cond_243 && ~cond_4)? ( `CMD_fpu_transcendental) :  // PR-2c.T: FSIN    (D9 FE)
-    (cond_244 && ~cond_4)? ( `CMD_fpu_transcendental) :  // PR-2c.T: FCOS    (D9 FF)
-    (cond_245 && ~cond_4)? ( `CMD_fpu_transcendental) :  // PR-2c.T: FSINCOS (D9 FB)
-    (cond_165 && ~cond_4)? ( `CMD_fpu_unary) :
-    (cond_166 && ~cond_4)? ( `CMD_fpu_unary) :
-    (cond_167 && ~cond_4)? ( `CMD_fpu_cmp) :
-    (cond_168 && ~cond_4)? ( `CMD_fpu_cmp) :
-    (cond_169 && ~cond_4)? ( `CMD_fpu_cmp) :
-    (cond_170 && ~cond_4)? ( `CMD_fpu_cmp) :
-    (cond_171 && ~cond_4)? ( `CMD_fpu_unary) :
-    (cond_172 && ~cond_4)? ( `CMD_fpu_cmp) :
-    (cond_173 && ~cond_4)? ( `CMD_fpu_cmp) :
-    (cond_174 && ~cond_4)? ( `CMD_fpu_stack_ctrl) :
-    (cond_175 && ~cond_4)? ( `CMD_fpu_stack_ctrl) :
-    (cond_176 && ~cond_4)? ( `CMD_fpu_stack_ctrl) :
-    (cond_177 && ~cond_4)? ( `CMD_fpu_stack_ctrl) :
-    (cond_178 && ~cond_4)? ( `CMD_fpu_cmov) :
-    (cond_179 && ~cond_4)? ( `CMD_fpu_cmov) :
-    (cond_180 && ~cond_4)? ( `CMD_fpu_cmov) :
-    (cond_181 && ~cond_4)? ( `CMD_fpu_cmov) :
-    (cond_182 && ~cond_4)? ( `CMD_fpu_cmov) :
-    (cond_183 && ~cond_4)? ( `CMD_fpu_cmov) :
-    (cond_184 && ~cond_4)? ( `CMD_fpu_cmov) :
-    (cond_185 && ~cond_4)? ( `CMD_fpu_cmov) :
-    (cond_186 && ~cond_4)? ( `CMD_fpu_cmp) :
-    (cond_187 && ~cond_4)? ( `CMD_fpu_cmp) :
-    (cond_188 && ~cond_4)? ( `CMD_fpu_cmp) :
-    (cond_189 && ~cond_4)? ( `CMD_fpu_cmp) :
-    (cond_190 && ~cond_4)? ( `CMD_fpu_arith_mem) :
-    (cond_191 && ~cond_4)? ( `CMD_fpu_arith_mem) :
-    (cond_192 && ~cond_4)? ( `CMD_fpu_arith_mem) :
-    (cond_193 && ~cond_4)? ( `CMD_fpu_arith_mem) :
-    (cond_194 && ~cond_4)? ( `CMD_fpu_arith_mem) :
-    (cond_195 && ~cond_4)? ( `CMD_fpu_arith_mem) :
-    (cond_196 && ~cond_4)? ( `CMD_fpu_arith_mem) :
-    (cond_197 && ~cond_4)? ( `CMD_fpu_arith_mem) :
-    (cond_198 && ~cond_4)? ( `CMD_fpu_arith_mem) :
-    (cond_199 && ~cond_4)? ( `CMD_fpu_arith_mem) :
-    (cond_200 && ~cond_4)? ( `CMD_fpu_arith_mem) :
-    (cond_201 && ~cond_4)? ( `CMD_fpu_arith_mem) :
-    (cond_202 && ~cond_4)? ( `CMD_fpu_arith_mem) :
-    (cond_203 && ~cond_4)? ( `CMD_fpu_arith_mem) :
-    (cond_204 && ~cond_4)? ( `CMD_fpu_arith_mem) :
-    (cond_205 && ~cond_4)? ( `CMD_fpu_arith_mem) :
-    // PR-2b.4k (iter 75): FLD m32fp / m64fp dispatch into the new
-    // CMD_fpu_load_mem namespace.  Sits BELOW cond_192..205 (mem-form
-    // arith/cmp) and ABOVE cond_67 (reg-form catch-all) — mem-form
-    // FLD must win before cond_67 sweeps it into the legacy stub.
-    (cond_206 && ~cond_4)? ( `CMD_fpu_load_mem) :
-    (cond_207 && ~cond_4)? ( `CMD_fpu_load_mem) :
-    (cond_220 && ~cond_4)? ( `CMD_fpu_load_mem) :  // PR-2b.5g iter 124: FLD m80fp
-    (cond_228 && ~cond_4)? ( `CMD_fpu_load_mem) :  // PR-2b.5v iter 140: FILD m32
-    (cond_229 && ~cond_4)? ( `CMD_fpu_load_mem) :  // PR-2b.5v iter 140: FILD m16
-    (cond_230 && ~cond_4)? ( `CMD_fpu_load_mem) :  // PR-2b.5v iter 140: FILD m64
-    (cond_236 && ~cond_4)? ( `CMD_fpu_load_mem) :  // PR-2b.5z iter 152: FBLD  m80
-    // PR-2b.4n (iter 112): FPU constant loads dispatch above the cond_67
-    // reg-form catch-all so they win before the legacy CMD_fpu stub.
-    (cond_208 && ~cond_4)? ( `CMD_fpu_const) :
-    (cond_209 && ~cond_4)? ( `CMD_fpu_const) :
-    (cond_210 && ~cond_4)? ( `CMD_fpu_const) :
-    (cond_211 && ~cond_4)? ( `CMD_fpu_const) :
-    (cond_212 && ~cond_4)? ( `CMD_fpu_const) :
-    (cond_213 && ~cond_4)? ( `CMD_fpu_const) :
-    (cond_214 && ~cond_4)? ( `CMD_fpu_const) :
-    (cond_215 && ~cond_4)? ( `CMD_fpu_store_mem) :  // PR-2b.5a iter 113: FSTP m80fp
-    (cond_216 && ~cond_4)? ( `CMD_fpu_store_mem) :  // PR-2b.5c iter 116: FSTP m32fp
-    (cond_217 && ~cond_4)? ( `CMD_fpu_store_mem) :  // PR-2b.5d iter 117: FSTP m64fp
-    (cond_218 && ~cond_4)? ( `CMD_fpu_store_mem) :  // PR-2b.5e iter 118: FST m32fp
-    (cond_219 && ~cond_4)? ( `CMD_fpu_store_mem) :  // PR-2b.5e iter 118: FST m64fp
-    (cond_231 && ~cond_4)? ( `CMD_fpu_store_mem) :  // PR-2b.5w iter 141: FIST  m32
-    (cond_232 && ~cond_4)? ( `CMD_fpu_store_mem) :  // PR-2b.5w iter 141: FISTP m32
-    (cond_233 && ~cond_4)? ( `CMD_fpu_store_mem) :  // PR-2b.5w iter 141: FIST  m16
-    (cond_234 && ~cond_4)? ( `CMD_fpu_store_mem) :  // PR-2b.5w iter 141: FISTP m16
-    (cond_235 && ~cond_4)? ( `CMD_fpu_store_mem) :  // PR-2b.5w iter 141: FISTP m64
-    (cond_237 && ~cond_4)? ( `CMD_fpu_store_mem) :  // PR-2b.5z iter 152: FBSTP m80
+    (fpu_cmd_hit && ~cond_4)? ( fpu_cmd_val ) :
     // PR-2b.4i (iter 60): cond_67 reg-form catch-all relocated here, BELOW
     // cond_144..205, so reg-form D8..DF + modregrm_one falls back to the
     // legacy CMD_fpu / CMDEX_ESC_STEP_0 stub ONLY when no more-specific
@@ -999,112 +1005,13 @@ assign consume_modregrm_one =
     // PR-2b.4i (iter 60): cond_67 relocated below cond_205 in this cascade
     // so PR-1a (cond_144..147) and PR-2b (cond_148..205) win first; cond_67
     // remains as a fall-through for un-implemented reg-form D8..DF.
-    (cond_144 && ~cond_4)? (`TRUE) :
-    (cond_145 && ~cond_4)? (`TRUE) :
-    (cond_146 && ~cond_4)? (`TRUE) :
-    (cond_147 && ~cond_4)? (`TRUE) :
-    (cond_222 && ~cond_4)? (`TRUE) :  // PR-2b.5o iter 129: FLDCW m16 consume_modregrm_one
-    (cond_148 && ~cond_4)? (`TRUE) :
-    (cond_149 && ~cond_4)? (`TRUE) :
-    (cond_150 && ~cond_4)? (`TRUE) :
-    (cond_151 && ~cond_4)? (`TRUE) :
-    (cond_152 && ~cond_4)? (`TRUE) :
-    (cond_153 && ~cond_4)? (`TRUE) :
-    (cond_154 && ~cond_4)? (`TRUE) :
-    (cond_155 && ~cond_4)? (`TRUE) :
-    (cond_156 && ~cond_4)? (`TRUE) :
-    (cond_157 && ~cond_4)? (`TRUE) :
-    (cond_158 && ~cond_4)? (`TRUE) :
-    (cond_159 && ~cond_4)? (`TRUE) :
-    (cond_160 && ~cond_4)? (`TRUE) :
-    (cond_161 && ~cond_4)? (`TRUE) :
-    (cond_162 && ~cond_4)? (`TRUE) :
-    (cond_163 && ~cond_4)? (`TRUE) :
-    (cond_164 && ~cond_4)? (`TRUE) :
-    (cond_221 && ~cond_4)? (`TRUE) :
-    (cond_223 && ~cond_4)? (`TRUE) :  // PR-2b.5p iter 130: FSCALE consume_modregrm_one
-    (cond_224 && ~cond_4)? (`TRUE) :  // PR-2b.5q iter 131: FXTRACT consume_modregrm_one
-    (cond_225 && ~cond_4)? (`TRUE) :  // PR-2b.5r iter 135: FPREM  consume_modregrm_one
-    (cond_226 && ~cond_4)? (`TRUE) :  // PR-2b.5r iter 135: FPREM1 consume_modregrm_one
-    (cond_227 && ~cond_4)? (`TRUE) :  // PR-2b.5t iter 137: FSQRT  consume_modregrm_one
-    (cond_238 && ~cond_4)? (`TRUE) :  // PR-2c.T: F2XM1   consume_modregrm_one
-    (cond_239 && ~cond_4)? (`TRUE) :  // PR-2c.T: FYL2X
-    (cond_240 && ~cond_4)? (`TRUE) :  // PR-2c.T: FPTAN
-    (cond_241 && ~cond_4)? (`TRUE) :  // PR-2c.T: FPATAN
-    (cond_242 && ~cond_4)? (`TRUE) :  // PR-2c.T: FYL2XP1
-    (cond_243 && ~cond_4)? (`TRUE) :  // PR-2c.T: FSIN
-    (cond_244 && ~cond_4)? (`TRUE) :  // PR-2c.T: FCOS
-    (cond_245 && ~cond_4)? (`TRUE) :  // PR-2c.T: FSINCOS
-    (cond_165 && ~cond_4)? (`TRUE) :
-    (cond_166 && ~cond_4)? (`TRUE) :
-    (cond_167 && ~cond_4)? (`TRUE) :
-    (cond_168 && ~cond_4)? (`TRUE) :
-    (cond_169 && ~cond_4)? (`TRUE) :
-    (cond_170 && ~cond_4)? (`TRUE) :
-    (cond_171 && ~cond_4)? (`TRUE) :
-    (cond_172 && ~cond_4)? (`TRUE) :
-    (cond_173 && ~cond_4)? (`TRUE) :
-    (cond_174 && ~cond_4)? (`TRUE) :
-    (cond_175 && ~cond_4)? (`TRUE) :
-    (cond_176 && ~cond_4)? (`TRUE) :
-    (cond_177 && ~cond_4)? (`TRUE) :
-    (cond_178 && ~cond_4)? (`TRUE) :
-    (cond_179 && ~cond_4)? (`TRUE) :
-    (cond_180 && ~cond_4)? (`TRUE) :
-    (cond_181 && ~cond_4)? (`TRUE) :
-    (cond_182 && ~cond_4)? (`TRUE) :
-    (cond_183 && ~cond_4)? (`TRUE) :
-    (cond_184 && ~cond_4)? (`TRUE) :
-    (cond_185 && ~cond_4)? (`TRUE) :
-    (cond_186 && ~cond_4)? (`TRUE) :
-    (cond_187 && ~cond_4)? (`TRUE) :
-    (cond_188 && ~cond_4)? (`TRUE) :
-    (cond_189 && ~cond_4)? (`TRUE) :
-    (cond_190 && ~cond_4)? (`TRUE) :
-    (cond_191 && ~cond_4)? (`TRUE) :
-    (cond_192 && ~cond_4)? (`TRUE) :
-    (cond_193 && ~cond_4)? (`TRUE) :
-    (cond_194 && ~cond_4)? (`TRUE) :
-    (cond_195 && ~cond_4)? (`TRUE) :
-    (cond_196 && ~cond_4)? (`TRUE) :
-    (cond_197 && ~cond_4)? (`TRUE) :
-    (cond_198 && ~cond_4)? (`TRUE) :
-    (cond_199 && ~cond_4)? (`TRUE) :
-    (cond_200 && ~cond_4)? (`TRUE) :
-    (cond_201 && ~cond_4)? (`TRUE) :
-    (cond_202 && ~cond_4)? (`TRUE) :
-    (cond_203 && ~cond_4)? (`TRUE) :
-    (cond_204 && ~cond_4)? (`TRUE) :
-    (cond_205 && ~cond_4)? (`TRUE) :
-    // PR-2b.4k (iter 75): FLD m32fp / m64fp also consume the modregrm
-    // byte (memory addressing form).
-    (cond_206 && ~cond_4)? (`TRUE) :
-    (cond_207 && ~cond_4)? (`TRUE) :
-    (cond_220 && ~cond_4)? (`TRUE) :  // PR-2b.5g iter 124: FLD m80fp consumes the modregrm
-    (cond_228 && ~cond_4)? (`TRUE) :  // PR-2b.5v iter 140: FILD m32 consumes the modregrm
-    (cond_229 && ~cond_4)? (`TRUE) :  // PR-2b.5v iter 140: FILD m16 consumes the modregrm
-    (cond_230 && ~cond_4)? (`TRUE) :  // PR-2b.5v iter 140: FILD m64 consumes the modregrm
-    // PR-2b.4n (iter 112): FPU constant loads consume their second byte
-    // (E8..EE) like FCHS (D9 E0); assert consume_modregrm_one.
-    (cond_208 && ~cond_4)? (`TRUE) :
-    (cond_209 && ~cond_4)? (`TRUE) :
-    (cond_210 && ~cond_4)? (`TRUE) :
-    (cond_211 && ~cond_4)? (`TRUE) :
-    (cond_212 && ~cond_4)? (`TRUE) :
-    (cond_213 && ~cond_4)? (`TRUE) :
-    (cond_214 && ~cond_4)? (`TRUE) :
-    (cond_215 && ~cond_4)? (`TRUE) :  // PR-2b.5a iter 113: FSTP m80fp consumes the modrm
-    (cond_216 && ~cond_4)? (`TRUE) :  // PR-2b.5c iter 116: FSTP m32fp consumes the modrm
-    (cond_217 && ~cond_4)? (`TRUE) :  // PR-2b.5d iter 117: FSTP m64fp consumes the modrm
-    (cond_218 && ~cond_4)? (`TRUE) :  // PR-2b.5e iter 118: FST m32fp consumes the modrm
-    (cond_219 && ~cond_4)? (`TRUE) :  // PR-2b.5e iter 118: FST m64fp consumes the modrm
-    (cond_231 && ~cond_4)? (`TRUE) :  // PR-2b.5w iter 141: FIST  m32 consumes the modrm
-    (cond_232 && ~cond_4)? (`TRUE) :  // PR-2b.5w iter 141: FISTP m32 consumes the modrm
-    (cond_233 && ~cond_4)? (`TRUE) :  // PR-2b.5w iter 141: FIST  m16 consumes the modrm
-    (cond_234 && ~cond_4)? (`TRUE) :  // PR-2b.5w iter 141: FISTP m16 consumes the modrm
-    (cond_235 && ~cond_4)? (`TRUE) :  // PR-2b.5w iter 141: FISTP m64 consumes the modrm
-    (cond_236 && ~cond_4)? (`TRUE) :  // PR-2b.5z iter 152: FBLD  m80 consumes the modrm
-    (cond_237 && ~cond_4)? (`TRUE) :  // PR-2b.5z iter 152: FBSTP m80 consumes the modrm
+    // DECFIX prototype (decode->mc_eip 90 MHz timing): the 102 per-op x87
+    // cond_N (cond_144..245, cond_206..237) each only asserted consume_modregrm_one
+    // for INSTRUCTION LENGTH -- every D8..DF ESC opcode + modrm consumes identically,
+    // so the 102-wide OR was needless depth on the decoder[4]->dec_eip->mc_eip cone.
+    // Collapse to one opcode-range test (D8..DF = decoder[7:3]==5'b11011). Per-op
+    // cond_N still drive execute dispatch (mc_cmd/cmdex), a separate registered path.
+    (dec_ready_modregrm_one && decoder[7:3] == 5'b11011 && ~cond_4)? (`TRUE) :
     // PR-2b.4i (iter 60): cond_67 reg-form catch-all relocated here so
     // un-implemented reg-form D8..DF + modregrm_one still asserts
     // consume_modregrm_one (advancing the decoder past the instruction)
@@ -1187,6 +1094,119 @@ assign dec_is_8bit =
     (cond_140 && ~cond_4)? (`TRUE) :
     (cond_141 && ~cond_4)? (`TRUE) :
     1'd0;
+// ===== PR-2c.DECFIX (iter 206): x87 dispatch one-hot collapse =====
+// The ~100 mutually-exclusive FPU decode arms below were a serial priority
+// cascade that dominated the decode->microcode (mc_eip/mc_consumed) setup path
+// and pushed clk_sys 90 MHz WSS to -12.2 ns.  They are pairwise-disjoint over
+// every (D8..DF x modrm) input (exhaustively verified), so the cascade is
+// rewritten as a single balanced ONE-HOT select.  SOLE overlap D9 D0
+// (cond_162 FST_STi vs cond_175 FNOP) keeps original priority via & ~cond_162.
+// cond_67 (reg-form ESC catch-all) stays BELOW the group, unchanged.
+wire fpu_cmdex_hit = cond_144 | cond_145 | cond_146 | cond_147 | cond_222 | cond_148 | cond_149 | cond_150 | cond_151 | cond_152 | cond_153 | cond_154 | cond_155 | cond_156 | cond_157 | cond_158 | cond_159 | cond_160 | cond_161 | cond_162 | cond_163 | cond_164 | cond_221 | cond_223 | cond_224 | cond_225 | cond_226 | cond_227 | cond_238 | cond_239 | cond_240 | cond_241 | cond_242 | cond_243 | cond_244 | cond_245 | cond_165 | cond_166 | cond_167 | cond_168 | cond_169 | cond_170 | cond_171 | cond_172 | cond_173 | cond_174 | cond_175 | cond_176 | cond_177 | cond_178 | cond_179 | cond_180 | cond_181 | cond_182 | cond_183 | cond_184 | cond_185 | cond_186 | cond_187 | cond_188 | cond_189 | cond_190 | cond_191 | cond_192 | cond_193 | cond_194 | cond_195 | cond_196 | cond_197 | cond_198 | cond_199 | cond_200 | cond_201 | cond_202 | cond_203 | cond_204 | cond_205 | cond_206 | cond_207 | cond_220 | cond_228 | cond_229 | cond_230 | cond_236 | cond_208 | cond_209 | cond_210 | cond_211 | cond_212 | cond_213 | cond_214 | cond_215 | cond_216 | cond_217 | cond_218 | cond_219 | cond_231 | cond_232 | cond_233 | cond_234 | cond_235 | cond_237;
+wire [3:0] fpu_cmdex_val =
+    ({4{cond_144}} & (`CMDEX_FN_INIT))
+  |     ({4{cond_145}} & (`CMDEX_FN_CLEX))
+  |     ({4{cond_146}} & (`CMDEX_FNSTSW_AX))
+  |     ({4{cond_147}} & (`CMDEX_FNSTCW_M16))
+  |     ({4{cond_222}} & (`CMDEX_FLDCW_M16))
+  |     ({4{cond_148}} & (`CMDEX_FADD_ST0_STi))
+  |     ({4{cond_149}} & (`CMDEX_FSUB_ST0_STi))
+  |     ({4{cond_150}} & (`CMDEX_FMUL_ST0_STi))
+  |     ({4{cond_151}} & (`CMDEX_FDIV_ST0_STi))
+  |     ({4{cond_152}} & (`CMDEX_FSUBR_ST0_STi))
+  |     ({4{cond_153}} & (`CMDEX_FDIVR_ST0_STi))
+  |     ({4{cond_154}} & (`CMDEX_FADDP_STi_ST0))
+  |     ({4{cond_155}} & (`CMDEX_FMULP_STi_ST0))
+  |     ({4{cond_156}} & (`CMDEX_FSUBRP_STi_ST0))
+  |     ({4{cond_157}} & (`CMDEX_FSUBP_STi_ST0))
+  |     ({4{cond_158}} & (`CMDEX_FDIVRP_STi_ST0))
+  |     ({4{cond_159}} & (`CMDEX_FDIVP_STi_ST0))
+  |     ({4{cond_160}} & (`CMDEX_FXCH_STi))
+  |     ({4{cond_161}} & (`CMDEX_FLD_STi))
+  |     ({4{cond_162}} & (`CMDEX_FST_STi))
+  |     ({4{cond_163}} & (`CMDEX_FSTP_STi))
+  |     ({4{cond_164}} & (`CMDEX_FCHS))
+  |     ({4{cond_221}} & (`CMDEX_FRNDINT))
+  |     ({4{cond_223}} & (`CMDEX_FSCALE))
+  |     ({4{cond_224}} & (`CMDEX_FXTRACT))
+  |     ({4{cond_225}} & (`CMDEX_FPREM))
+  |     ({4{cond_226}} & (`CMDEX_FPREM1))
+  |     ({4{cond_227}} & (`CMDEX_FSQRT))
+  |     ({4{cond_238}} & (`CMDEX_F2XM1))
+  |     ({4{cond_239}} & (`CMDEX_FYL2X))
+  |     ({4{cond_240}} & (`CMDEX_FPTAN))
+  |     ({4{cond_241}} & (`CMDEX_FPATAN))
+  |     ({4{cond_242}} & (`CMDEX_FYL2XP1))
+  |     ({4{cond_243}} & (`CMDEX_FSIN))
+  |     ({4{cond_244}} & (`CMDEX_FCOS))
+  |     ({4{cond_245}} & (`CMDEX_FSINCOS))
+  |     ({4{cond_165}} & (`CMDEX_FABS))
+  |     ({4{cond_166}} & (`CMDEX_FXAM))
+  |     ({4{cond_167}} & (`CMDEX_FCOM))
+  |     ({4{cond_168}} & (`CMDEX_FCOMP))
+  |     ({4{cond_169}} & (`CMDEX_FUCOM))
+  |     ({4{cond_170}} & (`CMDEX_FUCOMP))
+  |     ({4{cond_171}} & (`CMDEX_FTST))
+  |     ({4{cond_172}} & (`CMDEX_FCOMPP))
+  |     ({4{cond_173}} & (`CMDEX_FUCOMPP))
+  |     ({4{cond_174}} & (`CMDEX_FFREE))
+  |     ({4{cond_175 & ~cond_162}} & (`CMDEX_FNOP))
+  |     ({4{cond_176}} & (`CMDEX_FDECSTP))
+  |     ({4{cond_177}} & (`CMDEX_FINCSTP))
+  |     ({4{cond_178}} & (`CMDEX_FCMOVB))
+  |     ({4{cond_179}} & (`CMDEX_FCMOVE))
+  |     ({4{cond_180}} & (`CMDEX_FCMOVBE))
+  |     ({4{cond_181}} & (`CMDEX_FCMOVU))
+  |     ({4{cond_182}} & (`CMDEX_FCMOVNB))
+  |     ({4{cond_183}} & (`CMDEX_FCMOVNE))
+  |     ({4{cond_184}} & (`CMDEX_FCMOVNBE))
+  |     ({4{cond_185}} & (`CMDEX_FCMOVNU))
+  |     ({4{cond_186}} & (`CMDEX_FCOMI))
+  |     ({4{cond_187}} & (`CMDEX_FUCOMI))
+  |     ({4{cond_188}} & (`CMDEX_FCOMIP))
+  |     ({4{cond_189}} & (`CMDEX_FUCOMIP))
+  |     ({4{cond_190}} & (`CMDEX_FADD_M32))
+  |     ({4{cond_191}} & (`CMDEX_FADD_M64))
+  |     ({4{cond_192}} & (`CMDEX_FMUL_M32))
+  |     ({4{cond_193}} & (`CMDEX_FMUL_M64))
+  |     ({4{cond_194}} & (`CMDEX_FSUB_M32))
+  |     ({4{cond_195}} & (`CMDEX_FSUB_M64))
+  |     ({4{cond_196}} & (`CMDEX_FDIV_M32))
+  |     ({4{cond_197}} & (`CMDEX_FDIV_M64))
+  |     ({4{cond_198}} & (`CMDEX_FSUBR_M32))
+  |     ({4{cond_199}} & (`CMDEX_FSUBR_M64))
+  |     ({4{cond_200}} & (`CMDEX_FDIVR_M32))
+  |     ({4{cond_201}} & (`CMDEX_FDIVR_M64))
+  |     ({4{cond_202}} & (`CMDEX_FCOM_M32))
+  |     ({4{cond_203}} & (`CMDEX_FCOM_M64))
+  |     ({4{cond_204}} & (`CMDEX_FCOMP_M32))
+  |     ({4{cond_205}} & (`CMDEX_FCOMP_M64))
+  |     ({4{cond_206}} & (`CMDEX_FLD_M32))
+  |     ({4{cond_207}} & (`CMDEX_FLD_M64))
+  |     ({4{cond_220}} & (`CMDEX_FLD_M80))
+  |     ({4{cond_228}} & (`CMDEX_FILD_M32))
+  |     ({4{cond_229}} & (`CMDEX_FILD_M16))
+  |     ({4{cond_230}} & (`CMDEX_FILD_M64))
+  |     ({4{cond_236}} & (`CMDEX_FBLD))
+  |     ({4{cond_208}} & (`CMDEX_FLD1))
+  |     ({4{cond_209}} & (`CMDEX_FLDL2T))
+  |     ({4{cond_210}} & (`CMDEX_FLDL2E))
+  |     ({4{cond_211}} & (`CMDEX_FLDPI))
+  |     ({4{cond_212}} & (`CMDEX_FLDLG2))
+  |     ({4{cond_213}} & (`CMDEX_FLDLN2))
+  |     ({4{cond_214}} & (`CMDEX_FLDZ))
+  |     ({4{cond_215}} & (`CMDEX_FSTP_M80))
+  |     ({4{cond_216}} & (`CMDEX_FSTP_M32))
+  |     ({4{cond_217}} & (`CMDEX_FSTP_M64))
+  |     ({4{cond_218}} & (`CMDEX_FST_M32))
+  |     ({4{cond_219}} & (`CMDEX_FST_M64))
+  |     ({4{cond_231}} & (`CMDEX_FIST_M32))
+  |     ({4{cond_232}} & (`CMDEX_FISTP_M32))
+  |     ({4{cond_233}} & (`CMDEX_FIST_M16))
+  |     ({4{cond_234}} & (`CMDEX_FISTP_M16))
+  |     ({4{cond_235}} & (`CMDEX_FISTP_M64))
+  |     ({4{cond_237}} & (`CMDEX_FBSTP));
+
 assign dec_cmdex =
     (cond_5 && ~cond_4 && cond_6)? ( `CMDEX_CALL_Jv_STEP_0) :
     (cond_5 && ~cond_4 && ~cond_6)? ( `CMDEX_CALL_Ap_STEP_0) :
@@ -1235,111 +1255,7 @@ assign dec_cmdex =
     (cond_66 && ~cond_4)? ( `CMDEX_WAIT_STEP_0) :
     // PR-2b.4i (iter 60): cond_67's CMDEX_ESC_STEP_0 arm relocated to
     // the tail of this cascade so PR-1a / PR-2b CMDEXes win first.
-    (cond_144 && ~cond_4)? ( `CMDEX_FN_INIT) :
-    (cond_145 && ~cond_4)? ( `CMDEX_FN_CLEX) :
-    (cond_146 && ~cond_4)? ( `CMDEX_FNSTSW_AX) :
-    (cond_147 && ~cond_4)? ( `CMDEX_FNSTCW_M16) :
-    (cond_222 && ~cond_4)? ( `CMDEX_FLDCW_M16) :  // PR-2b.5o iter 129: FLDCW m16
-    (cond_148 && ~cond_4)? ( `CMDEX_FADD_ST0_STi) :
-    (cond_149 && ~cond_4)? ( `CMDEX_FSUB_ST0_STi) :
-    (cond_150 && ~cond_4)? ( `CMDEX_FMUL_ST0_STi) :
-    (cond_151 && ~cond_4)? ( `CMDEX_FDIV_ST0_STi) :
-    (cond_152 && ~cond_4)? ( `CMDEX_FSUBR_ST0_STi) :
-    (cond_153 && ~cond_4)? ( `CMDEX_FDIVR_ST0_STi) :
-    (cond_154 && ~cond_4)? ( `CMDEX_FADDP_STi_ST0) :
-    (cond_155 && ~cond_4)? ( `CMDEX_FMULP_STi_ST0) :
-    (cond_156 && ~cond_4)? ( `CMDEX_FSUBRP_STi_ST0) :
-    (cond_157 && ~cond_4)? ( `CMDEX_FSUBP_STi_ST0) :
-    (cond_158 && ~cond_4)? ( `CMDEX_FDIVRP_STi_ST0) :
-    (cond_159 && ~cond_4)? ( `CMDEX_FDIVP_STi_ST0) :
-    (cond_160 && ~cond_4)? ( `CMDEX_FXCH_STi) :
-    (cond_161 && ~cond_4)? ( `CMDEX_FLD_STi) :
-    (cond_162 && ~cond_4)? ( `CMDEX_FST_STi) :
-    (cond_163 && ~cond_4)? ( `CMDEX_FSTP_STi) :
-    (cond_164 && ~cond_4)? ( `CMDEX_FCHS) :
-    (cond_221 && ~cond_4)? ( `CMDEX_FRNDINT) :
-    (cond_223 && ~cond_4)? ( `CMDEX_FSCALE) :  // PR-2b.5p iter 130: FSCALE (D9 FD)
-    (cond_224 && ~cond_4)? ( `CMDEX_FXTRACT) :  // PR-2b.5q iter 131: FXTRACT (D9 F4)
-    (cond_225 && ~cond_4)? ( `CMDEX_FPREM) :  // PR-2b.5r iter 135: FPREM  (D9 F8)
-    (cond_226 && ~cond_4)? ( `CMDEX_FPREM1) :  // PR-2b.5r iter 135: FPREM1 (D9 F5)
-    (cond_227 && ~cond_4)? ( `CMDEX_FSQRT) :  // PR-2b.5t iter 137: FSQRT  (D9 FA)
-    (cond_238 && ~cond_4)? ( `CMDEX_F2XM1) :    // PR-2c.T: F2XM1   (D9 F0)
-    (cond_239 && ~cond_4)? ( `CMDEX_FYL2X) :    // PR-2c.T: FYL2X   (D9 F1)
-    (cond_240 && ~cond_4)? ( `CMDEX_FPTAN) :    // PR-2c.T: FPTAN   (D9 F2)
-    (cond_241 && ~cond_4)? ( `CMDEX_FPATAN) :   // PR-2c.T: FPATAN  (D9 F3)
-    (cond_242 && ~cond_4)? ( `CMDEX_FYL2XP1) :  // PR-2c.T: FYL2XP1 (D9 F9)
-    (cond_243 && ~cond_4)? ( `CMDEX_FSIN) :     // PR-2c.T: FSIN    (D9 FE)
-    (cond_244 && ~cond_4)? ( `CMDEX_FCOS) :     // PR-2c.T: FCOS    (D9 FF)
-    (cond_245 && ~cond_4)? ( `CMDEX_FSINCOS) :  // PR-2c.T: FSINCOS (D9 FB)
-    (cond_165 && ~cond_4)? ( `CMDEX_FABS) :
-    (cond_166 && ~cond_4)? ( `CMDEX_FXAM) :
-    (cond_167 && ~cond_4)? ( `CMDEX_FCOM) :
-    (cond_168 && ~cond_4)? ( `CMDEX_FCOMP) :
-    (cond_169 && ~cond_4)? ( `CMDEX_FUCOM) :
-    (cond_170 && ~cond_4)? ( `CMDEX_FUCOMP) :
-    (cond_171 && ~cond_4)? ( `CMDEX_FTST) :
-    (cond_172 && ~cond_4)? ( `CMDEX_FCOMPP) :
-    (cond_173 && ~cond_4)? ( `CMDEX_FUCOMPP) :
-    (cond_174 && ~cond_4)? ( `CMDEX_FFREE) :
-    (cond_175 && ~cond_4)? ( `CMDEX_FNOP) :
-    (cond_176 && ~cond_4)? ( `CMDEX_FDECSTP) :
-    (cond_177 && ~cond_4)? ( `CMDEX_FINCSTP) :
-    (cond_178 && ~cond_4)? ( `CMDEX_FCMOVB) :
-    (cond_179 && ~cond_4)? ( `CMDEX_FCMOVE) :
-    (cond_180 && ~cond_4)? ( `CMDEX_FCMOVBE) :
-    (cond_181 && ~cond_4)? ( `CMDEX_FCMOVU) :
-    (cond_182 && ~cond_4)? ( `CMDEX_FCMOVNB) :
-    (cond_183 && ~cond_4)? ( `CMDEX_FCMOVNE) :
-    (cond_184 && ~cond_4)? ( `CMDEX_FCMOVNBE) :
-    (cond_185 && ~cond_4)? ( `CMDEX_FCMOVNU) :
-    (cond_186 && ~cond_4)? ( `CMDEX_FCOMI) :
-    (cond_187 && ~cond_4)? ( `CMDEX_FUCOMI) :
-    (cond_188 && ~cond_4)? ( `CMDEX_FCOMIP) :
-    (cond_189 && ~cond_4)? ( `CMDEX_FUCOMIP) :
-    (cond_190 && ~cond_4)? ( `CMDEX_FADD_M32) :
-    (cond_191 && ~cond_4)? ( `CMDEX_FADD_M64) :
-    (cond_192 && ~cond_4)? ( `CMDEX_FMUL_M32) :
-    (cond_193 && ~cond_4)? ( `CMDEX_FMUL_M64) :
-    (cond_194 && ~cond_4)? ( `CMDEX_FSUB_M32) :
-    (cond_195 && ~cond_4)? ( `CMDEX_FSUB_M64) :
-    (cond_196 && ~cond_4)? ( `CMDEX_FDIV_M32) :
-    (cond_197 && ~cond_4)? ( `CMDEX_FDIV_M64) :
-    (cond_198 && ~cond_4)? ( `CMDEX_FSUBR_M32) :
-    (cond_199 && ~cond_4)? ( `CMDEX_FSUBR_M64) :
-    (cond_200 && ~cond_4)? ( `CMDEX_FDIVR_M32) :
-    (cond_201 && ~cond_4)? ( `CMDEX_FDIVR_M64) :
-    (cond_202 && ~cond_4)? ( `CMDEX_FCOM_M32) :
-    (cond_203 && ~cond_4)? ( `CMDEX_FCOM_M64) :
-    (cond_204 && ~cond_4)? ( `CMDEX_FCOMP_M32) :
-    (cond_205 && ~cond_4)? ( `CMDEX_FCOMP_M64) :
-    // PR-2b.4k (iter 75): FLD m32fp / m64fp CMDEX selection.
-    (cond_206 && ~cond_4)? ( `CMDEX_FLD_M32) :
-    (cond_207 && ~cond_4)? ( `CMDEX_FLD_M64) :
-    (cond_220 && ~cond_4)? ( `CMDEX_FLD_M80) :  // PR-2b.5g iter 124: FLD m80fp
-    (cond_228 && ~cond_4)? ( `CMDEX_FILD_M32) : // PR-2b.5v iter 140: FILD m32
-    (cond_229 && ~cond_4)? ( `CMDEX_FILD_M16) : // PR-2b.5v iter 140: FILD m16
-    (cond_230 && ~cond_4)? ( `CMDEX_FILD_M64) : // PR-2b.5v iter 140: FILD m64
-    (cond_236 && ~cond_4)? ( `CMDEX_FBLD) :      // PR-2b.5z iter 152: FBLD  m80
-    // PR-2b.4n (iter 112): FPU constant-load CMDEX selection (drives the
-    // execute_fpu constant-ROM mux).
-    (cond_208 && ~cond_4)? ( `CMDEX_FLD1) :
-    (cond_209 && ~cond_4)? ( `CMDEX_FLDL2T) :
-    (cond_210 && ~cond_4)? ( `CMDEX_FLDL2E) :
-    (cond_211 && ~cond_4)? ( `CMDEX_FLDPI) :
-    (cond_212 && ~cond_4)? ( `CMDEX_FLDLG2) :
-    (cond_213 && ~cond_4)? ( `CMDEX_FLDLN2) :
-    (cond_214 && ~cond_4)? ( `CMDEX_FLDZ) :
-    (cond_215 && ~cond_4)? ( `CMDEX_FSTP_M80) :  // PR-2b.5a iter 113: FSTP m80fp
-    (cond_216 && ~cond_4)? ( `CMDEX_FSTP_M32) :  // PR-2b.5c iter 116: FSTP m32fp
-    (cond_217 && ~cond_4)? ( `CMDEX_FSTP_M64) :  // PR-2b.5d iter 117: FSTP m64fp
-    (cond_218 && ~cond_4)? ( `CMDEX_FST_M32) :   // PR-2b.5e iter 118: FST m32fp
-    (cond_219 && ~cond_4)? ( `CMDEX_FST_M64) :   // PR-2b.5e iter 118: FST m64fp
-    (cond_231 && ~cond_4)? ( `CMDEX_FIST_M32) :  // PR-2b.5w iter 141: FIST  m32
-    (cond_232 && ~cond_4)? ( `CMDEX_FISTP_M32) : // PR-2b.5w iter 141: FISTP m32
-    (cond_233 && ~cond_4)? ( `CMDEX_FIST_M16) :  // PR-2b.5w iter 141: FIST  m16
-    (cond_234 && ~cond_4)? ( `CMDEX_FISTP_M16) : // PR-2b.5w iter 141: FISTP m16
-    (cond_235 && ~cond_4)? ( `CMDEX_FISTP_M64) : // PR-2b.5w iter 141: FISTP m64
-    (cond_237 && ~cond_4)? ( `CMDEX_FBSTP) :     // PR-2b.5z iter 152: FBSTP m80
+    (fpu_cmdex_hit && ~cond_4)? ( fpu_cmdex_val ) :
     // PR-2b.4i (iter 60): cond_67's CMDEX_ESC_STEP_0 fallback for any
     // reg-form D8..DF not caught by cond_144..205.
     (cond_67 && ~cond_4)? ( `CMDEX_ESC_STEP_0) :
