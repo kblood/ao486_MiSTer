@@ -913,6 +913,9 @@ wire [79:0] exe_fpu_store_data;
 wire        exe_fpu_store_ready;
 // PR-2c.ENV (iter 211): FNSTENV env-image lane (execute → write).
 wire [79:0] exe_fpu_env_data;
+// PR-2c.ENV (iter 214): FNSAVE ST-area lane (execute → write).
+wire [639:0] exe_fpu_st_regs;   // packed physical slots r7..r0
+wire [2:0]  exe_fpu_save_top;   // pre-init TOP
 wire [3:0]  exe_arith_index;
 wire        exe_arith_sub_carry;
 wire        exe_arith_add_carry;
@@ -1165,6 +1168,8 @@ execute execute_inst(
     .exe_fpu_store_data            (exe_fpu_store_data),            //output [79:0]  PR-2b.5a iter 113
     .exe_fpu_store_ready           (exe_fpu_store_ready),           //output         PR-2b.5a iter 113
     .exe_fpu_env_data              (exe_fpu_env_data),              //output [79:0]  PR-2c.ENV iter 211
+    .exe_fpu_st_regs               (exe_fpu_st_regs),               //output [639:0] PR-2c.ENV iter 214
+    .exe_fpu_save_top              (exe_fpu_save_top),              //output [2:0]   PR-2c.ENV iter 214
     .exe_arith_index               (exe_arith_index),               //output [3:0]
     .exe_arith_sub_carry           (exe_arith_sub_carry),           //output
     .exe_arith_add_carry           (exe_arith_add_carry),           //output
@@ -1435,6 +1440,8 @@ write write_inst(
     .exe_fpu_store_data            (exe_fpu_store_data),            //input [79:0]  PR-2b.5a iter 113
     .exe_fpu_store_ready           (exe_fpu_store_ready),           //input         PR-2b.5a iter 113
     .exe_fpu_env_data              (exe_fpu_env_data),              //input [79:0]  PR-2c.ENV iter 211
+    .exe_fpu_st_regs               (exe_fpu_st_regs),               //input [639:0] PR-2c.ENV iter 214
+    .exe_fpu_save_top              (exe_fpu_save_top),              //input [2:0]   PR-2c.ENV iter 214
     .exe_arith_index               (exe_arith_index),               //input [3:0]
     .exe_arith_sub_carry           (exe_arith_sub_carry),           //input
     .exe_arith_add_carry           (exe_arith_add_carry),           //input

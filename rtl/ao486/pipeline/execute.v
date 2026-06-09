@@ -303,6 +303,15 @@ module execute(
     // {SW,CW} / {16'd0,TW}; steps 2/3 are zeroed there.
     output      [79:0]  exe_fpu_env_data,
 
+    // PR-2c.ENV (iter 214): FNSAVE 80-byte ST area.  exe_fpu_st_regs packs the
+    // 8 physical regfile slots {r7..r0} (combinational — the regfile is stable
+    // while FNSAVE holds the write stage, and FNINIT clears only tags not data,
+    // so no latch needed).  exe_fpu_save_top is the PRE-init TOP (write.v latches
+    // it on w_load before FNSAVE's re-init zeroes SW.TOP); write.v maps
+    // ST(i)=phys (TOP+i)&7.
+    output      [639:0] exe_fpu_st_regs,
+    output      [2:0]   exe_fpu_save_top,
+
     output      [3:0]   exe_arith_index,
     
     output              exe_arith_sub_carry,
@@ -770,6 +779,11 @@ wire [15:0] fpu_cw;
 // the fpu_regfile .tag_word port connection below doesn't create a 1-bit
 // implicit net that then collides with a later explicit decl — vlog-2388).
 wire [15:0] fpu_tag_word;
+// PR-2c.ENV (iter 214): physical regfile slots for the FNSAVE ST-store lane.
+// Forward-declared before the fpu_regfile instance so the .rN port connections
+// don't create colliding 1-bit implicit nets (HANDOFF Gotcha #9, same as
+// fpu_tag_word above).
+wire [79:0] fpu_r0, fpu_r1, fpu_r2, fpu_r3, fpu_r4, fpu_r5, fpu_r6, fpu_r7;
 wire        fpu_fninit_pulse;
 wire        fpu_fnclex_pulse;
 // PR-2c.ENV (iter 213): FNINIT and env-only FNSAVE both drive the FPU re-init.
@@ -907,10 +921,11 @@ fpu_regfile u_fpu_regfile (
     .wr_tag   (rf_wr_tag_muxed),
     .wr_en    (rf_wr_en_muxed),
 
-    // Observability ports — r0..r7 unused until FNSAVE/FXSAVE; tag_word is
-    // consumed by the PR-2c.ENV FNSTENV env-image lane (the x87 tag word, 2
-    // bits/physical-reg).
-    .r0(), .r1(), .r2(), .r3(), .r4(), .r5(), .r6(), .r7(),
+    // Observability ports — r0..r7 feed the PR-2c.ENV FNSAVE ST-store lane
+    // (iter 214); tag_word is consumed by the FNSTENV env-image lane (the x87
+    // tag word, 2 bits/physical-reg).
+    .r0(fpu_r0), .r1(fpu_r1), .r2(fpu_r2), .r3(fpu_r3),
+    .r4(fpu_r4), .r5(fpu_r5), .r6(fpu_r6), .r7(fpu_r7),
     .tag_word (fpu_tag_word),
 
     // PR-2c.ENV (iter 212/213): FLDENV/FRSTOR parallel tag-word restore (env +4).
@@ -928,6 +943,13 @@ fpu_regfile u_fpu_regfile (
 // fpu_tag_word is forward-declared above the fpu_regfile instance (strict
 // Verilog decl-order + ModelSim implicit-net pitfall — see HANDOFF Gotcha #9).
 assign exe_fpu_env_data = { 32'd0, fpu_tag_word, fpu_sw, fpu_cw };
+
+// PR-2c.ENV (iter 214): FNSAVE 80-byte ST area.  Pack the 8 physical slots
+// (combinational; stable for the whole store — see port comment) and export the
+// PRE-init TOP (= live SW.TOP at op-entry, latched in write.v on w_load before
+// FNSAVE's re-init zeroes it).
+assign exe_fpu_st_regs  = { fpu_r7, fpu_r6, fpu_r5, fpu_r4, fpu_r3, fpu_r2, fpu_r1, fpu_r0 };
+assign exe_fpu_save_top = fpu_sw[13:11];
 
 execute_fpu u_execute_fpu (
     .clk                  (clk),

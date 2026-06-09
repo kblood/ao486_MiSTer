@@ -296,6 +296,12 @@ module write(
     // store doesn't depend on the FSTP store_ready window / execute_fpu FSM.
     input       [79:0]  exe_fpu_env_data,
 
+    // PR-2c.ENV (iter 214): FNSAVE 80-byte ST area.  exe_fpu_st_regs packs the
+    // 8 physical regfile slots {r7..r0} (combinational, stable for the whole
+    // store); exe_fpu_save_top is the PRE-init TOP, latched here on w_load.
+    input       [639:0] exe_fpu_st_regs,
+    input       [2:0]   exe_fpu_save_top,
+
     input       [3:0]   exe_arith_index,
     
     input               exe_arith_sub_carry,
@@ -370,6 +376,17 @@ reg         fpu_store_complete;
 // PR-2c.ENV (iter 211): FNSTENV 14-byte env image, latched on w_load (so it is
 // valid for the whole multi-step write without the store_ready latch handshake).
 reg [79:0]  wr_fpu_env_data;
+
+// PR-2c.ENV (iter 214): FNSAVE 94-byte store extends the env phase (fpu_store_step
+// 0..3) with an ST phase: 8 regs × 3 sub-words (4/4/2 bytes, the m80 layout).
+//   sv_in_st : 0 = env phase, 1 = ST phase
+//   sv_st    : ST index 0..7 (physical reg = (wr_fpu_top + sv_st) & 7)
+//   sv_sub   : sub-word 0/1/2 within the current 10-byte ST record
+//   wr_fpu_top : PRE-init TOP latched on w_load (FNSAVE re-inits → SW.TOP=0)
+reg         sv_in_st;
+reg [2:0]   sv_st;
+reg [1:0]   sv_sub;
+reg [2:0]   wr_fpu_top;
 
 reg [3:0]   wr_arith_index;
 reg [31:0]  wr_src;
@@ -647,6 +664,7 @@ always @(posedge clk) begin if(rst_n == 1'b0) wr_dst_is_edx_eax       <= `FALSE;
 always @(posedge clk) begin if(rst_n == 1'b0) wr_dst_is_implicit_reg  <= `FALSE;    else if(w_load) wr_dst_is_implicit_reg  <= exe_dst_is_implicit_reg;  end
 always @(posedge clk) begin if(rst_n == 1'b0) wr_linear               <= 32'd0;     else if(w_load) wr_linear               <= exe_linear;               end
 always @(posedge clk) begin if(rst_n == 1'b0) wr_fpu_env_data         <= 80'd0;    else if(w_load) wr_fpu_env_data         <= exe_fpu_env_data;         end  // PR-2c.ENV iter 211
+always @(posedge clk) begin if(rst_n == 1'b0) wr_fpu_top              <= 3'd0;     else if(w_load) wr_fpu_top              <= exe_fpu_save_top;         end  // PR-2c.ENV iter 214 (pre-init TOP)
 
 always @(posedge clk) begin if(rst_n == 1'b0) result                  <= 32'd0;     else if(w_load) result                  <= exe_result;               end
 always @(posedge clk) begin if(rst_n == 1'b0) result2                 <= 32'd0;     else if(w_load) result2                 <= exe_result2;              end
@@ -776,10 +794,22 @@ wire is_fist_m16_op  = is_fp_store_op && ((wr_cmdex == `CMDEX_FIST_M16) ||
 // FNSTENV; only the retire side differs (FNSAVE re-inits the FPU — handled in
 // execute.v).  The 80-byte ST area is a documented later correctness slice.
 wire is_envstore_op  = is_fp_store_op && ((wr_cmdex == `CMDEX_FNSTENV_M14) || (wr_cmdex == `CMDEX_FNSAVE_M94));
+// PR-2c.ENV (iter 214): FNSAVE = the 14-byte env (env phase, fpu_store_step 0..3,
+// identical to FNSTENV) FOLLOWED BY the 80-byte ST area (ST phase: 8 regs × 3
+// sub-words at +14, +24, ... +84).  is_fnsave94_op gates the ST-phase extension.
+wire is_fnsave94_op  = is_fp_store_op && (wr_cmdex == `CMDEX_FNSAVE_M94);
 wire [1:0] fpu_store_max_step = is_envstore_op ? 2'd3 :                                             // env: 4 writes (steps 0..3)
                                 is_fstp_m80_op ? 2'd2 :
                                 (is_fstp_m64_op || is_fst_m64_op || is_fistp_m64_op) ? 2'd1 : 2'd0;  // m80=3 / m64=2 / m32,m16=1 writes
 wire fstp_raw_done  = write_done && ~(write_page_fault) && ~(write_ac_fault);
+
+// ST-phase helpers.  ST(i) = physical slot (wr_fpu_top + sv_st) & 7 (3-bit add
+// wraps mod 8).  Each 10-byte record = streg[31:0] / streg[63:32] / streg[79:64].
+wire [2:0]  sv_phys   = wr_fpu_top + sv_st;
+wire [79:0] sv_streg  = exe_fpu_st_regs[sv_phys*80 +: 80];
+wire [7:0]  sv_off    = 8'd14 + sv_st * 8'd10 +
+                        ((sv_sub == 2'd0)? 8'd0 : (sv_sub == 2'd1)? 8'd4 : 8'd8);
+wire        fnsave_last = is_fnsave94_op && sv_in_st && (sv_st == 3'd7) && (sv_sub == 2'd2);
 
 always @(posedge clk) begin
     if(rst_n == 1'b0) begin
@@ -787,25 +817,46 @@ always @(posedge clk) begin
         fpu_store_latched  <= 1'b0;
         fpu_store_step     <= 2'd0;
         fpu_store_complete <= 1'b0;
+        sv_in_st           <= 1'b0;
+        sv_st              <= 3'd0;
+        sv_sub             <= 2'd0;
     end else if(wr_reset || w_load) begin
         // Fresh per-op state.  w_load fires only when a NEW op enters the
         // write stage (during the FSTP hold, exe_ready=0 so w_load stays 0).
         fpu_store_latched  <= 1'b0;
         fpu_store_step     <= 2'd0;
         fpu_store_complete <= 1'b0;
+        sv_in_st           <= 1'b0;
+        sv_st              <= 3'd0;
+        sv_sub             <= 2'd0;
     end else if(is_fp_store_op) begin
         if(exe_fpu_store_ready && ~fpu_store_latched) begin
             wr_fpu_store_data <= exe_fpu_store_data;
             fpu_store_latched <= 1'b1;
         end
-        if(fstp_raw_done && fpu_store_step != fpu_store_max_step)
-            fpu_store_step <= fpu_store_step + 2'd1;
-        if(fstp_raw_done && fpu_store_step == fpu_store_max_step)
-            fpu_store_complete <= 1'b1;
+        if(is_fnsave94_op) begin
+            // PR-2c.ENV (iter 214): env phase (steps 0..3) then ST phase.
+            if(fstp_raw_done) begin
+                if(~sv_in_st) begin
+                    if(fpu_store_step != 2'd3) fpu_store_step <= fpu_store_step + 2'd1;
+                    else begin sv_in_st <= 1'b1; sv_st <= 3'd0; sv_sub <= 2'd0; end  // env done → ST(0)
+                end else begin
+                    if(sv_sub != 2'd2)        sv_sub <= sv_sub + 2'd1;               // next sub-word
+                    else if(sv_st != 3'd7) begin sv_sub <= 2'd0; sv_st <= sv_st + 3'd1; end  // next ST reg
+                    else                      fpu_store_complete <= 1'b1;            // ST(7) sub-2 = last
+                end
+            end
+        end else begin
+            if(fstp_raw_done && fpu_store_step != fpu_store_max_step)
+                fpu_store_step <= fpu_store_step + 2'd1;
+            if(fstp_raw_done && fpu_store_step == fpu_store_max_step)
+                fpu_store_complete <= 1'b1;
+        end
     end
 end
 
 assign write_address =
+    (is_fnsave94_op && sv_in_st)?               (wr_linear + { 24'd0, sv_off }) :                // +14..+92 ST area
     (is_fp_store_op)?                           (wr_linear + { 28'd0, fpu_store_step, 2'd0 }) :  // +0 / +4 / +8
     (write_string_es_virtual)?                  wr_string_es_linear :
     (write_stack_virtual)?                      wr_push_linear :
@@ -816,6 +867,9 @@ assign write_address =
                                                 wr_linear; //used by write_rmw_system_dword
 
 assign write_data =
+    (is_fnsave94_op && sv_in_st)? ( (sv_sub == 2'd0)? sv_streg[31:0]        :  // ST mantissa[31:0]
+                                    (sv_sub == 2'd1)? sv_streg[63:32]       :  // ST mantissa[63:32]
+                                                      { 16'd0, sv_streg[79:64] } ) :  // ST sign+exp (word)
     (is_envstore_op)?  ( (fpu_store_step == 2'd0)? wr_fpu_env_data[31:0]   :  // {SW,CW}
                          (fpu_store_step == 2'd1)? wr_fpu_env_data[63:32]  :  // {16'd0,TW}
                                                    32'd0 ) :                  // +8 dword / +12 word = 0
@@ -829,6 +883,8 @@ assign write_data =
                                                                                     result;
 
 assign write_length =
+    (is_fnsave94_op && sv_in_st)? ( (sv_sub == 2'd2)?                         3'd2 :  // ST: sign+exp word
+                                                                             3'd4 ) :  // ST: mantissa dwords
     (is_envstore_op)?           ( (fpu_store_step == 2'd3)?                   3'd2 :  // env: +12 word
                                                                              3'd4 ) :  // env: +0/+4/+8 dwords
     (is_fp_store_op)?           ( (is_fstp_m80_op && fpu_store_step == 2'd2)? 3'd2 :  // m80: 4/4/2
@@ -855,7 +911,8 @@ assign write_do = ~(wr_reset) && ~(write_page_fault) && ~(write_ac_fault) &&
      (is_fp_store_op && (fpu_store_latched || is_envstore_op) && ~fpu_store_complete));  // PR-2c.ENV: env data is w_load-latched, no store_ready handshake
 
 
-assign write_for_wr_ready = (is_fp_store_op)? (fstp_raw_done && fpu_store_step == fpu_store_max_step)
+assign write_for_wr_ready = (is_fnsave94_op)? (fstp_raw_done && fnsave_last)
+                          : (is_fp_store_op)? (fstp_raw_done && fpu_store_step == fpu_store_max_step)
                                             : (write_done && ~(write_page_fault) && ~(write_ac_fault));
 
 //------------------------------------------------------------------------------ write io
