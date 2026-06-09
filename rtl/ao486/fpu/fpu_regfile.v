@@ -42,6 +42,13 @@ module fpu_regfile (
     // initialise on FNINIT — drives all tags to Empty (2'b11)
     input             init,
 
+    // PR-2c.ENV (iter 212): parallel tag-word load for FLDENV / FRSTOR.  When
+    // tag_word_we pulses, all 8 tags are loaded from tag_word_in (2 bits/reg,
+    // physical order tag[i] = tag_word_in[2i+1:2i]) in one cycle — the inverse
+    // of the tag_word readback used by FNSTENV.  Data slots are untouched.
+    input             tag_word_we,
+    input      [15:0] tag_word_in,
+
     // observability for FNSAVE / debug
     output     [79:0] r0, r1, r2, r3, r4, r5, r6, r7,
     output     [15:0] tag_word
@@ -63,6 +70,11 @@ module fpu_regfile (
             // FNINIT: tags = Empty (2'b11), data unchanged per Bochs i387_t::init().
             for (i = 0; i < 8; i = i + 1) begin
                 tag[i]  <= 2'b11;
+            end
+        end else if (tag_word_we) begin
+            // PR-2c.ENV (iter 212): FLDENV / FRSTOR parallel tag-word restore.
+            for (i = 0; i < 8; i = i + 1) begin
+                tag[i] <= tag_word_in[2*i +: 2];
             end
         end else if (wr_en) begin
             data[wr_idx] <= wr_data;

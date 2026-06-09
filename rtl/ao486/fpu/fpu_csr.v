@@ -137,7 +137,12 @@ module fpu_csr (
             if (exc_flags_clear_all) begin
                 exc_flags <= 6'b0;
                 sf        <= 1'b0;
-            end else begin
+            end else if (~sw_we) begin
+                // When sw_we is asserted (FLDENV / FRSTOR), the SW-write block
+                // above already loaded exc_flags/sf from sw_din — don't let the
+                // OR-accumulate clobber it.  sw_we and exc_flags_set never
+                // co-occur (FLDENV doesn't run the execute_fpu retire), so this
+                // is a no-op for every pre-PR-2c.ENV op.
                 exc_flags <= exc_flags | exc_flags_set;
             end
 

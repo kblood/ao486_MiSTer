@@ -373,6 +373,13 @@ wire cond_282 = rd_cmd == `CMD_fpu && rd_cmdex == `CMDEX_FLDCW_M16;
 wire cond_283 = rd_cmd == `CMD_fpu_load_mem && rd_cmdex == `CMDEX_FILD_M32;
 wire cond_284 = rd_cmd == `CMD_fpu_load_mem && rd_cmdex == `CMDEX_FILD_M16;
 wire cond_285 = rd_cmd == `CMD_fpu_load_mem && rd_cmdex == `CMDEX_FILD_M64;
+// PR-2c.ENV (iter 212): FLDENV m14 (D9 /4) read-stage arm.  Mirrors FLD m64
+// (cond_262): single-beat read_length_qword (8 bytes) so exe_fpu_mem_data[63:0]
+// captures CW@[15:0], SW@[31:16], TW@[47:32] (the fields ao486 tracks; the
+// pointer/opcode words at +6.. are ignored, so 8 bytes suffice — no need to
+// fetch the full 14).  execute.v applies CW/SW/TW when the op retires.  As with
+// cond_262, rd_src_is_memory/rd_req_memory stay deasserted.
+wire cond_286 = rd_cmd == `CMD_fpu_load_mem && rd_cmdex == `CMDEX_FLDENV_M14;
 // PR-2b.4d-g defensive read-stage plumbing (iter 81).
 // The existing PR-2b.4d-g mem-form arith ops (FADD/FSUB/FMUL/FDIV/FSUBR/
 // FDIVR/FCOM/FCOMP m32+m64 across 16 CMDEXes) landed via unit TBs that
@@ -655,6 +662,8 @@ assign read_virtual =
     // PR-2b.4k STAGE 2 (iter 76): FLD m32fp/m64fp mem-fetch trigger.
     (cond_261 && cond_3 && ~cond_9)? (`TRUE) :
     (cond_262 && cond_3 && ~cond_9)? (`TRUE) :
+    // PR-2c.ENV (iter 212): FLDENV m14 mem-fetch trigger (single-beat qword).
+    (cond_286 && cond_3 && ~cond_9)? (`TRUE) :
     // PR-2b.5g (iter 124): FLD m80fp mem-fetch trigger (2-beat read in read.v).
     (cond_281 && cond_3 && ~cond_9)? (`TRUE) :
     // PR-2b.5o (iter 129): FLDCW m16 mem-fetch trigger (single-beat 16-bit).
@@ -1278,6 +1287,9 @@ assign rd_waiting =
     (cond_261 && cond_3 && ~cond_9 && cond_5)? (`TRUE) :
     (cond_262 && cond_3 && cond_9)? (`TRUE) :
     (cond_262 && cond_3 && ~cond_9 && cond_5)? (`TRUE) :
+    // PR-2c.ENV (iter 212): FLDENV m14 — same qword-read hold as FLD m64.
+    (cond_286 && cond_3 && cond_9)? (`TRUE) :
+    (cond_286 && cond_3 && ~cond_9 && cond_5)? (`TRUE) :
     // PR-2b.5g (iter 124): FLD m80fp — hold until read.v's overridden
     // read_for_rd_ready fires (after beat 1, the qword); cond_5 = ~ready.
     (cond_281 && cond_3 && cond_9)? (`TRUE) :
@@ -1640,4 +1652,5 @@ assign read_length_qword =
     (cond_262 && cond_3 && ~cond_9)? (`TRUE) :
     (cond_264 && cond_3 && ~cond_9)? (`TRUE) :
     (cond_285 && cond_3 && ~cond_9)? (`TRUE) :  // PR-2b.5v iter 140: FILD m64 = 8-byte fetch
+    (cond_286 && cond_3 && ~cond_9)? (`TRUE) :  // PR-2c.ENV iter 212: FLDENV m14 = 8-byte fetch (CW/SW/TW)
     1'd0;

@@ -734,6 +734,17 @@ wire        fpu_op_retires =
 wire        fpu_fldcw_retires =
     exe_ready && exe_cmd == `CMD_fpu && exe_cmdex == `CMDEX_FLDCW_M16;
 
+// PR-2c.ENV (iter 212): FLDENV m14 (D9 /4) in-order retire pulse.  The 8-byte
+// env image was fetched in the read stage (read_commands cond_286,
+// read_length_qword) and snapshotted into exe_fpu_mem_data on e_load, so at
+// EXECUTE the qword is present: CW@[15:0], SW@[31:16], TW@[47:32] (pointer/
+// opcode words ignored).  Like FLDCW, handled at execute.v level (drives
+// fpu_csr cw_we/sw_we + the regfile tag_word_we), NOT execute_fpu's FSM — which
+// never sees CMDEX_FLDENV_M14 (=7 in CMD_fpu_load_mem, unhandled there), so
+// fpu_busy stays 0 and the op retires in-order without a stack-fault check.
+wire        fpu_fldenv_retires =
+    exe_ready && exe_cmd == `CMD_fpu_load_mem && exe_cmdex == `CMDEX_FLDENV_M14;
+
 wire [15:0] fpu_sw;
 wire [15:0] fpu_cw;
 // PR-2c.ENV (iter 211): x87 tag word from the regfile (forward-declared here so
@@ -767,12 +778,16 @@ fpu_csr u_fpu_csr (
     .reset               (~rst_n),
     .init                (fpu_fninit_pulse),
 
-    .cw_we               (fpu_fldcw_retires),
+    // PR-2c.ENV (iter 212): FLDENV also loads CW (env +0).  cw_din shared with
+    // FLDCW (both take exe_fpu_mem_data[15:0]); just OR the enables.
+    .cw_we               (fpu_fldcw_retires || fpu_fldenv_retires),
     .cw_din              (exe_fpu_mem_data[15:0]),
     .cw                  (fpu_cw),
 
-    .sw_we               (1'b0),
-    .sw_din              (16'h0),
+    // PR-2c.ENV (iter 212): FLDENV loads SW (env +2) — sets exc flags, CC, SF,
+    // and TOP (sw_din[13:11]).  Was tied 0 (no SW-writing op existed).
+    .sw_we               (fpu_fldenv_retires),
+    .sw_din              (exe_fpu_mem_data[31:16]),
     .sw                  (fpu_sw),
 
     .exc_flags_set       (fpu_exec_exc_flags_set),
@@ -874,7 +889,13 @@ fpu_regfile u_fpu_regfile (
     // consumed by the PR-2c.ENV FNSTENV env-image lane (the x87 tag word, 2
     // bits/physical-reg).
     .r0(), .r1(), .r2(), .r3(), .r4(), .r5(), .r6(), .r7(),
-    .tag_word (fpu_tag_word)
+    .tag_word (fpu_tag_word),
+
+    // PR-2c.ENV (iter 212): FLDENV parallel tag-word restore (env +4).  Driven
+    // directly by the in-order retire pulse — independent of the fpu_busy write-
+    // port mux, since FLDENV never engages execute_fpu's FSM.
+    .tag_word_we (fpu_fldenv_retires),
+    .tag_word_in (exe_fpu_mem_data[47:32])
 );
 
 // PR-2c.ENV (iter 211): FNSTENV (D9 /6) writes the 14-byte real-mode env image

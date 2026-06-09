@@ -471,6 +471,7 @@ wire cond_237 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDF && decoder[13:
 // cond_247 (FNSTENV) lands FIRST with its 14-byte store datapath; the load arm
 // (FLDENV) + the 94-byte FNSAVE/FRSTOR follow.  See research/design_envsave.md.
 wire cond_247 = dec_ready_modregrm_one   && decoder[7:0] == 8'hD9 && decoder[13:11] == 3'b110 && decoder[15:14] != 2'b11; // FNSTENV (D9 /6)
+wire cond_246 = dec_ready_modregrm_one   && decoder[7:0] == 8'hD9 && decoder[13:11] == 3'b100 && decoder[15:14] != 2'b11; // FLDENV  (D9 /4)
 //======================================================== saves
 //======================================================== always
 //======================================================== sets
@@ -485,13 +486,14 @@ assign consume_mem_offset =
 // rewritten as a single balanced ONE-HOT select.  SOLE overlap D9 D0
 // (cond_162 FST_STi vs cond_175 FNOP) keeps original priority via & ~cond_162.
 // cond_67 (reg-form ESC catch-all) stays BELOW the group, unchanged.
-wire fpu_cmd_hit = cond_144 | cond_145 | cond_146 | cond_147 | cond_222 | cond_148 | cond_149 | cond_150 | cond_151 | cond_152 | cond_153 | cond_154 | cond_155 | cond_156 | cond_157 | cond_158 | cond_159 | cond_160 | cond_161 | cond_162 | cond_163 | cond_164 | cond_221 | cond_223 | cond_224 | cond_225 | cond_226 | cond_227 | cond_238 | cond_239 | cond_240 | cond_241 | cond_242 | cond_243 | cond_244 | cond_245 | cond_165 | cond_166 | cond_167 | cond_168 | cond_169 | cond_170 | cond_171 | cond_172 | cond_173 | cond_174 | cond_175 | cond_176 | cond_177 | cond_178 | cond_179 | cond_180 | cond_181 | cond_182 | cond_183 | cond_184 | cond_185 | cond_186 | cond_187 | cond_188 | cond_189 | cond_190 | cond_191 | cond_192 | cond_193 | cond_194 | cond_195 | cond_196 | cond_197 | cond_198 | cond_199 | cond_200 | cond_201 | cond_202 | cond_203 | cond_204 | cond_205 | cond_206 | cond_207 | cond_220 | cond_228 | cond_229 | cond_230 | cond_236 | cond_208 | cond_209 | cond_210 | cond_211 | cond_212 | cond_213 | cond_214 | cond_215 | cond_216 | cond_217 | cond_218 | cond_219 | cond_231 | cond_232 | cond_233 | cond_234 | cond_235 | cond_237 | cond_247;
+wire fpu_cmd_hit = cond_144 | cond_145 | cond_146 | cond_147 | cond_222 | cond_148 | cond_149 | cond_150 | cond_151 | cond_152 | cond_153 | cond_154 | cond_155 | cond_156 | cond_157 | cond_158 | cond_159 | cond_160 | cond_161 | cond_162 | cond_163 | cond_164 | cond_221 | cond_223 | cond_224 | cond_225 | cond_226 | cond_227 | cond_238 | cond_239 | cond_240 | cond_241 | cond_242 | cond_243 | cond_244 | cond_245 | cond_165 | cond_166 | cond_167 | cond_168 | cond_169 | cond_170 | cond_171 | cond_172 | cond_173 | cond_174 | cond_175 | cond_176 | cond_177 | cond_178 | cond_179 | cond_180 | cond_181 | cond_182 | cond_183 | cond_184 | cond_185 | cond_186 | cond_187 | cond_188 | cond_189 | cond_190 | cond_191 | cond_192 | cond_193 | cond_194 | cond_195 | cond_196 | cond_197 | cond_198 | cond_199 | cond_200 | cond_201 | cond_202 | cond_203 | cond_204 | cond_205 | cond_206 | cond_207 | cond_220 | cond_228 | cond_229 | cond_230 | cond_236 | cond_208 | cond_209 | cond_210 | cond_211 | cond_212 | cond_213 | cond_214 | cond_215 | cond_216 | cond_217 | cond_218 | cond_219 | cond_231 | cond_232 | cond_233 | cond_234 | cond_235 | cond_237 | cond_247 | cond_246;
 wire [6:0] fpu_cmd_val =
     ({7{cond_144}} & (`CMD_fpu))
   |     ({7{cond_145}} & (`CMD_fpu))
   |     ({7{cond_146}} & (`CMD_fpu))
   |     ({7{cond_147}} & (`CMD_fpu))
   |     ({7{cond_247}} & (`CMD_fpu_store_mem))  // FNSTENV — reuses the store FSM
+  |     ({7{cond_246}} & (`CMD_fpu_load_mem))   // FLDENV  — reuses the load read path
   |     ({7{cond_222}} & (`CMD_fpu))
   |     ({7{cond_148}} & (`CMD_fpu_arith))
   |     ({7{cond_149}} & (`CMD_fpu_arith))
@@ -1111,13 +1113,14 @@ assign dec_is_8bit =
 // rewritten as a single balanced ONE-HOT select.  SOLE overlap D9 D0
 // (cond_162 FST_STi vs cond_175 FNOP) keeps original priority via & ~cond_162.
 // cond_67 (reg-form ESC catch-all) stays BELOW the group, unchanged.
-wire fpu_cmdex_hit = cond_144 | cond_145 | cond_146 | cond_147 | cond_222 | cond_148 | cond_149 | cond_150 | cond_151 | cond_152 | cond_153 | cond_154 | cond_155 | cond_156 | cond_157 | cond_158 | cond_159 | cond_160 | cond_161 | cond_162 | cond_163 | cond_164 | cond_221 | cond_223 | cond_224 | cond_225 | cond_226 | cond_227 | cond_238 | cond_239 | cond_240 | cond_241 | cond_242 | cond_243 | cond_244 | cond_245 | cond_165 | cond_166 | cond_167 | cond_168 | cond_169 | cond_170 | cond_171 | cond_172 | cond_173 | cond_174 | cond_175 | cond_176 | cond_177 | cond_178 | cond_179 | cond_180 | cond_181 | cond_182 | cond_183 | cond_184 | cond_185 | cond_186 | cond_187 | cond_188 | cond_189 | cond_190 | cond_191 | cond_192 | cond_193 | cond_194 | cond_195 | cond_196 | cond_197 | cond_198 | cond_199 | cond_200 | cond_201 | cond_202 | cond_203 | cond_204 | cond_205 | cond_206 | cond_207 | cond_220 | cond_228 | cond_229 | cond_230 | cond_236 | cond_208 | cond_209 | cond_210 | cond_211 | cond_212 | cond_213 | cond_214 | cond_215 | cond_216 | cond_217 | cond_218 | cond_219 | cond_231 | cond_232 | cond_233 | cond_234 | cond_235 | cond_237 | cond_247;
+wire fpu_cmdex_hit = cond_144 | cond_145 | cond_146 | cond_147 | cond_222 | cond_148 | cond_149 | cond_150 | cond_151 | cond_152 | cond_153 | cond_154 | cond_155 | cond_156 | cond_157 | cond_158 | cond_159 | cond_160 | cond_161 | cond_162 | cond_163 | cond_164 | cond_221 | cond_223 | cond_224 | cond_225 | cond_226 | cond_227 | cond_238 | cond_239 | cond_240 | cond_241 | cond_242 | cond_243 | cond_244 | cond_245 | cond_165 | cond_166 | cond_167 | cond_168 | cond_169 | cond_170 | cond_171 | cond_172 | cond_173 | cond_174 | cond_175 | cond_176 | cond_177 | cond_178 | cond_179 | cond_180 | cond_181 | cond_182 | cond_183 | cond_184 | cond_185 | cond_186 | cond_187 | cond_188 | cond_189 | cond_190 | cond_191 | cond_192 | cond_193 | cond_194 | cond_195 | cond_196 | cond_197 | cond_198 | cond_199 | cond_200 | cond_201 | cond_202 | cond_203 | cond_204 | cond_205 | cond_206 | cond_207 | cond_220 | cond_228 | cond_229 | cond_230 | cond_236 | cond_208 | cond_209 | cond_210 | cond_211 | cond_212 | cond_213 | cond_214 | cond_215 | cond_216 | cond_217 | cond_218 | cond_219 | cond_231 | cond_232 | cond_233 | cond_234 | cond_235 | cond_237 | cond_247 | cond_246;
 wire [3:0] fpu_cmdex_val =
     ({4{cond_144}} & (`CMDEX_FN_INIT))
   |     ({4{cond_145}} & (`CMDEX_FN_CLEX))
   |     ({4{cond_146}} & (`CMDEX_FNSTSW_AX))
   |     ({4{cond_147}} & (`CMDEX_FNSTCW_M16))
   |     ({4{cond_247}} & (`CMDEX_FNSTENV_M14))
+  |     ({4{cond_246}} & (`CMDEX_FLDENV_M14))
   |     ({4{cond_222}} & (`CMDEX_FLDCW_M16))
   |     ({4{cond_148}} & (`CMDEX_FADD_ST0_STi))
   |     ({4{cond_149}} & (`CMDEX_FSUB_ST0_STi))
