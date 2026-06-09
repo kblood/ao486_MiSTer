@@ -379,7 +379,9 @@ wire cond_285 = rd_cmd == `CMD_fpu_load_mem && rd_cmdex == `CMDEX_FILD_M64;
 // pointer/opcode words at +6.. are ignored, so 8 bytes suffice — no need to
 // fetch the full 14).  execute.v applies CW/SW/TW when the op retires.  As with
 // cond_262, rd_src_is_memory/rd_req_memory stay deasserted.
-wire cond_286 = rd_cmd == `CMD_fpu_load_mem && rd_cmdex == `CMDEX_FLDENV_M14;
+// iter-213: env-only FRSTOR (DD /4) reuses the identical 8-byte env fetch as
+// FLDENV (CW/SW/TW); the 80-byte ST area is a documented later correctness slice.
+wire cond_286 = rd_cmd == `CMD_fpu_load_mem && ((rd_cmdex == `CMDEX_FLDENV_M14) || (rd_cmdex == `CMDEX_FRSTOR_M94));
 // PR-2b.4d-g defensive read-stage plumbing (iter 81).
 // The existing PR-2b.4d-g mem-form arith ops (FADD/FSUB/FMUL/FDIV/FSUBR/
 // FDIVR/FCOM/FCOMP m32+m64 across 16 CMDEXes) landed via unit TBs that

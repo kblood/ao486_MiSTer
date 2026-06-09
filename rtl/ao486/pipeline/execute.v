@@ -745,6 +745,25 @@ wire        fpu_fldcw_retires =
 wire        fpu_fldenv_retires =
     exe_ready && exe_cmd == `CMD_fpu_load_mem && exe_cmdex == `CMDEX_FLDENV_M14;
 
+// PR-2c.ENV (iter 213): env-only FRSTOR (DD /4).  Its 8-byte env fetch shares
+// read_commands cond_286 with FLDENV, so at EXECUTE exe_fpu_mem_data holds the
+// same CW@[15:0]/SW@[31:16]/TW@[47:32] layout.  Apply it via the identical
+// in-order retire path; fpu_envload_retires fans the CW/SW/TW loads to both ops.
+// (The 80-byte ST restore is a documented later correctness slice.)
+wire        fpu_frstor_retires =
+    exe_ready && exe_cmd == `CMD_fpu_load_mem && exe_cmdex == `CMDEX_FRSTOR_M94;
+wire        fpu_envload_retires = fpu_fldenv_retires || fpu_frstor_retires;
+
+// PR-2c.ENV (iter 213): env-only FNSAVE (DD /6) stores the same 14-byte env
+// image as FNSTENV (write.v is_envstore_op) and then re-inits the FPU (FNINIT
+// semantics: CW=037F, SW=0, tags=Empty — NOT cold reset, see notes).  Routed via
+// CMD_fpu_store_mem so exe_ready pulses ONCE at op-entry — the same w_load edge
+// on which write.v latches wr_fpu_env_data.  Firing init on that edge is
+// timing-safe: the env snapshot captures pre-init values via NBA semantics while
+// the csr/regfile init takes effect next cycle.  (The 80-byte ST save is later.)
+wire        fpu_fnsave_retires =
+    exe_ready && exe_cmd == `CMD_fpu_store_mem && exe_cmdex == `CMDEX_FNSAVE_M94;
+
 wire [15:0] fpu_sw;
 wire [15:0] fpu_cw;
 // PR-2c.ENV (iter 211): x87 tag word from the regfile (forward-declared here so
@@ -753,6 +772,9 @@ wire [15:0] fpu_cw;
 wire [15:0] fpu_tag_word;
 wire        fpu_fninit_pulse;
 wire        fpu_fnclex_pulse;
+// PR-2c.ENV (iter 213): FNINIT and env-only FNSAVE both drive the FPU re-init.
+// FNSAVE re-inits AFTER capturing its env image (see fpu_fnsave_retires note).
+wire        fpu_init_combined = fpu_fninit_pulse || fpu_fnsave_retires;
 
 fpu_core u_fpu_core (
     .clk           (clk),
@@ -776,17 +798,17 @@ fpu_core u_fpu_core (
 fpu_csr u_fpu_csr (
     .clk                 (clk),
     .reset               (~rst_n),
-    .init                (fpu_fninit_pulse),
+    .init                (fpu_init_combined),
 
-    // PR-2c.ENV (iter 212): FLDENV also loads CW (env +0).  cw_din shared with
-    // FLDCW (both take exe_fpu_mem_data[15:0]); just OR the enables.
-    .cw_we               (fpu_fldcw_retires || fpu_fldenv_retires),
+    // PR-2c.ENV (iter 212/213): FLDENV/FRSTOR also load CW (env +0).  cw_din
+    // shared with FLDCW (all take exe_fpu_mem_data[15:0]); just OR the enables.
+    .cw_we               (fpu_fldcw_retires || fpu_envload_retires),
     .cw_din              (exe_fpu_mem_data[15:0]),
     .cw                  (fpu_cw),
 
-    // PR-2c.ENV (iter 212): FLDENV loads SW (env +2) — sets exc flags, CC, SF,
-    // and TOP (sw_din[13:11]).  Was tied 0 (no SW-writing op existed).
-    .sw_we               (fpu_fldenv_retires),
+    // PR-2c.ENV (iter 212/213): FLDENV/FRSTOR load SW (env +2) — sets exc flags,
+    // CC, SF, and TOP (sw_din[13:11]).  Was tied 0 (no SW-writing op existed).
+    .sw_we               (fpu_envload_retires),
     .sw_din              (exe_fpu_mem_data[31:16]),
     .sw                  (fpu_sw),
 
@@ -874,7 +896,7 @@ wire        rf_wr_en_muxed   = fpu_busy ? fpu_rf_wr_en   : 1'b0;
 fpu_regfile u_fpu_regfile (
     .clk      (clk),
     .reset    (~rst_n),
-    .init     (fpu_fninit_pulse),
+    .init     (fpu_init_combined),
 
     .rd_idx   (fpu_rf_rd_idx),
     .rd_data  (fpu_rf_rd_data),
@@ -891,10 +913,10 @@ fpu_regfile u_fpu_regfile (
     .r0(), .r1(), .r2(), .r3(), .r4(), .r5(), .r6(), .r7(),
     .tag_word (fpu_tag_word),
 
-    // PR-2c.ENV (iter 212): FLDENV parallel tag-word restore (env +4).  Driven
-    // directly by the in-order retire pulse — independent of the fpu_busy write-
-    // port mux, since FLDENV never engages execute_fpu's FSM.
-    .tag_word_we (fpu_fldenv_retires),
+    // PR-2c.ENV (iter 212/213): FLDENV/FRSTOR parallel tag-word restore (env +4).
+    // Driven directly by the in-order retire pulse — independent of the fpu_busy
+    // write-port mux, since neither op engages execute_fpu's FSM.
+    .tag_word_we (fpu_envload_retires),
     .tag_word_in (exe_fpu_mem_data[47:32])
 );
 
@@ -915,9 +937,10 @@ execute_fpu u_execute_fpu (
     .exe_ready            (exe_ready),
 
     // PR-2b/iter-87: FNINIT pulse drives execute_fpu's state-clear arm
-    // (symmetric with fpu_csr/.init at line 685 + fpu_regfile/.init at
-    // line 758).  See execute_fpu.v port comment + iter-86 trace.
-    .init                 (fpu_fninit_pulse),
+    // (symmetric with fpu_csr/.init + fpu_regfile/.init).  See execute_fpu.v
+    // port comment + iter-86 trace.  PR-2c.ENV (iter 213): env-only FNSAVE also
+    // re-inits (FNINIT semantics), so it joins the combined init pulse.
+    .init                 (fpu_init_combined),
 
     // Command stream
     .exe_cmd              (exe_cmd),
