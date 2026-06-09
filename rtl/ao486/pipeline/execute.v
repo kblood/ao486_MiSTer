@@ -295,6 +295,14 @@ module execute(
     output      [79:0]  exe_fpu_store_data,
     output              exe_fpu_store_ready,
 
+    // PR-2c.ENV (iter 211): FNSTENV env-image lane.  Assembled combinationally
+    // from {tag_word, SW, CW} (zeros above) and LATCHED in write.v on w_load —
+    // unlike the FSTP store_data lane this is valid the instant the op enters
+    // write, so FNSTENV needs no execute_fpu FSM / store_ready window.  Layout
+    // packs CW@[15:0], SW@[31:16], TW@[47:32] so write.v's step-0/1 dwords are
+    // {SW,CW} / {16'd0,TW}; steps 2/3 are zeroed there.
+    output      [79:0]  exe_fpu_env_data,
+
     output      [3:0]   exe_arith_index,
     
     output              exe_arith_sub_carry,
@@ -309,7 +317,9 @@ module execute(
     output      [31:0]  exe_stack_offset,
 
     // FPU activity trace (debug): {transc_retire, any_retire} 1-cycle pulses
-    output      [1:0]   fpu_trace_evt
+    output      [1:0]   fpu_trace_evt,
+    output      [31:0]  fpu_trace_eip,
+    output      [31:0]  fpu_trace_info
 );
 
 //------------------------------------------------------------------------------
@@ -726,6 +736,10 @@ wire        fpu_fldcw_retires =
 
 wire [15:0] fpu_sw;
 wire [15:0] fpu_cw;
+// PR-2c.ENV (iter 211): x87 tag word from the regfile (forward-declared here so
+// the fpu_regfile .tag_word port connection below doesn't create a 1-bit
+// implicit net that then collides with a later explicit decl — vlog-2388).
+wire [15:0] fpu_tag_word;
 wire        fpu_fninit_pulse;
 wire        fpu_fnclex_pulse;
 
@@ -801,7 +815,26 @@ fpu_csr u_fpu_csr (
 // see HANDOFF Gotcha #9).
 wire        fpu_done;
 wire        fpu_done_transc;
+wire        fpu_trace_snap;
+reg [31:0]  fpu_trace_eip_reg;
+reg [31:0]  fpu_trace_info_reg;
+
+assign      fpu_trace_snap = exe_ready && exe_cmd == `CMD_fpu;
 assign      fpu_trace_evt = {fpu_done_transc, fpu_done};
+assign      fpu_trace_eip = fpu_trace_eip_reg;
+assign      fpu_trace_info = fpu_trace_info_reg;
+
+always @(posedge clk) begin
+    if(rst_n == 1'b0) begin
+        fpu_trace_eip_reg  <= 32'd0;
+        fpu_trace_info_reg <= 32'd0;
+    end
+    else if(fpu_trace_snap) begin
+        fpu_trace_eip_reg  <= exe_eip;
+        fpu_trace_info_reg <= {7'd0, exe_cmd, exe_cmdex, exe_modregrm_reg, exe_modregrm_rm, exe_decoder[7:0]};
+    end
+end
+
 wire [2:0]  fpu_rf_wr_idx;
 wire [79:0] fpu_rf_wr_data;
 wire [1:0]  fpu_rf_wr_tag;
@@ -837,11 +870,21 @@ fpu_regfile u_fpu_regfile (
     .wr_tag   (rf_wr_tag_muxed),
     .wr_en    (rf_wr_en_muxed),
 
-    // Observability ports — unused in PR-2b.1; consumed in FSAVE/FXSAVE
-    // when those land.
+    // Observability ports — r0..r7 unused until FNSAVE/FXSAVE; tag_word is
+    // consumed by the PR-2c.ENV FNSTENV env-image lane (the x87 tag word, 2
+    // bits/physical-reg).
     .r0(), .r1(), .r2(), .r3(), .r4(), .r5(), .r6(), .r7(),
-    .tag_word ()
+    .tag_word (fpu_tag_word)
 );
+
+// PR-2c.ENV (iter 211): FNSTENV (D9 /6) writes the 14-byte real-mode env image
+// — CW, SW, TW, then zeroed FIP/FDP/opcode pointer fields (ao486 doesn't track
+// them).  Assemble the meaningful low 6 bytes here from the live CSR/regfile
+// state and hand it to write.v's multi-step store FSM (which latches it on
+// w_load and emits dwords +0={SW,CW}, +4={16'd0,TW}, +8=0, word +12=0).
+// fpu_tag_word is forward-declared above the fpu_regfile instance (strict
+// Verilog decl-order + ModelSim implicit-net pitfall — see HANDOFF Gotcha #9).
+assign exe_fpu_env_data = { 32'd0, fpu_tag_word, fpu_sw, fpu_cw };
 
 execute_fpu u_execute_fpu (
     .clk                  (clk),

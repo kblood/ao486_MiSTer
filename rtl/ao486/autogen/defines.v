@@ -458,6 +458,12 @@
 // the CMD_fpu namespace and is handled at the execute.v level (drives the
 // fpu_csr cw_we/cw_din lane), NOT through execute_fpu's stack FSM.
 `define CMDEX_FLDCW_M16    4'd6
+// PR-2c.ENV (iter 210+) — x87 environment save/restore family, the iter-207
+// freeze fix.  The STORE ops (FNSTENV/FNSAVE) live in the CMD_fpu_store_mem
+// namespace so they reuse write.v's multi-step store FSM; the LOAD ops
+// (FLDENV/FRSTOR) live in CMD_fpu_load_mem so they reuse the read path.  See
+// the CMDEX_FNSTENV_M14/FNSAVE_M94 and CMDEX_FLDENV_M14/FRSTOR_M94 defines in
+// those groups below, and research/design_envsave.md.
 `define CPUID_FEATURES_EDX 32'd1
 
 // --- PR-2b.2b additions: FPU arithmetic CMD code + first arith CMDEX ---
@@ -866,6 +872,13 @@
 // signed int64 (bcd_to_int64 + sign byte) -> floatx80 (int_to_floatx80, exact,
 // no exceptions) and pushes onto the x87 stack.  Same CMD_fpu_load_mem push path.
 `define CMDEX_FBLD            4'd6
+// PR-2c.ENV (iter 210+): x87 environment LOAD ops join CMD_fpu_load_mem so they
+// reuse the multi-beat read path.  FLDENV (D9 /4) reads the 14-byte env image
+// and applies CW/SW/TW (pointer/opcode fields ignored — ao486 doesn't track
+// them); FRSTOR (DD /4) reads the 14-byte env then 8×ST(0..7) (94 B total) into
+// the regfile.  See research/design_envsave.md.
+`define CMDEX_FLDENV_M14      4'd7
+`define CMDEX_FRSTOR_M94      4'd8
 
 // PR-2b.4n (iter 112): FPU constant loads FLD1/FLDL2T/FLDL2E/FLDPI/
 // FLDLG2/FLDLN2/FLDZ (D9 E8..EE).  Each pushes a hardcoded 80-bit
@@ -916,6 +929,13 @@
 // (int64_to_bcd) + sign byte and writes 10 bytes via the SAME 3-step (4+4+2)
 // write FSM as FSTP m80 (shared is_fstp_m80_op in write.v), then pops.
 `define CMDEX_FBSTP           4'd10
+// PR-2c.ENV (iter 210+): x87 environment STORE ops join CMD_fpu_store_mem so
+// they reuse the multi-step store FSM in write.v.  FNSTENV (D9 /6) writes the
+// 14-byte env image (CW/SW/TW + zeroed pointer/opcode fields) via 4 dword/word
+// writes; FNSAVE (DD /6) writes the 14-byte env then 8×ST(0..7) (94 B total)
+// and re-inits the FPU (FNINIT semantics).  See research/design_envsave.md.
+`define CMDEX_FNSTENV_M14     4'd11
+`define CMDEX_FNSAVE_M94      4'd12
 
 // PR-2c.T (iter 185+): x87 TRANSCENDENTAL group — F2XM1/FYL2X/FPTAN/FPATAN/
 // FYL2XP1/FSIN/FCOS/FSINCOS (all 2-byte, prefix D9, reg-form).  These were

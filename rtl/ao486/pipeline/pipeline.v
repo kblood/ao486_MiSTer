@@ -266,7 +266,9 @@ module pipeline(
     input               io_write_done,
 
     // FPU activity trace (debug): {transc_retire, any_retire} 1-cycle pulses
-    output      [1:0]   fpu_trace_evt
+    output      [1:0]   fpu_trace_evt,
+    output      [31:0]  fpu_trace_eip,
+    output      [31:0]  fpu_trace_info
 );
 
 //------------------------------------------------------------------------------
@@ -909,6 +911,8 @@ wire        exe_fpu_eflags_we;
 // PR-2b.5a (iter 113): FSTP m80fp raw-store lane (execute → write).
 wire [79:0] exe_fpu_store_data;
 wire        exe_fpu_store_ready;
+// PR-2c.ENV (iter 211): FNSTENV env-image lane (execute → write).
+wire [79:0] exe_fpu_env_data;
 wire [3:0]  exe_arith_index;
 wire        exe_arith_sub_carry;
 wire        exe_arith_add_carry;
@@ -1160,6 +1164,7 @@ execute execute_inst(
     .exe_fpu_eflags_we             (exe_fpu_eflags_we),             //output
     .exe_fpu_store_data            (exe_fpu_store_data),            //output [79:0]  PR-2b.5a iter 113
     .exe_fpu_store_ready           (exe_fpu_store_ready),           //output         PR-2b.5a iter 113
+    .exe_fpu_env_data              (exe_fpu_env_data),              //output [79:0]  PR-2c.ENV iter 211
     .exe_arith_index               (exe_arith_index),               //output [3:0]
     .exe_arith_sub_carry           (exe_arith_sub_carry),           //output
     .exe_arith_add_carry           (exe_arith_add_carry),           //output
@@ -1169,7 +1174,9 @@ execute execute_inst(
     .dst_final                     (dst_final),                     //output [31:0]
     .exe_mult_overflow             (exe_mult_overflow),             //output
     .exe_stack_offset              (exe_stack_offset),              //output [31:0]
-    .fpu_trace_evt                 (fpu_trace_evt)                  //output [1:0]
+    .fpu_trace_evt                 (fpu_trace_evt),                 //output [1:0]
+    .fpu_trace_eip                 (fpu_trace_eip),                 //output [31:0]
+    .fpu_trace_info                (fpu_trace_info)                 //output [31:0]
 );
 
 //------------------------------------------------------------------------------
@@ -1427,6 +1434,7 @@ write write_inst(
     .exe_fpu_eflags_we             (exe_fpu_eflags_we),             //input
     .exe_fpu_store_data            (exe_fpu_store_data),            //input [79:0]  PR-2b.5a iter 113
     .exe_fpu_store_ready           (exe_fpu_store_ready),           //input         PR-2b.5a iter 113
+    .exe_fpu_env_data              (exe_fpu_env_data),              //input [79:0]  PR-2c.ENV iter 211
     .exe_arith_index               (exe_arith_index),               //input [3:0]
     .exe_arith_sub_carry           (exe_arith_sub_carry),           //input
     .exe_arith_add_carry           (exe_arith_add_carry),           //input

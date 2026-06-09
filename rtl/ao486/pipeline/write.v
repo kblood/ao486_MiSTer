@@ -291,6 +291,11 @@ module write(
     input       [79:0]  exe_fpu_store_data,
     input               exe_fpu_store_ready,
 
+    // PR-2c.ENV (iter 211): FNSTENV env-image (CW/SW/TW packed, zeros above).
+    // Latched on w_load (valid the instant the op enters write), so the env
+    // store doesn't depend on the FSTP store_ready window / execute_fpu FSM.
+    input       [79:0]  exe_fpu_env_data,
+
     input       [3:0]   exe_arith_index,
     
     input               exe_arith_sub_carry,
@@ -361,6 +366,10 @@ reg [79:0]  wr_fpu_store_data;
 reg         fpu_store_latched;
 reg [1:0]   fpu_store_step;
 reg         fpu_store_complete;
+
+// PR-2c.ENV (iter 211): FNSTENV 14-byte env image, latched on w_load (so it is
+// valid for the whole multi-step write without the store_ready latch handshake).
+reg [79:0]  wr_fpu_env_data;
 
 reg [3:0]   wr_arith_index;
 reg [31:0]  wr_src;
@@ -637,6 +646,7 @@ always @(posedge clk) begin if(rst_n == 1'b0) wr_dst_is_eax           <= `FALSE;
 always @(posedge clk) begin if(rst_n == 1'b0) wr_dst_is_edx_eax       <= `FALSE;    else if(w_load) wr_dst_is_edx_eax       <= exe_dst_is_edx_eax;       end
 always @(posedge clk) begin if(rst_n == 1'b0) wr_dst_is_implicit_reg  <= `FALSE;    else if(w_load) wr_dst_is_implicit_reg  <= exe_dst_is_implicit_reg;  end
 always @(posedge clk) begin if(rst_n == 1'b0) wr_linear               <= 32'd0;     else if(w_load) wr_linear               <= exe_linear;               end
+always @(posedge clk) begin if(rst_n == 1'b0) wr_fpu_env_data         <= 80'd0;    else if(w_load) wr_fpu_env_data         <= exe_fpu_env_data;         end  // PR-2c.ENV iter 211
 
 always @(posedge clk) begin if(rst_n == 1'b0) result                  <= 32'd0;     else if(w_load) result                  <= exe_result;               end
 always @(posedge clk) begin if(rst_n == 1'b0) result2                 <= 32'd0;     else if(w_load) result2                 <= exe_result2;              end
@@ -758,7 +768,13 @@ wire is_fst_m64_op  = is_fp_store_op && (wr_cmdex == `CMDEX_FST_M64);
 wire is_fistp_m64_op = is_fp_store_op && (wr_cmdex == `CMDEX_FISTP_M64);
 wire is_fist_m16_op  = is_fp_store_op && ((wr_cmdex == `CMDEX_FIST_M16) ||
                                           (wr_cmdex == `CMDEX_FISTP_M16));
-wire [1:0] fpu_store_max_step = is_fstp_m80_op ? 2'd2 :
+// PR-2c.ENV (iter 211): FNSTENV (D9 /6) — 14-byte real-mode env image = 4
+// writes (dword +0={SW,CW}, dword +4={16'd0,TW}, dword +8=0, word +12=0).
+// Sources wr_fpu_env_data (latched on w_load), NOT wr_fpu_store_data, so it
+// does not need exe_fpu_store_ready / fpu_store_latched.
+wire is_fnstenv_op   = is_fp_store_op && (wr_cmdex == `CMDEX_FNSTENV_M14);
+wire [1:0] fpu_store_max_step = is_fnstenv_op ? 2'd3 :                                              // env: 4 writes (steps 0..3)
+                                is_fstp_m80_op ? 2'd2 :
                                 (is_fstp_m64_op || is_fst_m64_op || is_fistp_m64_op) ? 2'd1 : 2'd0;  // m80=3 / m64=2 / m32,m16=1 writes
 wire fstp_raw_done  = write_done && ~(write_page_fault) && ~(write_ac_fault);
 
@@ -797,6 +813,9 @@ assign write_address =
                                                 wr_linear; //used by write_rmw_system_dword
 
 assign write_data =
+    (is_fnstenv_op)?   ( (fpu_store_step == 2'd0)? wr_fpu_env_data[31:0]   :  // {SW,CW}
+                         (fpu_store_step == 2'd1)? wr_fpu_env_data[63:32]  :  // {16'd0,TW}
+                                                   32'd0 ) :                  // +8 dword / +12 word = 0
     (is_fp_store_op)?  ( (fpu_store_step == 2'd0)? wr_fpu_store_data[31:0]  :
                          (fpu_store_step == 2'd1)? wr_fpu_store_data[63:32] :
                                                    { 16'd0, wr_fpu_store_data[79:64] } ) :
@@ -807,6 +826,8 @@ assign write_data =
                                                                                     result;
 
 assign write_length =
+    (is_fnstenv_op)?            ( (fpu_store_step == 2'd3)?                   3'd2 :  // env: +12 word
+                                                                             3'd4 ) :  // env: +0/+4/+8 dwords
     (is_fp_store_op)?           ( (is_fstp_m80_op && fpu_store_step == 2'd2)? 3'd2 :  // m80: 4/4/2
                                   (is_fist_m16_op)?                          3'd2 :  // m16: 2 (word)
                                                                              3'd4 ) :  // m32/m64: 4 per step
@@ -828,7 +849,7 @@ assign write_length =
 assign write_do = ~(wr_reset) && ~(write_page_fault) && ~(write_ac_fault) &&
     (write_rmw_virtual || (write_virtual && ~is_fp_store_op) || write_stack_virtual || write_new_stack_virtual ||
      write_string_es_virtual || memory_write_system ||
-     (is_fp_store_op && fpu_store_latched && ~fpu_store_complete));
+     (is_fp_store_op && (fpu_store_latched || is_fnstenv_op) && ~fpu_store_complete));  // PR-2c.ENV: env data is w_load-latched, no store_ready handshake
 
 
 assign write_for_wr_ready = (is_fp_store_op)? (fstp_raw_done && fpu_store_step == fpu_store_max_step)
