@@ -49,6 +49,15 @@ module fpu_regfile (
     input             tag_word_we,
     input      [15:0] tag_word_in,
 
+    // PR-2c.ENV (iter 215): parallel DATA load for FRSTOR.  When data_load_we
+    // pulses, all 8 physical data slots are loaded from data_load_in (80 b/reg,
+    // data[i] = data_load_in[80*i +: 80]) in one cycle.  Independent of (and may
+    // fire same-cycle as) tag_word_we — FRSTOR loads tags from the env TW and
+    // data from the ST area together.  Caller supplies data already in PHYSICAL
+    // order (image ST(i) rotated to phys (TOP+i)&7).
+    input             data_load_we,
+    input      [639:0] data_load_in,
+
     // observability for FNSAVE / debug
     output     [79:0] r0, r1, r2, r3, r4, r5, r6, r7,
     output     [15:0] tag_word
@@ -71,14 +80,28 @@ module fpu_regfile (
             for (i = 0; i < 8; i = i + 1) begin
                 tag[i]  <= 2'b11;
             end
-        end else if (tag_word_we) begin
-            // PR-2c.ENV (iter 212): FLDENV / FRSTOR parallel tag-word restore.
-            for (i = 0; i < 8; i = i + 1) begin
-                tag[i] <= tag_word_in[2*i +: 2];
+        end else begin
+            // PR-2c.ENV (iter 215): tag and data loads are INDEPENDENT so FRSTOR
+            // can load tags (from the env TW) and data (from the ST area) the same
+            // cycle.  Normal wr_en still writes both data[wr_idx] and tag[wr_idx].
+            // --- tags ---
+            if (tag_word_we) begin
+                // FLDENV / FRSTOR parallel tag-word restore.
+                for (i = 0; i < 8; i = i + 1) begin
+                    tag[i] <= tag_word_in[2*i +: 2];
+                end
+            end else if (wr_en) begin
+                tag[wr_idx] <= wr_tag;
             end
-        end else if (wr_en) begin
-            data[wr_idx] <= wr_data;
-            tag[wr_idx]  <= wr_tag;
+            // --- data ---
+            if (data_load_we) begin
+                // FRSTOR parallel ST-data restore (physical order).
+                for (i = 0; i < 8; i = i + 1) begin
+                    data[i] <= data_load_in[80*i +: 80];
+                end
+            end else if (wr_en) begin
+                data[wr_idx] <= wr_data;
+            end
         end
     end
 

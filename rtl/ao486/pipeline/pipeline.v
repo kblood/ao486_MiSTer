@@ -688,6 +688,8 @@ wire [31:0] rd_address_effective;
 // PR-2b.5g (iter 124): FLD m80fp high 16 bits ({sign,exp}) from read.v's
 // 2-beat FSM, forwarded to execute.v (low 64 bits ride the read_data lane).
 wire [15:0] rd_fpu_mem_data_hi;
+// PR-2c.ENV (iter 215): FRSTOR 8×ST image-order data from read.v's 94-byte FSM.
+wire [639:0] rd_fpu_st_regs;
 
 read read_inst(
     .clk                (clk),
@@ -867,7 +869,8 @@ read read_inst(
     .src_wire                      (src_wire),                      //output [31:0]
     .dst_wire                      (dst_wire),                      //output [31:0]
     .rd_address_effective          (rd_address_effective),          //output [31:0]
-    .rd_fpu_mem_data_hi            (rd_fpu_mem_data_hi)             //output [15:0]  PR-2b.5g iter 124
+    .rd_fpu_mem_data_hi            (rd_fpu_mem_data_hi),            //output [15:0]  PR-2b.5g iter 124
+    .rd_fpu_st_regs                (rd_fpu_st_regs)                 //output [639:0] PR-2c.ENV iter 215
 );
 
 //------------------------------------------------------------------------------
@@ -1135,6 +1138,7 @@ execute execute_inst(
     // and forwards it to execute_fpu.v's `exe_mem_data` port (was tied 64'd0).
     .rd_read_data                  (read_data),                     //input [63:0]
     .rd_fpu_mem_data_hi            (rd_fpu_mem_data_hi),            //input [15:0]  PR-2b.5g iter 124
+    .rd_fpu_st_regs                (rd_fpu_st_regs),                //input [639:0] PR-2c.ENV iter 215
 
     //exe pipeline
     .wr_busy                       (wr_busy),                       //input

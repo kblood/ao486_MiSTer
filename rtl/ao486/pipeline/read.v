@@ -217,7 +217,11 @@ module read(
     // PR-2b.5g (iter 124): FLD m80fp high 16 bits ({sign,exp}) captured by the
     // read.v 2-beat FSM at beat 0 (word @ addr+8).  The low 64 bits ride the
     // existing read_data/rd_read_data lane at e_load (beat 1 = qword @ addr+0).
-    output      [15:0]  rd_fpu_mem_data_hi
+    output      [15:0]  rd_fpu_mem_data_hi,
+
+    // PR-2c.ENV (iter 215): FRSTOR 8×ST(0..7) image-order data (80 b each),
+    // accumulated by the 94-byte multi-beat read FSM and latched in execute.v.
+    output      [639:0] rd_fpu_st_regs
 );
 
 //------------------------------------------------------------------------------
@@ -601,13 +605,59 @@ end
 
 assign rd_fpu_mem_data_hi = fld_m80_hi;
 
+// PR-2c.ENV (iter 215): FRSTOR (DD /4) 94-byte multi-beat read FSM.  Extends the
+// FLD-m80 2-beat pattern to the full save image: 8 ST records (10 B each) THEN
+// the 14-byte env's leading qword.  The ST records are fetched first (steps
+// 0..15: per record a word @+8 = {sign,exp} then a qword @+0 = mantissa[63:0],
+// mirroring m80) and accumulated into frstor_st_flat (image order ST(0)..ST(7),
+// 80 b each).  The ENV qword is the LAST beat (step 16, @base+0) so it rides the
+// existing read_data -> exe_fpu_mem_data lane and FRSTOR's env apply
+// (fpu_envload_retires: CW/SW/TW) is byte-identical to the env-only path — no
+// change to the env-apply side.  All arms are gated on is_frstor_op so every
+// other load (including FLDENV's single-beat cond_286 path) is untouched.
+wire        is_frstor_op   = (rd_cmd == `CMD_fpu_load_mem) && (rd_cmdex == `CMDEX_FRSTOR_M94);
+wire        frstor_beat_done = read_done && ~(read_page_fault) && ~(read_ac_fault);
+reg  [4:0]  frstor_step;       // 0..15 = ST area (i=step[4:1], sub=step[0]); 16 = env qword (last)
+reg  [639:0] frstor_st_flat;   // {ST7..ST0}, 80 b each, image order
+reg         frstor_complete;   // env beat done — drops read_do
+wire        fr_is_env = (frstor_step == 5'd16);
+wire [2:0]  fr_i      = frstor_step[4:1];   // ST index 0..7
+wire        fr_sub    = frstor_step[0];     // 0 = word @+8 ({sign,exp}); 1 = qword @+0 (mantissa)
+wire [31:0] fr_st_off = 32'd14 + fr_i * 32'd10 + (fr_sub ? 32'd0 : 32'd8);
+
+always @(posedge clk) begin
+    if(rst_n == 1'b0) begin
+        frstor_step     <= 5'd0;
+        frstor_st_flat  <= 640'd0;
+        frstor_complete <= 1'b0;
+    end
+    else if(rd_ready || rd_reset) begin
+        frstor_step     <= 5'd0;
+        frstor_st_flat  <= 640'd0;
+        frstor_complete <= 1'b0;
+    end
+    else if(is_frstor_op && frstor_beat_done) begin
+        if(fr_is_env) begin
+            frstor_complete <= 1'b1;                                  // env qword (last) — rides read_data
+        end else begin
+            if(~fr_sub) frstor_st_flat[fr_i*80 + 64 +: 16] <= read_data[15:0];   // {sign,exp}
+            else        frstor_st_flat[fr_i*80      +: 64] <= read_data[63:0];   // mantissa[63:0]
+            frstor_step <= frstor_step + 5'd1;
+        end
+    end
+end
+
+assign rd_fpu_st_regs = frstor_st_flat;
+
 assign read_address =
+    (is_frstor_op)?                         (rd_seg_linear + (fr_is_env ? 32'd0 : fr_st_off)) :       // ST records then env qword
     (is_fld_m80_op)?                        (rd_seg_linear + (fld_m80_step == 1'b0 ? 32'd8 : 32'd0)) :  // beat0 @+8, beat1 @+0
     (read_rmw_virtual || read_virtual)?     rd_seg_linear :
     (read_system_descriptor)?               rd_descriptor_offset :
                                             rd_system_linear; //used by read_rmw_system_dword, read_system_dword,read_system_word,read_system_qword
 
 assign read_length =
+    (is_frstor_op)?            (fr_is_env ? 4'd8 : (fr_sub ? 4'd8 : 4'd2)) :  // ST: word@+8 / qword@+0 ; env qword
     (is_fld_m80_op)?            (fld_m80_step == 1'b0 ? 4'd2 : 4'd8) :  // beat0 word, beat1 qword
     read_system_word?           4'd2 :
     read_system_dword?          4'd4 :
@@ -639,7 +689,11 @@ assign read_do =
     ~(rd_reset) &&
     ~(read_page_fault) && ~(read_ac_fault) &&
     ~(rd_seg_gp_fault_init) && ~(rd_seg_gp_fault) && ~(rd_descriptor_gp_fault) && ~(rd_seg_ss_fault_init) && ~(rd_seg_ss_fault) && ~(rd_io_allow_fault) && ~(rd_ss_esp_from_tss_fault) &&
-    ( (is_fld_m80_op)?
+    ( (is_frstor_op)?
+        // PR-2c.ENV (iter 215): keep read_do asserted across all 17 beats (gated
+        // by ~frstor_complete, like m80's ~fld_m80_complete).
+        (rd_seg_ready && read_virtual && ~(frstor_complete)) :
+      (is_fld_m80_op)?
         // iter 166: virtual reads now wait for rd_seg_ready (EA-ready +1) so the
         // pipelined seg cone (rd_seg_linear / rd_seg_gp_fault_init) is valid this
         // cycle; system reads keep their own memory_read_system gate (no seg path).
@@ -648,7 +702,8 @@ assign read_do =
 
 // PR-2b.5g (iter 124): FLD m80fp signals ready only when beat 1 (the qword)
 // completes, so the autogen cond_281 hold spans both beats.
-assign read_for_rd_ready = (is_fld_m80_op)? (fld_m80_beat_done && fld_m80_step == 1'b1)
+assign read_for_rd_ready = (is_frstor_op)? (frstor_beat_done && fr_is_env)            // last beat = env qword (step 16)
+                         : (is_fld_m80_op)? (fld_m80_beat_done && fld_m80_step == 1'b1)
                                           : (rd_one_mem_read || (read_done && ~(read_page_fault) && ~(read_ac_fault)));
 
 assign read_4 = read_data[31:0];

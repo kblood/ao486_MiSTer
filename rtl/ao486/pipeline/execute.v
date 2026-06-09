@@ -248,6 +248,11 @@ module execute(
     // low 64 bits for FLD m80's final beat) and forwarded to execute_fpu.
     input       [15:0]  rd_fpu_mem_data_hi,
 
+    // PR-2c.ENV (iter 215): FRSTOR 8×ST image-order data from read.v's 94-byte
+    // multi-beat FSM.  Latched on e_load into exe_fpu_restore_st; applied to the
+    // regfile (rotated by the restored TOP) on the FRSTOR retire pulse.
+    input       [639:0] rd_fpu_st_regs,
+
     //exe pipeline
     input               wr_busy,
     output              exe_ready,
@@ -489,6 +494,9 @@ always @(posedge clk) begin if(rst_n == 1'b0) exe_fpu_mem_data         <= 64'd0;
 // PR-2b.5g (iter 124): FLD m80fp high 16 bits, latched alongside the low 64.
 reg  [15:0] exe_fpu_mem_data_hi;
 always @(posedge clk) begin if(rst_n == 1'b0) exe_fpu_mem_data_hi      <= 16'd0;     else if(e_load) exe_fpu_mem_data_hi      <= rd_fpu_mem_data_hi;       end
+// PR-2c.ENV (iter 215): FRSTOR 8×ST image-order data, latched alongside the env.
+reg  [639:0] exe_fpu_restore_st;
+always @(posedge clk) begin if(rst_n == 1'b0) exe_fpu_restore_st       <= 640'd0;    else if(e_load) exe_fpu_restore_st       <= rd_fpu_st_regs;           end
 always @(posedge clk) begin if(rst_n == 1'b0) exe_address_effective    <= 32'd0;     else if(e_load) exe_address_effective    <= rd_address_effective;    end
 always @(posedge clk) begin if(rst_n == 1'b0) exe_eip_next_sum         <= 32'd0;     else if(e_load) exe_eip_next_sum         <= rd_eip_next_sum;         end
 
@@ -784,6 +792,10 @@ wire [15:0] fpu_tag_word;
 // don't create colliding 1-bit implicit nets (HANDOFF Gotcha #9, same as
 // fpu_tag_word above).
 wire [79:0] fpu_r0, fpu_r1, fpu_r2, fpu_r3, fpu_r4, fpu_r5, fpu_r6, fpu_r7;
+// PR-2c.ENV (iter 215): FRSTOR physical-order ST vector (driven by the rotation
+// always-block below; forward-declared so the fpu_regfile .data_load_in port
+// connection doesn't create a colliding 1-bit implicit net — Gotcha #9).
+reg  [639:0] frstor_phys;
 wire        fpu_fninit_pulse;
 wire        fpu_fnclex_pulse;
 // PR-2c.ENV (iter 213): FNINIT and env-only FNSAVE both drive the FPU re-init.
@@ -932,7 +944,14 @@ fpu_regfile u_fpu_regfile (
     // Driven directly by the in-order retire pulse — independent of the fpu_busy
     // write-port mux, since neither op engages execute_fpu's FSM.
     .tag_word_we (fpu_envload_retires),
-    .tag_word_in (exe_fpu_mem_data[47:32])
+    .tag_word_in (exe_fpu_mem_data[47:32]),
+
+    // PR-2c.ENV (iter 215): FRSTOR one-cycle parallel data load (all 8 physical
+    // slots at once, rotated by the restored TOP).  Fires on the FRSTOR retire
+    // pulse, in lockstep with tag_word_we (tags from the env TW) — the regfile
+    // applies the data and tag loads independently the same cycle.
+    .data_load_we (fpu_frstor_retires),
+    .data_load_in (frstor_phys)
 );
 
 // PR-2c.ENV (iter 211): FNSTENV (D9 /6) writes the 14-byte real-mode env image
@@ -950,6 +969,25 @@ assign exe_fpu_env_data = { 32'd0, fpu_tag_word, fpu_sw, fpu_cw };
 // FNSAVE's re-init zeroes it).
 assign exe_fpu_st_regs  = { fpu_r7, fpu_r6, fpu_r5, fpu_r4, fpu_r3, fpu_r2, fpu_r1, fpu_r0 };
 assign exe_fpu_save_top = fpu_sw[13:11];
+
+// PR-2c.ENV (iter 215): FRSTOR ST-restore.  The 8 image-order ST values
+// (exe_fpu_restore_st) map to PHYSICAL slots: image ST(i) -> phys (TOP+i)&7,
+// where TOP is the RESTORED top from the env qword's SW (exe_fpu_mem_data[27:25]
+// = SW[13:11]) being applied this same cycle.  Inverting: phys slot p holds
+// image ST((p-TOP)&7).  frstor_phys is the physical-order vector fed to the
+// regfile's one-cycle parallel data-load port (pulsed on fpu_frstor_retires).
+// Env qword carries SW at [31:16]; the restored TOP is SW[13:11], i.e. bits
+// [16+13 : 16+11] = [29:27] of the qword (NOT [27:25] = SW[11:9]).
+wire [2:0] frstor_top_restore = exe_fpu_mem_data[29:27];
+integer fr_p;
+reg  [2:0] fr_src;
+always @* begin
+    frstor_phys = 640'd0;
+    for(fr_p = 0; fr_p < 8; fr_p = fr_p + 1) begin
+        fr_src = (fr_p + 8 - frstor_top_restore);          // (p - TOP) mod 8
+        frstor_phys[fr_p*80 +: 80] = exe_fpu_restore_st[fr_src*80 +: 80];
+    end
+end
 
 execute_fpu u_execute_fpu (
     .clk                  (clk),
