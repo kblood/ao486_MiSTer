@@ -373,6 +373,19 @@ wire exe_waiting;
 // real declaration in the instantiation block would otherwise collide.
 wire fpu_busy;
 
+// PR-2c.ENV (iter 216): FRSTOR ST-restore sequencer busy. Holds exe_ready low
+// while the 8 ST(0..7) data slots are written one-per-cycle through the
+// regfile's existing wr port (the area-frugal replacement for iter-215's
+// one-cycle 640-bit parallel data-load + barrel rotation, which overflowed the
+// device by ~300 ALMs).  Forward-declared here so the exe_ready assign below can
+// chain ~frstor_busy; driven by the frstor_active reg further down (Gotcha #9).
+wire        frstor_busy;
+// FRSTOR sequencer datapath, forward-declared (Gotcha #9) so the regfile write-
+// port mux below can reference them before their assigns further down.
+wire [2:0]  frstor_wr_phys;
+wire [79:0] frstor_wr_streg;
+wire [1:0]  frstor_wr_tag;
+
 // PR-2b.2d: same hoist for fpu_exec_exc_flags_set — referenced by the
 // fpu_csr instantiation that lives BETWEEN this block and the
 // execute_fpu instantiation that actually drives it.
@@ -440,7 +453,7 @@ wire exe_eip_from_glob_param_2_16bit;
 
 //------------------------------------------------------------------------------
 
-assign exe_ready = ~(exe_reset) && ~(exe_waiting) && exe_cmd != `CMD_NULL && ~(wr_busy) && ~(fpu_busy);
+assign exe_ready = ~(exe_reset) && ~(exe_waiting) && exe_cmd != `CMD_NULL && ~(wr_busy) && ~(fpu_busy) && ~(frstor_busy);
 
 assign exe_busy = exe_waiting || (exe_ready == `FALSE && exe_cmd != `CMD_NULL);
 
@@ -792,10 +805,6 @@ wire [15:0] fpu_tag_word;
 // don't create colliding 1-bit implicit nets (HANDOFF Gotcha #9, same as
 // fpu_tag_word above).
 wire [79:0] fpu_r0, fpu_r1, fpu_r2, fpu_r3, fpu_r4, fpu_r5, fpu_r6, fpu_r7;
-// PR-2c.ENV (iter 215): FRSTOR physical-order ST vector (driven by the rotation
-// always-block below; forward-declared so the fpu_regfile .data_load_in port
-// connection doesn't create a colliding 1-bit implicit net — Gotcha #9).
-reg  [639:0] frstor_phys;
 wire        fpu_fninit_pulse;
 wire        fpu_fnclex_pulse;
 // PR-2c.ENV (iter 213): FNINIT and env-only FNSAVE both drive the FPU re-init.
@@ -913,11 +922,15 @@ wire [1:0]  fpu_rf_rd_tag;
 
 // Write-port mux: when fpu_busy=1 (PR-2b.2+) the arithmetic FSM owns the
 // write port; when fpu_busy=0 the PR-1a control path has no writes, so the
-// enable is forced low and the idx/data/tag get safe defaults.
-wire [2:0]  rf_wr_idx_muxed  = fpu_busy ? fpu_rf_wr_idx  : 3'd0;
-wire [79:0] rf_wr_data_muxed = fpu_busy ? fpu_rf_wr_data : 80'd0;
-wire [1:0]  rf_wr_tag_muxed  = fpu_busy ? fpu_rf_wr_tag  : 2'b00;
-wire        rf_wr_en_muxed   = fpu_busy ? fpu_rf_wr_en   : 1'b0;
+// enable is forced low and the idx/data/tag get safe defaults.  PR-2c.ENV
+// (iter 216): the FRSTOR sequencer (frstor_busy) takes top priority — it owns
+// the port for 8 cycles, writing one ST slot per cycle (data + restored tag).
+// fpu_busy and frstor_busy are mutually exclusive (FRSTOR never engages
+// execute_fpu's FSM), so the priority order is just for safety.
+wire [2:0]  rf_wr_idx_muxed  = frstor_busy ? frstor_wr_phys  : (fpu_busy ? fpu_rf_wr_idx  : 3'd0);
+wire [79:0] rf_wr_data_muxed = frstor_busy ? frstor_wr_streg : (fpu_busy ? fpu_rf_wr_data : 80'd0);
+wire [1:0]  rf_wr_tag_muxed  = frstor_busy ? frstor_wr_tag   : (fpu_busy ? fpu_rf_wr_tag  : 2'b00);
+wire        rf_wr_en_muxed   = frstor_busy ? 1'b1            : (fpu_busy ? fpu_rf_wr_en   : 1'b0);
 
 fpu_regfile u_fpu_regfile (
     .clk      (clk),
@@ -940,18 +953,14 @@ fpu_regfile u_fpu_regfile (
     .r4(fpu_r4), .r5(fpu_r5), .r6(fpu_r6), .r7(fpu_r7),
     .tag_word (fpu_tag_word),
 
-    // PR-2c.ENV (iter 212/213): FLDENV/FRSTOR parallel tag-word restore (env +4).
-    // Driven directly by the in-order retire pulse — independent of the fpu_busy
-    // write-port mux, since neither op engages execute_fpu's FSM.
-    .tag_word_we (fpu_envload_retires),
-    .tag_word_in (exe_fpu_mem_data[47:32]),
-
-    // PR-2c.ENV (iter 215): FRSTOR one-cycle parallel data load (all 8 physical
-    // slots at once, rotated by the restored TOP).  Fires on the FRSTOR retire
-    // pulse, in lockstep with tag_word_we (tags from the env TW) — the regfile
-    // applies the data and tag loads independently the same cycle.
-    .data_load_we (fpu_frstor_retires),
-    .data_load_in (frstor_phys)
+    // PR-2c.ENV (iter 212): FLDENV parallel tag-word restore (env +4).  Loads all
+    // 8 tags at once without touching data — FLDENV restores only the env.  Driven
+    // directly by the in-order retire pulse (independent of the fpu_busy mux).
+    // NOTE (iter 216): FRSTOR no longer uses this port — its sequencer writes data
+    // AND the restored per-slot tag through the normal wr port over 8 cycles — so
+    // this is fpu_fldenv_retires ONLY, not fpu_envload_retires.
+    .tag_word_we (fpu_fldenv_retires),
+    .tag_word_in (exe_fpu_mem_data[47:32])
 );
 
 // PR-2c.ENV (iter 211): FNSTENV (D9 /6) writes the 14-byte real-mode env image
@@ -970,24 +979,64 @@ assign exe_fpu_env_data = { 32'd0, fpu_tag_word, fpu_sw, fpu_cw };
 assign exe_fpu_st_regs  = { fpu_r7, fpu_r6, fpu_r5, fpu_r4, fpu_r3, fpu_r2, fpu_r1, fpu_r0 };
 assign exe_fpu_save_top = fpu_sw[13:11];
 
-// PR-2c.ENV (iter 215): FRSTOR ST-restore.  The 8 image-order ST values
-// (exe_fpu_restore_st) map to PHYSICAL slots: image ST(i) -> phys (TOP+i)&7,
-// where TOP is the RESTORED top from the env qword's SW (exe_fpu_mem_data[27:25]
-// = SW[13:11]) being applied this same cycle.  Inverting: phys slot p holds
-// image ST((p-TOP)&7).  frstor_phys is the physical-order vector fed to the
-// regfile's one-cycle parallel data-load port (pulsed on fpu_frstor_retires).
-// Env qword carries SW at [31:16]; the restored TOP is SW[13:11], i.e. bits
-// [16+13 : 16+11] = [29:27] of the qword (NOT [27:25] = SW[11:9]).
-wire [2:0] frstor_top_restore = exe_fpu_mem_data[29:27];
-integer fr_p;
-reg  [2:0] fr_src;
-always @* begin
-    frstor_phys = 640'd0;
-    for(fr_p = 0; fr_p < 8; fr_p = fr_p + 1) begin
-        fr_src = (fr_p + 8 - frstor_top_restore);          // (p - TOP) mod 8
-        frstor_phys[fr_p*80 +: 80] = exe_fpu_restore_st[fr_src*80 +: 80];
+// PR-2c.ENV (iter 216): FRSTOR ST-restore SEQUENCER (replaces iter-215's
+// one-cycle 640-bit parallel data-load + 8x80-bit barrel rotation, which pushed
+// the device to 101% ALMs).  Instead of loading all 8 slots at once, a small FSM
+// writes them one-per-cycle through the regfile's EXISTING wr port over 8 cycles,
+// stalling exe_ready via frstor_busy meanwhile.  Cost: 7 extra cycles per FRSTOR
+// (negligible) for a ~300-ALM reclaim (one 8:1 80-bit read-mux instead of eight,
+// no parallel regfile data port).
+//
+// Mapping: image ST(i) -> physical slot (TOP+i)&7, where TOP is the RESTORED top
+// from the env qword's SW.  Env qword carries SW at [31:16], so TOP = SW[13:11]
+// is qword bits [16+13:16+11] = [29:27] (NOT [27:25] = SW[11:9]).  The restored
+// tag for each slot comes from the env tag word (TW @ qword[47:32], physical
+// order) so the sequential wr_en writes data+tag together (tag_word_we is no
+// longer used for FRSTOR — see the regfile instance below).
+wire [2:0]  frstor_top_restore = exe_fpu_mem_data[29:27];
+wire [15:0] frstor_restore_tw  = exe_fpu_mem_data[47:32];
+
+// "Would retire" = exe_ready's conditions for FRSTOR WITHOUT the ~frstor_busy
+// term (which this FSM drives), so we can detect the op sitting in execute.
+wire        frstor_in_exe = ~(exe_reset) && ~(exe_waiting) && ~(wr_busy) && ~(fpu_busy) &&
+                            exe_cmd == `CMD_fpu_load_mem && exe_cmdex == `CMDEX_FRSTOR_M94;
+
+reg         frstor_active;   // high while sequencing the 8 ST writes (drives frstor_busy)
+reg  [2:0]  frstor_cnt;      // image slot index 0..7, one write per cycle
+reg         frstor_done;     // set after the 8th write; gates restart, cleared when op leaves
+
+always @(posedge clk) begin
+    if(rst_n == 1'b0 || exe_reset) begin
+        frstor_active <= 1'b0;
+        frstor_cnt    <= 3'd0;
+        frstor_done   <= 1'b0;
+    end
+    else if(exe_cmd != `CMD_fpu_load_mem || exe_cmdex != `CMDEX_FRSTOR_M94) begin
+        // FRSTOR not the current op (retired / different op) — reset for next time.
+        frstor_active <= 1'b0;
+        frstor_cnt    <= 3'd0;
+        frstor_done   <= 1'b0;
+    end
+    else if(frstor_active) begin
+        frstor_cnt <= frstor_cnt + 3'd1;
+        if(frstor_cnt == 3'd7) begin
+            frstor_active <= 1'b0;   // 8th write happens this cycle; release next
+            frstor_done   <= 1'b1;   // exe_ready then fires -> CW/SW/TOP apply + retire
+        end
+    end
+    else if(~frstor_done && frstor_in_exe) begin
+        frstor_active <= 1'b1;       // start the 8-cycle restore
+        frstor_cnt    <= 3'd0;
     end
 end
+
+assign frstor_busy = frstor_active;
+
+// Per-cycle write: image slot frstor_cnt -> physical (TOP+cnt)&7.
+// (frstor_wr_phys / frstor_wr_streg / frstor_wr_tag forward-declared up top.)
+assign frstor_wr_phys  = frstor_top_restore + frstor_cnt;             // mod-8 by 3-bit wrap
+assign frstor_wr_streg = exe_fpu_restore_st[frstor_cnt*80 +: 80];     // one 8:1 80-bit read-mux
+assign frstor_wr_tag   = frstor_restore_tw[frstor_wr_phys*2 +: 2];    // restored tag (phys order)
 
 execute_fpu u_execute_fpu (
     .clk                  (clk),
