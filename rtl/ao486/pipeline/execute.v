@@ -748,7 +748,8 @@ execute_divide execute_divide_inst(
 wire        fpu_op_retires =
     exe_ready && exe_cmd == `CMD_fpu &&
     (exe_cmdex == `CMDEX_FN_INIT    || exe_cmdex == `CMDEX_FN_CLEX ||
-     exe_cmdex == `CMDEX_FNSTSW_AX  || exe_cmdex == `CMDEX_FNSTCW_M16);
+     exe_cmdex == `CMDEX_FNSTSW_AX  || exe_cmdex == `CMDEX_FNSTCW_M16 ||
+     exe_cmdex == `CMDEX_FNSTSW_M16);   // iter-229: FNSTSW m16 retires like FNSTCW
 
 // PR-2b.5o (iter 129): FLDCW m16 (D9 /5).  The inbound twin of FNSTCW: the
 // 16-bit control word is fetched in the READ stage (read_commands.v cond_282,

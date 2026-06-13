@@ -297,7 +297,7 @@ wire cond_258 = { rd_cmd[6:1], 1'd0 } == `CMD_BSx;
 // PR-1a follow-up (iter 69): cond_259 wires the read-stage half of FNSTCW m16's
 // memory write — sets rd_dst_is_memory + rd_req_memory + write_virtual_check
 // in parallel to MOV [m16], reg.  Pairs with autogen/write_commands.v cond_276.
-wire cond_259 = rd_cmd == `CMD_fpu && rd_cmdex == `CMDEX_FNSTCW_M16;
+wire cond_259 = rd_cmd == `CMD_fpu && (rd_cmdex == `CMDEX_FNSTCW_M16 || rd_cmdex == `CMDEX_FNSTSW_M16);  // iter-229: FNSTSW m16 reuses FNSTCW's identical store-address read setup
 // PR-2b.5a (iter 113): cond_279 wires the read-stage half of FSTP m80fp's
 // memory write — identical arm set to FNSTCW cond_259 (write_virtual_check +
 // rd_req_memory + rd_dst_is_memory + rd_waiting), all gated by cond_3 (mem-

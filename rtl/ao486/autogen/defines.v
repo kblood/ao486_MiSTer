@@ -458,6 +458,14 @@
 // the CMD_fpu namespace and is handled at the execute.v level (drives the
 // fpu_csr cw_we/cw_din lane), NOT through execute_fpu's stack FSM.
 `define CMDEX_FLDCW_M16    4'd6
+// iter-229 — FNSTSW m16 = DD /7 mem-form: store the 16-bit FPU status word to
+// memory.  The memory twin of FNSTSW AX (DF E0) and the structural twin of
+// FNSTCW m16 (D9 /7, CMDEX_FNSTCW_M16): identical store datapath (decode→read→
+// execute exe_result→write dst_is_memory), differing ONLY in opcode (DD vs D9)
+// and source register (fpu_sw vs fpu_cw).  Root cause of the FX Fighter freeze:
+// libm's x87 arg-reduction loop polls SW.C2 via `fnstsw [mem]`, which was
+// UNIMPLEMENTED (only the AX form existed) so it read stale memory.
+`define CMDEX_FNSTSW_M16   4'd9
 // PR-2c.ENV (iter 210+) — x87 environment save/restore family, the iter-207
 // freeze fix.  The STORE ops (FNSTENV/FNSAVE) live in the CMD_fpu_store_mem
 // namespace so they reuse write.v's multi-step store FSM; the LOAD ops

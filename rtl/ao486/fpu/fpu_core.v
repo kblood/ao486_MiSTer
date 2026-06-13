@@ -62,12 +62,17 @@ module fpu_core (
         CMDEX_FN_CLEX     = 4'd3,
         CMDEX_FNSTSW_AX   = 4'd4,
         CMDEX_FNSTCW_M16  = 4'd5,
+        CMDEX_FNSTSW_M16  = 4'd9,   // iter-229: FNSTSW m16 (DD /7) memory store
         CMDEX_UNIMPL      = 4'd15;
 
     wire fninit_now    = cmd_valid && cmdex == CMDEX_FN_INIT;
     wire fnclex_now    = cmd_valid && cmdex == CMDEX_FN_CLEX;
     wire fnstsw_ax_now = cmd_valid && cmdex == CMDEX_FNSTSW_AX;
     wire fnstcw_now    = cmd_valid && cmdex == CMDEX_FNSTCW_M16;
+    // iter-229: FNSTSW m16 stores the 16-bit SW to memory via the SAME generic
+    // exe_result + dst_is_memory path as FNSTCW (execute_commands.v provides
+    // {16'd0, fpu_sw}); it only needs to retire here so the pipeline completes.
+    wire fnstsw_m16_now = cmd_valid && cmdex == CMDEX_FNSTSW_M16;
 
     assign fninit_pulse = fninit_now;
     assign fnclex_pulse = fnclex_now;
@@ -77,8 +82,8 @@ module fpu_core (
     assign mem_we_req  = fnstcw_now;
     assign mem_we_data = cw;
 
-    // All four ops retire in a single cycle.
-    assign cmd_done = cmd_valid && (fninit_now | fnclex_now | fnstsw_ax_now | fnstcw_now);
+    // All these ops retire in a single cycle.
+    assign cmd_done = cmd_valid && (fninit_now | fnclex_now | fnstsw_ax_now | fnstcw_now | fnstsw_m16_now);
 
     // Suppress unused-input warnings: this module never reads sw / reset
     // directly (reset effects flow through the external CSR + regfile).

@@ -1109,6 +1109,7 @@ assign exe_result =
     (cond_297 && cond_299)? ( { 27'd0, e_bit_scan_reverse }) :
     // --- PR-1a additions: FNSTSW AX returns FPU status word; FNSTCW returns control word ---
     (exe_cmd == `CMD_fpu && exe_cmdex == `CMDEX_FNSTSW_AX)?  ( { 16'd0, fpu_sw }) :
+    (exe_cmd == `CMD_fpu && exe_cmdex == `CMDEX_FNSTSW_M16)? ( { 16'd0, fpu_sw }) :  // iter-229: FNSTSW m16 -> store data
     (exe_cmd == `CMD_fpu && exe_cmdex == `CMDEX_FNSTCW_M16)? ( { 16'd0, fpu_cw }) :
     32'd0;
 assign exe_trigger_ts_fault =

@@ -302,7 +302,7 @@ wire cond_275 = eax > 32'd1;
 // PR-1a follow-up (iter 69): cond_276 wires the write-stage half of FNSTCW m16's
 // memory write — pulses write_virtual when wr_dst_is_memory.  Pairs with
 // autogen/read_commands.v cond_259 which sets rd_dst_is_memory at the read stage.
-wire cond_276 = wr_cmd == `CMD_fpu && wr_cmdex == `CMDEX_FNSTCW_M16;
+wire cond_276 = wr_cmd == `CMD_fpu && (wr_cmdex == `CMDEX_FNSTCW_M16 || wr_cmdex == `CMDEX_FNSTSW_M16);  // iter-229: FNSTSW m16 reuses FNSTCW's identical memory-store write stage
 // PR-2b.5a (iter 113): cond_279 wires the write-stage half of FSTP m80fp —
 // pulses write_virtual when wr_dst_is_memory, and holds wr_waiting via cond_1
 // (wr_dst_is_memory && ~write_for_wr_ready) so the op stays in the write stage
@@ -992,6 +992,10 @@ assign write_length_word =
     (cond_23)? (`TRUE) :
     (cond_39)? (`TRUE) :
     (cond_109)? (`TRUE) :
+    // FNSTCW m16 is a two-byte x87 control-word store.  Without this arm the
+    // generic write-length mux falls through to 32-bit and zeroes the adjacent
+    // stack word in DJGPP-style helpers.
+    (cond_276)? (`TRUE) :
     (cond_258 && cond_259)? (`TRUE) :
     1'd0;
 assign wr_validate_seg_regs =
