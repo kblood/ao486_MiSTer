@@ -702,8 +702,18 @@ assign read_do =
 
 // PR-2b.5g (iter 124): FLD m80fp signals ready only when beat 1 (the qword)
 // completes, so the autogen cond_281 hold spans both beats.
-assign read_for_rd_ready = (is_frstor_op)? (frstor_beat_done && fr_is_env)            // last beat = env qword (step 16)
-                         : (is_fld_m80_op)? (fld_m80_beat_done && fld_m80_step == 1'b1)
+// iter-223 WEDGE FIX: read_for_rd_ready was the MOMENTARY read_done pulse
+// (via *_beat_done). rd_ready = ~rd_waiting & rd_cmd!=NULL & ~exe_busy ALSO needs
+// ~exe_busy; if exe_busy was high during that single pulse cycle (a preceding FPU
+// arith op still draining), the rd_ready window was MISSED and never returned —
+// read_do is then gated off by the latched *_complete (so no new beat regenerates
+// the pulse) and rd_waiting hangs forever. This wedged any back-to-back FPU op
+// sequence with no fwait/GP spacing (FX Fighter's tight x87 loop; very likely also
+// the env-save FRSTOR family). FIX: hold read_for_rd_ready as a LEVEL via the
+// latched *_complete reg (which persists until rd_ready/rd_reset), OR'd with the
+// original same-cycle pulse so the fast (exe-not-busy) path is byte-unchanged.
+assign read_for_rd_ready = (is_frstor_op)? (frstor_complete || (frstor_beat_done && fr_is_env))            // last beat = env qword (step 16)
+                         : (is_fld_m80_op)? (fld_m80_complete || (fld_m80_beat_done && fld_m80_step == 1'b1))
                                           : (rd_one_mem_read || (read_done && ~(read_page_fault) && ~(read_ac_fault)));
 
 assign read_4 = read_data[31:0];
