@@ -45,6 +45,16 @@ module floatx80_remainder (
     input  wire [79:0] a,
     input  wire [79:0] b,
     input  wire        rnd_nearest,   // 1 = FPREM1 (RTNE quotient), 0 = FPREM (RTZ)
+    // iter-228: stack-underflow (empty-tag) source detection.  When ST(0)
+    // (a_empty) or ST(1) (b_empty) is Empty-tagged the operand read is an
+    // x87 stack underflow (#IS).  Real 387+ substitutes QNaN-indefinite, sets
+    // IE, and the operation COMPLETES.  We mirror that: force the special
+    // QNaN path so `incomplete` (C2) is 0, which lets a software
+    // do{fprem}while(C2) angle-reduction loop terminate instead of spinning
+    // forever on stale register data (the FX Fighter freeze, iter-219..227).
+    // Latched on `start` alongside a_reg/b_reg.
+    input  wire        a_empty,
+    input  wire        b_empty,
     // iter-171a: shared input normalizers (~600 ALUTs saved).  Caller drives
     // these from execute_fpu's u_norm_a_shared / u_norm_b_shared cones
     // evaluating op_a / op_b; at the `start` edge (rem_start fires in
@@ -91,6 +101,7 @@ module floatx80_remainder (
     //--------------------------------------------------------------------
     reg  [79:0] a_reg, b_reg;
     reg         rnd_reg;
+    reg         ae_reg, be_reg;       // iter-228: latched empty-tag (stack underflow #IS)
 
     wire        a_sign = a_reg[79];
 
@@ -185,7 +196,8 @@ module floatx80_remainder (
     // rem_div_reg captured from one seq_divider pass.  Both numerators satisfy
     // num[127:64] < den (a_sig_n shifted left by < 64 vs a J-bit-set b_sig_n).
     //--------------------------------------------------------------------
-    wire is_special_pre = is_any_nan | is_inf_a
+    wire is_special_pre = ae_reg | be_reg                  // iter-228: stack underflow #IS
+                        | is_any_nan | is_inf_a
                         | (~is_inf_a & is_inf_b)            // spec_binf
                         | (~is_inf_a & ~is_inf_b & is_zero_b)
                         | (~is_inf_a & ~is_inf_b & ~is_zero_b & is_zero_a);
@@ -214,6 +226,8 @@ module floatx80_remainder (
             a_reg        <= 80'd0;
             b_reg        <= 80'd0;
             rnd_reg      <= 1'b0;
+            ae_reg       <= 1'b0;
+            be_reg       <= 1'b0;
             q_div_reg    <= 64'd0;
             rem_div_reg  <= 64'd0;
             a_sign_n_reg <= 1'b0;
@@ -230,6 +244,8 @@ module floatx80_remainder (
                         a_reg        <= a;
                         b_reg        <= b;
                         rnd_reg      <= rnd_nearest;
+                        ae_reg       <= a_empty;   // iter-228: stack-underflow latch
+                        be_reg       <= b_empty;
                         // iter-171a: capture shared-normalize cone outputs on
                         // the SAME edge that latches a/b.  After this edge the
                         // shared cones may see different op_a/op_b (next op
@@ -357,17 +373,23 @@ module floatx80_remainder (
     //--------------------------------------------------------------------
     wire [79:0] qnan_indef = {1'b1, 15'h7FFF, 64'hC000000000000000};
 
-    wire spec_nan   = is_any_nan;
-    wire spec_ainf  = ~spec_nan & is_inf_a;                              // a=Inf -> IE+QNaN
-    wire spec_binf  = ~spec_nan & ~is_inf_a & is_inf_b;                 // b=Inf -> result=a
-    wire spec_bzero = ~spec_nan & ~is_inf_a & ~is_inf_b & is_zero_b;    // b=0   -> IE+QNaN
-    wire spec_azero = ~spec_nan & ~is_inf_a & ~is_inf_b & ~is_zero_b & is_zero_a; // a=0 -> result=a
-    wire is_special = spec_nan | spec_ainf | spec_binf | spec_bzero | spec_azero;
+    // iter-228: stack underflow (#IS) — an Empty-tagged source operand.  Real
+    // x87 checks stack faults BEFORE operand classification, so this takes the
+    // HIGHEST priority and forces the QNaN-indefinite + IE result (and, via
+    // ~is_special below, C2=0 so the reduction loop terminates).
+    wire spec_empty = ae_reg | be_reg;
+    wire spec_nan   = ~spec_empty & is_any_nan;
+    wire spec_ainf  = ~spec_empty & ~spec_nan & is_inf_a;               // a=Inf -> IE+QNaN
+    wire spec_binf  = ~spec_empty & ~spec_nan & ~is_inf_a & is_inf_b;   // b=Inf -> result=a
+    wire spec_bzero = ~spec_empty & ~spec_nan & ~is_inf_a & ~is_inf_b & is_zero_b;    // b=0 -> IE+QNaN
+    wire spec_azero = ~spec_empty & ~spec_nan & ~is_inf_a & ~is_inf_b & ~is_zero_b & is_zero_a; // a=0 -> result=a
+    wire is_special = spec_empty | spec_nan | spec_ainf | spec_binf | spec_bzero | spec_azero;
 
     //--------------------------------------------------------------------
     // Output mux: special > passthru(=a) > packed result.
     //--------------------------------------------------------------------
-    assign z = spec_nan   ? z_nan
+    assign z = spec_empty ? qnan_indef   // iter-228: stack underflow -> indefinite
+             : spec_nan   ? z_nan
              : spec_ainf  ? qnan_indef
              : spec_binf  ? a_reg
              : spec_bzero ? qnan_indef
@@ -378,8 +400,8 @@ module floatx80_remainder (
     assign incomplete = ~is_special & ~passthru & incomplete_w;
     assign quotient   = (is_special | passthru | incomplete_w) ? 3'd0 : final_q[2:0];
 
-    // IE: SNaN input, a=Inf, or b=0 (invalid operations).
-    wire ie_w = (spec_nan & is_any_snan) | spec_ainf | spec_bzero;
+    // IE: stack underflow (#IS), SNaN input, a=Inf, or b=0 (invalid operations).
+    wire ie_w = spec_empty | (spec_nan & is_any_snan) | spec_ainf | spec_bzero;
     // DE: denormal operand on a non-invalid finite path.  b=Inf reflects
     // only a-denormal (b is Inf, not denormal); passthru/kernel reflect
     // either operand (both are finite & nonzero there).

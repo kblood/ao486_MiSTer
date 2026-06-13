@@ -2702,6 +2702,14 @@ module execute_fpu (
         .a           (a_lat),
         .b           ((state == S_COMPUTE) ? rf_rd_data : b_lat),
         .rnd_nearest (is_fprem1_lat),
+        // iter-228: stack-underflow (#IS) detection.  st0_empty_lat = ST(0) tag
+        // == Empty (latched S_FETCH_B); stsrc_empty_lat = ST(1) tag == Empty
+        // (latched S_COMPUTE, src_lat=1 -> abs_st1).  Both stable by the
+        // rem_start edge.  An Empty source -> QNaN-indefinite + IE + C2=0 so the
+        // game's do{fprem}while(C2) angle-reduction loop terminates instead of
+        // spinning on stale register data (FX Fighter freeze, iter-219..227).
+        .a_empty     (st0_empty_lat),
+        .b_empty     (stsrc_empty_lat),
         // iter-171a: shared input normalizers (~600 ALUTs saved).  For FPREM
         // reverse_lat=0 so op_a==a_lat (matches local a_reg <= a) and
         // op_b==arith_b==b_lat at the rem_start edge (S_ARITHWAIT, state !=
