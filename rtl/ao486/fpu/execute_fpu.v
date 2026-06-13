@@ -1204,6 +1204,17 @@ module execute_fpu (
     reg        transc_c2_lat;    // PR-2c.T-4 — captured C2 from engine on transc_done
     reg        is_transc_push_lat;// PR-2c.T-5 (iter 191) — FPTAN/FSINCOS: push z2 onto new top
     reg [79:0] z2_lat;           // PR-2c.T-5 — captured 2nd result (pushed value)
+    // PR-2c.T-6 (iter 225): LATCHED transcendental cmdex.  The engine reads `cmdex`
+    // combinationally at its `start` edge (transc_start in S_ARITHWAIT), but by then
+    // the pipeline has long since "retired" the FPU op (exe_ready pulses on op ENTRY,
+    // many cycles before the FSM-internal start) so the LIVE exe_cmdex has decayed to
+    // 0 == CMDEX_F2XM1.  Feeding live exe_cmdex mis-dispatched EVERY transcendental
+    // (FSIN/FCOS/FPTAN/FSINCOS/FYL2X/FPATAN/FYL2XP1) as F2XM1 — wrong result, and
+    // FSIN/FCOS never set SW.C2 (out-of-range), breaking x87 sin()/cos() arg-reduction
+    // (FX Fighter freeze).  Latch exe_cmdex at S_IDLE->S_FETCH_A like the is_*_lat
+    // captures and drive u_transc from cmdex_lat instead.
+    reg [3:0]  cmdex_lat;
+
     // PR-2b.3o: cmp-family latches.  is_cmp_lat covers all four ops and
     // is used to (a) gate rf_wr_en off (no data writeback), (b) drive
     // cc_we in S_RETIRE, (c) override flags_lat with the cmp-only IE
@@ -1496,6 +1507,7 @@ module execute_fpu (
             is_transc_trig_lat <= 1'b0; // PR-2c.T-4 iter 190
             transc_c2_lat   <= 1'b0;    // PR-2c.T-4 iter 190
             is_transc_push_lat <= 1'b0; // PR-2c.T-5 iter 191
+            cmdex_lat       <= 4'd0;    // PR-2c.T-6 iter 225
             is_cmp_lat      <= 1'b0;
             is_fucom_lat    <= 1'b0;
             is_cmpi_lat     <= 1'b0;
@@ -1570,6 +1582,7 @@ module execute_fpu (
                         is_transc_lat  <= is_transc;    // PR-2c.T iter 185+
                         is_transc_trig_lat <= is_transc_trig; // PR-2c.T-4 iter 190
                         is_transc_push_lat <= is_transc_push; // PR-2c.T-5 iter 191
+                        cmdex_lat          <= exe_cmdex;      // PR-2c.T-6 iter 225: latch for u_transc (live exe_cmdex is 0 by transc_start)
                         is_cmp_lat     <= is_cmp_now;
                         is_fucom_lat   <= is_cmp_unord_now;
                         is_cmpi_lat    <= is_cmpi_now;
@@ -2389,7 +2402,7 @@ module execute_fpu (
         .clk          (clk),
         .rst          (~rst_n | exe_reset | init),
         .start        (transc_start),
-        .cmdex        (exe_cmdex),
+        .cmdex        (cmdex_lat),             // PR-2c.T-6 iter 225: latched (live exe_cmdex == 0 by transc_start)
         .a            (a_lat),
         .b            (b_lat),                 // PR-2c.T-2: ST(1) for FYL2X/FYL2XP1
         .arith_a      (transc_arith_a),
