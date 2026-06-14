@@ -1039,6 +1039,14 @@ assign frstor_wr_phys  = frstor_top_restore + frstor_cnt;             // mod-8 b
 assign frstor_wr_streg = exe_fpu_restore_st[frstor_cnt*80 +: 80];     // one 8:1 80-bit read-mux
 assign frstor_wr_tag   = frstor_restore_tw[frstor_wr_phys*2 +: 2];    // restored tag (phys order)
 
+// PR-2b.5Y (iter 236): the x87 integer-arith MEMORY forms (FIADD/FIMUL/FICOM/
+// FICOMP/FISUB/FISUBR/FIDIV/FIDIVR) decode to CMD_fpu_arith_mem (reusing the
+// FADD/FMUL/.../FCOM/FCOMP CMDEX values) but their memory operand is a signed
+// integer (opcode DA = m32int, DE = m16int) rather than a float.  Flag it from
+// the opcode byte so execute_fpu routes the operand through int_to_floatx80.
+wire exe_fpu_is_int = (exe_cmd == `CMD_fpu_arith_mem) &&
+                      (exe_decoder[7:0] == 8'hDA || exe_decoder[7:0] == 8'hDE);
+
 execute_fpu u_execute_fpu (
     .clk                  (clk),
     .rst_n                (rst_n),
@@ -1072,6 +1080,7 @@ execute_fpu u_execute_fpu (
     .exe_mem_data_hi      (exe_fpu_mem_data_hi),   // PR-2b.5g iter 124: FLD m80fp high 16 bits
     .exe_mem_fmt          (2'b00),
     .exe_mem_data_valid   (1'b0),
+    .exe_is_int           (exe_fpu_is_int),    // PR-2b.5Y iter 236: DA/DE int-arith mem operand
 
     // CSR snapshot from fpu_core
     .cw                   (fpu_cw),

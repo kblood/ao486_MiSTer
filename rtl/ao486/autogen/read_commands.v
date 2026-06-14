@@ -404,7 +404,13 @@ wire cond_286 = rd_cmd == `CMD_fpu_load_mem && ((rd_cmdex == `CMDEX_FLDENV_M14) 
 // consume_modregrm_one=TRUE which implicitly enters the memory hazard
 // via the modrm-fetch state machine's read_for_rd_* path.
 wire cond_263 = rd_cmd == `CMD_fpu_arith_mem;
-wire cond_264 = rd_cmd == `CMD_fpu_arith_mem && rd_cmdex[0] == 1'b1;
+// PR-2b.5Y (iter 236): the DE integer-arith mem forms (FIxxx m16int) reuse the
+// odd (_M64) CMDEX slots, so the bare rd_cmdex[0] test below would fetch a qword.
+// Exclude opcode DE here and give it a dedicated 2-byte (word) fetch via cond_287.
+// DA integer-arith mem forms (m32int) use the even (_M32) slots → fall through to
+// read.v's default 4-byte fetch, which is exactly right for m32int.
+wire cond_264 = rd_cmd == `CMD_fpu_arith_mem && rd_cmdex[0] == 1'b1 && rd_decoder[7:0] != 8'hDE;
+wire cond_287 = rd_cmd == `CMD_fpu_arith_mem && rd_decoder[7:0] == 8'hDE; // FIxxx m16int = 2-byte fetch
 // PR-2b.4l (iter 103): defensive rd_req_eflags arm for FCOMI / FUCOMI /
 // FCOMIP / FUCOMIP — pairs with autogen/write_commands.v cond_278.  Per
 // [[feedback-mutex-tracks-source-reads]] and [[feedback-fnstsw-ax-missing
@@ -1428,6 +1434,7 @@ assign read_length_word =
     (cond_250 && cond_3)? (`TRUE) :
     (cond_282 && cond_3)? (`TRUE) :  // PR-2b.5o iter 129: FLDCW m16 = 2-byte fetch
     (cond_284 && cond_3)? (`TRUE) :  // PR-2b.5v iter 140: FILD m16 = 2-byte fetch
+    (cond_287 && cond_3)? (`TRUE) :  // PR-2b.5Y iter 236: FIxxx m16int (DE) = 2-byte fetch
     1'd0;
 assign address_xlat_transform =
     (cond_256)? (`TRUE) :

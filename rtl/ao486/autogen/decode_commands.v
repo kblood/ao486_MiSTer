@@ -482,6 +482,32 @@ wire cond_246 = dec_ready_modregrm_one   && decoder[7:0] == 8'hD9 && decoder[13:
 // 80-byte ST area is a documented later correctness slice.
 wire cond_249 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDD && decoder[13:11] == 3'b110 && decoder[15:14] != 2'b11; // FNSAVE  (DD /6)
 wire cond_248 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDD && decoder[13:11] == 3'b100 && decoder[15:14] != 2'b11; // FRSTOR  (DD /4)
+// PR-2b.5Y (iter 236): x87 integer-arith MEMORY forms — the last structural hole
+// in x87 mem-form decode (audit_fpu_mem_form_twins.md).  DA /0../7 (m32int) and
+// DE /0../7 (m16int): FIADD/FIMUL/FICOM/FICOMP/FISUB/FISUBR/FIDIV/FIDIVR.  They
+// REUSE CMD_fpu_arith_mem + the existing FADD/FMUL/.../FCOM/FCOMP CMDEX values
+// (op selection is identical; the only differences are (a) the memory operand is
+// a signed integer → routed through int_to_floatx80 in execute_fpu, keyed off the
+// DA/DE opcode there, and (b) the fetch width).  DA → the _M32 (even) CMDEX slot,
+// DE → the _M64 (odd) CMDEX slot, so mem_fmt_now[0] (==rd_cmdex[0]) carries the
+// DA(0)=m32int / DE(1)=m16int width to execute_fpu's int converter.  read_commands
+// overrides the m16int (DE) fetch to a WORD (cond_264 would otherwise read qword).
+wire cond_251 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDA && decoder[15:14] != 2'b11 && decoder[13:11] == 3'd0; // FIADD  m32int
+wire cond_252 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDE && decoder[15:14] != 2'b11 && decoder[13:11] == 3'd0; // FIADD  m16int
+wire cond_253 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDA && decoder[15:14] != 2'b11 && decoder[13:11] == 3'd1; // FIMUL  m32int
+wire cond_254 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDE && decoder[15:14] != 2'b11 && decoder[13:11] == 3'd1; // FIMUL  m16int
+wire cond_255 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDA && decoder[15:14] != 2'b11 && decoder[13:11] == 3'd2; // FICOM  m32int
+wire cond_256 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDE && decoder[15:14] != 2'b11 && decoder[13:11] == 3'd2; // FICOM  m16int
+wire cond_257 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDA && decoder[15:14] != 2'b11 && decoder[13:11] == 3'd3; // FICOMP m32int
+wire cond_258 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDE && decoder[15:14] != 2'b11 && decoder[13:11] == 3'd3; // FICOMP m16int
+wire cond_259 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDA && decoder[15:14] != 2'b11 && decoder[13:11] == 3'd4; // FISUB  m32int
+wire cond_260 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDE && decoder[15:14] != 2'b11 && decoder[13:11] == 3'd4; // FISUB  m16int
+wire cond_261 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDA && decoder[15:14] != 2'b11 && decoder[13:11] == 3'd5; // FISUBR m32int
+wire cond_262 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDE && decoder[15:14] != 2'b11 && decoder[13:11] == 3'd5; // FISUBR m16int
+wire cond_263 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDA && decoder[15:14] != 2'b11 && decoder[13:11] == 3'd6; // FIDIV  m32int
+wire cond_264 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDE && decoder[15:14] != 2'b11 && decoder[13:11] == 3'd6; // FIDIV  m16int
+wire cond_265 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDA && decoder[15:14] != 2'b11 && decoder[13:11] == 3'd7; // FIDIVR m32int
+wire cond_266 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDE && decoder[15:14] != 2'b11 && decoder[13:11] == 3'd7; // FIDIVR m16int
 //======================================================== saves
 //======================================================== always
 //======================================================== sets
@@ -496,7 +522,7 @@ assign consume_mem_offset =
 // rewritten as a single balanced ONE-HOT select.  SOLE overlap D9 D0
 // (cond_162 FST_STi vs cond_175 FNOP) keeps original priority via & ~cond_162.
 // cond_67 (reg-form ESC catch-all) stays BELOW the group, unchanged.
-wire fpu_cmd_hit = cond_144 | cond_145 | cond_146 | cond_147 | cond_222 | cond_148 | cond_149 | cond_150 | cond_151 | cond_152 | cond_153 | cond_154 | cond_155 | cond_156 | cond_157 | cond_158 | cond_159 | cond_160 | cond_161 | cond_162 | cond_163 | cond_164 | cond_221 | cond_223 | cond_224 | cond_225 | cond_226 | cond_227 | cond_238 | cond_239 | cond_240 | cond_241 | cond_242 | cond_243 | cond_244 | cond_245 | cond_165 | cond_166 | cond_167 | cond_168 | cond_169 | cond_170 | cond_171 | cond_172 | cond_173 | cond_174 | cond_175 | cond_176 | cond_177 | cond_178 | cond_179 | cond_180 | cond_181 | cond_182 | cond_183 | cond_184 | cond_185 | cond_186 | cond_187 | cond_188 | cond_189 | cond_190 | cond_191 | cond_192 | cond_193 | cond_194 | cond_195 | cond_196 | cond_197 | cond_198 | cond_199 | cond_200 | cond_201 | cond_202 | cond_203 | cond_204 | cond_205 | cond_206 | cond_207 | cond_220 | cond_228 | cond_229 | cond_230 | cond_236 | cond_208 | cond_209 | cond_210 | cond_211 | cond_212 | cond_213 | cond_214 | cond_215 | cond_216 | cond_217 | cond_218 | cond_219 | cond_231 | cond_232 | cond_233 | cond_234 | cond_235 | cond_237 | cond_247 | cond_246 | cond_249 | cond_248 | cond_250;
+wire fpu_cmd_hit = cond_144 | cond_145 | cond_146 | cond_147 | cond_222 | cond_148 | cond_149 | cond_150 | cond_151 | cond_152 | cond_153 | cond_154 | cond_155 | cond_156 | cond_157 | cond_158 | cond_159 | cond_160 | cond_161 | cond_162 | cond_163 | cond_164 | cond_221 | cond_223 | cond_224 | cond_225 | cond_226 | cond_227 | cond_238 | cond_239 | cond_240 | cond_241 | cond_242 | cond_243 | cond_244 | cond_245 | cond_165 | cond_166 | cond_167 | cond_168 | cond_169 | cond_170 | cond_171 | cond_172 | cond_173 | cond_174 | cond_175 | cond_176 | cond_177 | cond_178 | cond_179 | cond_180 | cond_181 | cond_182 | cond_183 | cond_184 | cond_185 | cond_186 | cond_187 | cond_188 | cond_189 | cond_190 | cond_191 | cond_192 | cond_193 | cond_194 | cond_195 | cond_196 | cond_197 | cond_198 | cond_199 | cond_200 | cond_201 | cond_202 | cond_203 | cond_204 | cond_205 | cond_206 | cond_207 | cond_220 | cond_228 | cond_229 | cond_230 | cond_236 | cond_208 | cond_209 | cond_210 | cond_211 | cond_212 | cond_213 | cond_214 | cond_215 | cond_216 | cond_217 | cond_218 | cond_219 | cond_231 | cond_232 | cond_233 | cond_234 | cond_235 | cond_237 | cond_247 | cond_246 | cond_249 | cond_248 | cond_250 | cond_251 | cond_252 | cond_253 | cond_254 | cond_255 | cond_256 | cond_257 | cond_258 | cond_259 | cond_260 | cond_261 | cond_262 | cond_263 | cond_264 | cond_265 | cond_266;
 wire [6:0] fpu_cmd_val =
     ({7{cond_144}} & (`CMD_fpu))
   |     ({7{cond_145}} & (`CMD_fpu))
@@ -580,6 +606,22 @@ wire [6:0] fpu_cmd_val =
   |     ({7{cond_203}} & (`CMD_fpu_arith_mem))
   |     ({7{cond_204}} & (`CMD_fpu_arith_mem))
   |     ({7{cond_205}} & (`CMD_fpu_arith_mem))
+  |     ({7{cond_251}} & (`CMD_fpu_arith_mem))   // FIADD  m32int (DA /0)
+  |     ({7{cond_252}} & (`CMD_fpu_arith_mem))   // FIADD  m16int (DE /0)
+  |     ({7{cond_253}} & (`CMD_fpu_arith_mem))   // FIMUL  m32int (DA /1)
+  |     ({7{cond_254}} & (`CMD_fpu_arith_mem))   // FIMUL  m16int (DE /1)
+  |     ({7{cond_255}} & (`CMD_fpu_arith_mem))   // FICOM  m32int (DA /2)
+  |     ({7{cond_256}} & (`CMD_fpu_arith_mem))   // FICOM  m16int (DE /2)
+  |     ({7{cond_257}} & (`CMD_fpu_arith_mem))   // FICOMP m32int (DA /3)
+  |     ({7{cond_258}} & (`CMD_fpu_arith_mem))   // FICOMP m16int (DE /3)
+  |     ({7{cond_259}} & (`CMD_fpu_arith_mem))   // FISUB  m32int (DA /4)
+  |     ({7{cond_260}} & (`CMD_fpu_arith_mem))   // FISUB  m16int (DE /4)
+  |     ({7{cond_261}} & (`CMD_fpu_arith_mem))   // FISUBR m32int (DA /5)
+  |     ({7{cond_262}} & (`CMD_fpu_arith_mem))   // FISUBR m16int (DE /5)
+  |     ({7{cond_263}} & (`CMD_fpu_arith_mem))   // FIDIV  m32int (DA /6)
+  |     ({7{cond_264}} & (`CMD_fpu_arith_mem))   // FIDIV  m16int (DE /6)
+  |     ({7{cond_265}} & (`CMD_fpu_arith_mem))   // FIDIVR m32int (DA /7)
+  |     ({7{cond_266}} & (`CMD_fpu_arith_mem))   // FIDIVR m16int (DE /7)
   |     ({7{cond_206}} & (`CMD_fpu_load_mem))
   |     ({7{cond_207}} & (`CMD_fpu_load_mem))
   |     ({7{cond_220}} & (`CMD_fpu_load_mem))
@@ -1126,7 +1168,7 @@ assign dec_is_8bit =
 // rewritten as a single balanced ONE-HOT select.  SOLE overlap D9 D0
 // (cond_162 FST_STi vs cond_175 FNOP) keeps original priority via & ~cond_162.
 // cond_67 (reg-form ESC catch-all) stays BELOW the group, unchanged.
-wire fpu_cmdex_hit = cond_144 | cond_145 | cond_146 | cond_147 | cond_222 | cond_148 | cond_149 | cond_150 | cond_151 | cond_152 | cond_153 | cond_154 | cond_155 | cond_156 | cond_157 | cond_158 | cond_159 | cond_160 | cond_161 | cond_162 | cond_163 | cond_164 | cond_221 | cond_223 | cond_224 | cond_225 | cond_226 | cond_227 | cond_238 | cond_239 | cond_240 | cond_241 | cond_242 | cond_243 | cond_244 | cond_245 | cond_165 | cond_166 | cond_167 | cond_168 | cond_169 | cond_170 | cond_171 | cond_172 | cond_173 | cond_174 | cond_175 | cond_176 | cond_177 | cond_178 | cond_179 | cond_180 | cond_181 | cond_182 | cond_183 | cond_184 | cond_185 | cond_186 | cond_187 | cond_188 | cond_189 | cond_190 | cond_191 | cond_192 | cond_193 | cond_194 | cond_195 | cond_196 | cond_197 | cond_198 | cond_199 | cond_200 | cond_201 | cond_202 | cond_203 | cond_204 | cond_205 | cond_206 | cond_207 | cond_220 | cond_228 | cond_229 | cond_230 | cond_236 | cond_208 | cond_209 | cond_210 | cond_211 | cond_212 | cond_213 | cond_214 | cond_215 | cond_216 | cond_217 | cond_218 | cond_219 | cond_231 | cond_232 | cond_233 | cond_234 | cond_235 | cond_237 | cond_247 | cond_246 | cond_249 | cond_248 | cond_250;
+wire fpu_cmdex_hit = cond_144 | cond_145 | cond_146 | cond_147 | cond_222 | cond_148 | cond_149 | cond_150 | cond_151 | cond_152 | cond_153 | cond_154 | cond_155 | cond_156 | cond_157 | cond_158 | cond_159 | cond_160 | cond_161 | cond_162 | cond_163 | cond_164 | cond_221 | cond_223 | cond_224 | cond_225 | cond_226 | cond_227 | cond_238 | cond_239 | cond_240 | cond_241 | cond_242 | cond_243 | cond_244 | cond_245 | cond_165 | cond_166 | cond_167 | cond_168 | cond_169 | cond_170 | cond_171 | cond_172 | cond_173 | cond_174 | cond_175 | cond_176 | cond_177 | cond_178 | cond_179 | cond_180 | cond_181 | cond_182 | cond_183 | cond_184 | cond_185 | cond_186 | cond_187 | cond_188 | cond_189 | cond_190 | cond_191 | cond_192 | cond_193 | cond_194 | cond_195 | cond_196 | cond_197 | cond_198 | cond_199 | cond_200 | cond_201 | cond_202 | cond_203 | cond_204 | cond_205 | cond_206 | cond_207 | cond_220 | cond_228 | cond_229 | cond_230 | cond_236 | cond_208 | cond_209 | cond_210 | cond_211 | cond_212 | cond_213 | cond_214 | cond_215 | cond_216 | cond_217 | cond_218 | cond_219 | cond_231 | cond_232 | cond_233 | cond_234 | cond_235 | cond_237 | cond_247 | cond_246 | cond_249 | cond_248 | cond_250 | cond_251 | cond_252 | cond_253 | cond_254 | cond_255 | cond_256 | cond_257 | cond_258 | cond_259 | cond_260 | cond_261 | cond_262 | cond_263 | cond_264 | cond_265 | cond_266;
 wire [3:0] fpu_cmdex_val =
     ({4{cond_144}} & (`CMDEX_FN_INIT))
   |     ({4{cond_145}} & (`CMDEX_FN_CLEX))
@@ -1210,6 +1252,22 @@ wire [3:0] fpu_cmdex_val =
   |     ({4{cond_203}} & (`CMDEX_FCOM_M64))
   |     ({4{cond_204}} & (`CMDEX_FCOMP_M32))
   |     ({4{cond_205}} & (`CMDEX_FCOMP_M64))
+  |     ({4{cond_251}} & (`CMDEX_FADD_M32))    // FIADD  m32int → FADD  op, DA/even=m32int width
+  |     ({4{cond_252}} & (`CMDEX_FADD_M64))    // FIADD  m16int → FADD  op, DE/odd =m16int width
+  |     ({4{cond_253}} & (`CMDEX_FMUL_M32))    // FIMUL  m32int
+  |     ({4{cond_254}} & (`CMDEX_FMUL_M64))    // FIMUL  m16int
+  |     ({4{cond_255}} & (`CMDEX_FCOM_M32))    // FICOM  m32int
+  |     ({4{cond_256}} & (`CMDEX_FCOM_M64))    // FICOM  m16int
+  |     ({4{cond_257}} & (`CMDEX_FCOMP_M32))   // FICOMP m32int
+  |     ({4{cond_258}} & (`CMDEX_FCOMP_M64))   // FICOMP m16int
+  |     ({4{cond_259}} & (`CMDEX_FSUB_M32))    // FISUB  m32int
+  |     ({4{cond_260}} & (`CMDEX_FSUB_M64))    // FISUB  m16int
+  |     ({4{cond_261}} & (`CMDEX_FSUBR_M32))   // FISUBR m32int
+  |     ({4{cond_262}} & (`CMDEX_FSUBR_M64))   // FISUBR m16int
+  |     ({4{cond_263}} & (`CMDEX_FDIV_M32))    // FIDIV  m32int
+  |     ({4{cond_264}} & (`CMDEX_FDIV_M64))    // FIDIV  m16int
+  |     ({4{cond_265}} & (`CMDEX_FDIVR_M32))   // FIDIVR m32int
+  |     ({4{cond_266}} & (`CMDEX_FDIVR_M64))   // FIDIVR m16int
   |     ({4{cond_206}} & (`CMDEX_FLD_M32))
   |     ({4{cond_207}} & (`CMDEX_FLD_M64))
   |     ({4{cond_220}} & (`CMDEX_FLD_M80))

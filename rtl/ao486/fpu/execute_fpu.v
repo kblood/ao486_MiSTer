@@ -154,6 +154,14 @@ module execute_fpu (
     input       [15:0]  exe_mem_data_hi,
     input       [1:0]   exe_mem_fmt,         // 00=m32, 01=m64, 10=m80 (PR-2b.4+)
     input               exe_mem_data_valid,
+    // PR-2b.5Y (iter 236): the memory operand of a CMD_fpu_arith_mem op is a
+    // SIGNED INTEGER (the x87 DA/DE integer-arith forms FIADD/FIMUL/FICOM/.../
+    // FIDIVR) rather than a float.  When set, the mem operand is routed through
+    // int_to_floatx80 (not floatN_to_floatx80) before the arith/compare, and the
+    // width comes from mem_fmt_lat[0] (0=m32int via DA/_M32 slot, 1=m16int via
+    // DE/_M64 slot).  Derived in execute.v from the DA/DE opcode byte; the op
+    // selection + reverse + compare routing reuse the existing FADD/FMUL/... path.
+    input               exe_is_int,
 
     // CSR snapshot
     input       [15:0]  cw,
@@ -1067,6 +1075,9 @@ module execute_fpu (
     // sub-field of mem_data_lat to sign-extend.
     reg        is_fild_lat;
     reg [1:0]  fild_width_lat;
+    // PR-2b.5Y (iter 236): latched exe_is_int — the CMD_fpu_arith_mem operand is a
+    // signed integer (DA/DE FIxxx forms).  Routes mem_z through int_to_floatx80.
+    reg        is_int_lat;
     // PR-2b.5g (iter 124): FLD m80fp latch + the captured high 16 bits.  The
     // low 64 bits arrive via the existing exe_mem_data -> mem_data_lat path
     // (FLD m80's last read beat is the qword); mem80_hi_lat holds {sign,exp}.
@@ -1479,6 +1490,7 @@ module execute_fpu (
             is_fld_mem_lat  <= 1'b0;    // PR-2b.4k iter 77
             is_fild_lat     <= 1'b0;    // PR-2b.5v iter 140
             fild_width_lat  <= 2'd0;    // PR-2b.5v iter 140
+            is_int_lat      <= 1'b0;    // PR-2b.5Y iter 236
             is_fld_m80_lat  <= 1'b0;    // PR-2b.5g iter 124
             mem80_hi_lat    <= 16'd0;   // PR-2b.5g iter 124
             is_fconst_lat   <= 1'b0;    // PR-2b.4n iter 112
@@ -1595,6 +1607,7 @@ module execute_fpu (
                         fcmov_taken_lat <= fcmov_taken_now;
                         is_mem_form_lat <= is_mem_form_now;
                         mem_fmt_lat     <= mem_fmt_now;
+                        is_int_lat      <= exe_is_int;   // PR-2b.5Y iter 236
                         mem_data_lat    <= exe_mem_data;
                     end
                 end
@@ -2049,9 +2062,14 @@ module execute_fpu (
     // always-block can read them before this mux.  Same Gotcha #9 pattern.
     // PR-2b.5v (iter 140): FILD takes priority — its int_to_x80_z replaces the
     // float-converter output and forces DE/IE = 0 (FILD raises no exceptions).
-    assign mem_z       = is_fild_lat ? int_to_x80_z : fx80w_z;
-    assign mem_de_flag = is_fild_lat ? 1'b0         : fx80w_de;
-    assign mem_ie_flag = is_fild_lat ? 1'b0         : fx80w_ie;
+    // PR-2b.5Y (iter 236): the DA/DE integer-arith mem forms also source their
+    // operand from the int->floatx80 converter (is_int_lat).  is_fild_lat,
+    // is_fbld_lat and is_int_lat are mutually exclusive (different CMD codes), so
+    // the shared u_int_to_x80 serves all three.  Int conversion is exact → DE/IE
+    // forced 0 (the arith op's own flags flow through the normal arith path).
+    assign mem_z       = (is_fild_lat | is_int_lat) ? int_to_x80_z : fx80w_z;
+    assign mem_de_flag = (is_fild_lat | is_int_lat) ? 1'b0         : fx80w_de;
+    assign mem_ie_flag = (is_fild_lat | is_int_lat) ? 1'b0         : fx80w_ie;
 
     wire [79:0] arith_a = a_lat;
     // PR-2b.4d (iter 55): for mem-form, b is the converted mem operand
@@ -2126,6 +2144,11 @@ module execute_fpu (
     wire        [63:0] norm_a_sig,  norm_b_sig;
     wire               int_norm_in_sign;
     wire        [63:0] int_norm_in_mag;
+    // PR-2b.5Y (iter 236, FIXED): int-ARITH forms need u_norm_a_shared for the
+    // concurrent arith op_a AND a normalizer for the int->x80 conversion in the
+    // SAME cycle, so they CANNOT borrow u_norm_a_shared the way FILD/FBLD do
+    // (those have no concurrent arith op_a).  Keep FILD/FBLD on the shared
+    // normalizer; route int-arith through the dedicated u_norm_int below.
     wire               fild_norm_sel = is_fild_lat | is_fbld_lat;
     wire        [79:0] norm_a_in     = fild_norm_sel
                                      ? {int_norm_in_sign, 15'd0, int_norm_in_mag}
@@ -2135,6 +2158,17 @@ module execute_fpu (
         .sign_out (norm_a_sign),
         .exp_out  (norm_a_exp),
         .sig_out  (norm_a_sig)
+    );
+    // PR-2b.5Y (iter 236): dedicated normalizer for the int->floatx80 conversion
+    // when is_int_lat (FIADD/FIMUL/FISUB/FISUBR/FIDIV/FIDIVR mem-forms) — the
+    // shared a/b normalizers are both occupied by the concurrent arith op_a/op_b.
+    wire signed [16:0] norm_int_exp;
+    wire        [63:0] norm_int_sig;
+    floatx80_normalize u_norm_int (
+        .a        ({int_norm_in_sign, 15'd0, int_norm_in_mag}),
+        .sign_out (),
+        .exp_out  (norm_int_exp),
+        .sig_out  (norm_int_sig)
     );
     floatx80_normalize u_norm_b_shared (
         .a        (op_b),
@@ -2591,17 +2625,21 @@ module execute_fpu (
     // it serves FILD (mem_data_lat, fild_width_lat).  fbld_x80 aliases the
     // shared output and is only consumed (b_lat) when is_fbld_lat=1.
     wire [63:0] shared_int_a = is_fbld_lat ? fbld_int : mem_data_lat;
-    wire [1:0]  shared_int_w = is_fbld_lat ? 2'd2     : fild_width_lat;
+    // PR-2b.5Y (iter 236): int-arith width comes from mem_fmt_lat[0]
+    // (0 = DA/_M32 slot = m32int, 1 = DE/_M64 slot = m16int).  FILD/FBLD unchanged.
+    wire [1:0]  shared_int_w = is_fbld_lat ? 2'd2 :
+                               is_int_lat  ? (mem_fmt_lat[0] ? 2'd0 : 2'd1) :
+                                             fild_width_lat;
     int_to_floatx80 u_int_to_x80 (
         .a            (shared_int_a),
         .width        (shared_int_w),
-        // iter-173: share u_norm_a_shared's CLZ + shift cone with FILD/FBLD.
-        // Drive {int_norm_in_sign, 15'd0, int_norm_in_mag} into u_norm_a_shared's
-        // input (gated above by fild_norm_sel), and consume the normalized exp/sig.
+        // iter-173: FILD/FBLD share u_norm_a_shared's CLZ.  iter-236: int-arith
+        // (is_int_lat) instead consumes the dedicated u_norm_int, because
+        // u_norm_a_shared is busy normalizing the concurrent arith op_a.
         .norm_in_sign (int_norm_in_sign),
         .norm_in_mag  (int_norm_in_mag),
-        .norm_out_exp (norm_a_exp),
-        .norm_out_sig (norm_a_sig),
+        .norm_out_exp (is_int_lat ? norm_int_exp : norm_a_exp),
+        .norm_out_sig (is_int_lat ? norm_int_sig : norm_a_sig),
         .z            (int_to_x80_z)
     );
     assign fbld_x80 = int_to_x80_z;
