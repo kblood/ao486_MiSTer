@@ -211,6 +211,7 @@ reg         vga_b_cs;
 reg         vga_c_cs;
 reg         vga_d_cs;
 reg         sysctl_cs;
+reg         dbg_cs;        // serial-mouse detection trace, debug I/O 0x300/0x301
 
 wire        fdd0_inserted;
 
@@ -408,6 +409,7 @@ always @(posedge clk_sys) begin
 	vga_c_cs      <= ({iobus_address[15:4], 4'd0} == 16'h03C0);
 	vga_d_cs      <= ({iobus_address[15:4], 4'd0} == 16'h03D0);
 	sysctl_cs     <= ({iobus_address[15:0]      } == 16'h8888);
+	dbg_cs        <= ({iobus_address[15:1], 1'd0} == 16'h0300);  // mouse-trace debug 0x300/0x301
 end
 
 reg [7:0] ctlport = 0;
@@ -429,7 +431,74 @@ end
 
 assign syscfg = ctlport;
 
+// ===========================================================================
+// Serial-mouse DETECTION TRACE (debug only)
+//   Snoops every CPU read/write of the COM1 (0x3F8..) and COM2 (0x2F8..) UART
+//   registers into a 256-entry ring (2 bytes/entry: tag + data), so we can see
+//   exactly how a game (The Settlers) programs / probes the serial 2nd mouse
+//   and why its built-in detect routine rejects it. Read back from DOS via a
+//   spare debug I/O port:
+//     write 0x300  -> ARM (clear ring + start capturing the FIRST 256 accesses)
+//     read  0x300  -> entry count (0..255); also resets the read pointer
+//     read  0x301  -> next ring byte (auto-advances): tag, data, tag, data, ...
+//   tag byte = { we, port(1=COM2/0=COM1), 3'b0, addr[2:0] };  data = bus value.
+// Capture is one-cycle-delayed so a read's value (uartN_readdata) is valid.
+// ===========================================================================
+reg  [7:0] dbg_mem [0:511];
+reg  [8:0] dbg_wr   = 9'd0;     // byte write index (entry*2)
+reg  [8:0] dbg_rd   = 9'd0;     // byte read index (dump)
+reg        dbg_armed = 1'b0;
+reg        dbg_acc_d = 1'b0;
+reg        dbg_pend  = 1'b0;
+reg  [7:0] dbg_ptag;
+reg        dbg_pwe;
+reg        dbg_pport;           // 1 = COM2
+reg  [7:0] dbg_pwdata;
+reg        dbg_rdadv_d, dbg_rdadv_d2;   // delayed dump-read advance (iobus samples late)
+wire       dbg_acc = (uart1_cs | uart2_cs) & (iobus_read | iobus_write);
+wire       dbg_rd_byte = iobus_read & dbg_cs & iobus_address[0];   // read of 0x301 (data)
+wire [7:0] dbg_readdata = iobus_address[0] ? dbg_mem[dbg_rd] : dbg_wr[8:1];  // count = bytes/2
+
+always @(posedge clk_sys) begin
+	if (reset) begin
+		dbg_wr <= 0; dbg_rd <= 0; dbg_armed <= 0; dbg_acc_d <= 0; dbg_pend <= 0;
+		dbg_rdadv_d <= 0; dbg_rdadv_d2 <= 0;
+	end
+	else begin
+		dbg_acc_d <= dbg_acc;
+		// commit the access latched last cycle (read data is valid now)
+		dbg_pend <= 1'b0;
+		if (dbg_pend && dbg_armed && (dbg_wr < 9'd510)) begin
+			dbg_mem[dbg_wr]        <= dbg_ptag;
+			dbg_mem[dbg_wr + 1'b1] <= dbg_pwe ? dbg_pwdata
+			                                  : (dbg_pport ? uart2_readdata : uart1_readdata);
+			dbg_wr <= dbg_wr + 2'd2;
+		end
+		// latch a NEW UART access (rising edge of dbg_acc) for next-cycle commit
+		if (dbg_acc && ~dbg_acc_d) begin
+			dbg_pend   <= 1'b1;
+			dbg_ptag   <= {iobus_write, uart2_cs, 3'b000, iobus_address[2:0]};
+			dbg_pwe    <= iobus_write;
+			dbg_pport  <= uart2_cs;
+			dbg_pwdata <= iobus_writedata[7:0];
+		end
+		// dump-side control via debug I/O 0x300/0x301
+		// ARM (write 0x300): clear ring + enable capture of the next 256 accesses.
+		// Read 0x300: return entry count, reset read pointer.
+		// Read 0x301: return dbg_mem[dbg_rd]; advance ptr 2 cycles later, after the
+		//             iobus has sampled bus_readdata in its S_READ_CHK state.
+		if (iobus_write && dbg_cs && ~iobus_address[0]) begin
+			dbg_wr <= 0; dbg_rd <= 0; dbg_armed <= 1'b1;
+		end
+		else if (iobus_read && dbg_cs && ~iobus_address[0]) dbg_rd <= 0;
+		dbg_rdadv_d  <= dbg_rd_byte;
+		dbg_rdadv_d2 <= dbg_rdadv_d;
+		if (dbg_rdadv_d2) dbg_rd <= dbg_rd + 1'b1;
+	end
+end
+
 wire [7:0] iobus_readdata8 =
+	( dbg_cs                                 ) ? dbg_readdata      :
 	( floppy0_cs                             ) ? floppy0_readdata  :
 	( dma_master_cs|dma_slave_cs|dma_page_cs ) ? dma_io_readdata   :
 	( pic_master_cs|pic_slave_cs             ) ? pic_readdata      :
