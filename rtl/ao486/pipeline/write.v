@@ -254,7 +254,15 @@ module write(
     //pipeline wr
     output              wr_busy,
     input               exe_ready,
-    
+
+    // iter-249: FPU-stage busy from execute (fpu_busy || frstor_busy).  Gates
+    // wr_interrupt_possible_prepare so an external interrupt is not taken while
+    // a younger x87 op is mid-FSM in execute — taking it would flush that op
+    // after a partial, non-rolled-back FPU-state mutation and corrupt the x87
+    // stack (the Quake "Bad surface extents" failure class, reproduced in the
+    // cpu/ TB by quake_fe7410_irq.lua).
+    input               exe_fpu_busy,
+
     input       [39:0]  exe_decoder,
     input       [31:0]  exe_eip_final,
     input               exe_operand_32bit,
@@ -614,7 +622,10 @@ assign wr_interrupt_possible_prepare =
     interrupt_do &&
     wr_ready && (~(wr_not_finished) || wr_hlt_in_progress || wr_string_in_progress) &&
     ~(wr_debug_prepare) &&
-    ~(wr_inhibit_interrupts_and_debug) && ~(wr_inhibit_interrupts) && iflag_to_reg;
+    ~(wr_inhibit_interrupts_and_debug) && ~(wr_inhibit_interrupts) && iflag_to_reg &&
+    // iter-249: defer the interrupt until any in-flight FPU op in execute drains,
+    // so the pipeline flush can't abort it mid-FSM and corrupt the x87 stack.
+    ~(exe_fpu_busy);
 
 assign wr_clear_rflag = wr_finished && wr_eip <= cs_limit && ~(exc_init) && ~(wr_debug_prepare) && ~(wr_interrupt_possible_prepare);
     

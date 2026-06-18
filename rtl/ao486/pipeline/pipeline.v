@@ -885,6 +885,7 @@ wire [463:0] exe_buffer_shifted;
 
 wire        wr_busy;
 wire        exe_ready;
+wire        exe_fpu_busy;   // iter-249: FPU-stage busy, execute -> write IRQ gate
 wire [39:0] exe_decoder;
 wire [31:0] exe_eip_final;
 wire        exe_operand_32bit;
@@ -1143,7 +1144,8 @@ execute execute_inst(
     //exe pipeline
     .wr_busy                       (wr_busy),                       //input
     .exe_ready                     (exe_ready),                     //output
-    
+    .exe_fpu_busy                  (exe_fpu_busy),                  //output (iter-249)
+
     .exe_decoder                   (exe_decoder),                   //output [39:0]
     .exe_eip_final                 (exe_eip_final),                 //output [31:0]
     .exe_operand_32bit             (exe_operand_32bit),             //output
@@ -1415,7 +1417,8 @@ write write_inst(
     //pipeline wr
     .wr_busy                       (wr_busy),                       //output
     .exe_ready                     (exe_ready),                     //input
-    
+    .exe_fpu_busy                  (exe_fpu_busy),                  //input (iter-249)
+
     .exe_decoder                   (exe_decoder),                   //input [39:0]
     .exe_eip_final                 (exe_eip_final),                 //input [31:0]
     .exe_operand_32bit             (exe_operand_32bit),             //input

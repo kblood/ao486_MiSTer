@@ -256,7 +256,18 @@ module execute(
     //exe pipeline
     input               wr_busy,
     output              exe_ready,
-    
+
+    // iter-249: FPU-stage busy flag exported to write.v's interrupt gate.
+    // High while an x87 op (arith FSM) or FRSTOR sequencer is mid-flight in
+    // execute and still mutating architectural FPU state (TOP/tag/regfile).
+    // write.v uses ~exe_fpu_busy to defer taking an external interrupt until
+    // the in-flight FPU op drains, so a pipeline flush can never abort it
+    // mid-FSM after a partial, non-rolled-back state mutation (the Quake
+    // "Bad surface extents" corruption class).  NOTE: deliberately NOT the
+    // derived exe_busy — that feeds back through wr_busy and would form a
+    // combinational loop; fpu_busy/frstor_busy are FSM/reg sources, loop-free.
+    output              exe_fpu_busy,
+
     output reg  [39:0]  exe_decoder,
     output      [31:0]  exe_eip_final,
     output reg          exe_operand_32bit,
@@ -456,6 +467,11 @@ wire exe_eip_from_glob_param_2_16bit;
 assign exe_ready = ~(exe_reset) && ~(exe_waiting) && exe_cmd != `CMD_NULL && ~(wr_busy) && ~(fpu_busy) && ~(frstor_busy);
 
 assign exe_busy = exe_waiting || (exe_ready == `FALSE && exe_cmd != `CMD_NULL);
+
+// iter-249: raw FPU-stage busy, loop-free (fpu_busy is an execute_fpu FSM
+// output; frstor_busy = frstor_active reg).  Exported to write.v's interrupt
+// gate so an external IRQ is not recognized while an x87 op is mid-FSM.
+assign exe_fpu_busy = fpu_busy || frstor_busy;
 
 assign e_load = rd_ready;
 
