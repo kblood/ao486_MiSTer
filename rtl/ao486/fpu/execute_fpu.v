@@ -1011,12 +1011,19 @@ module execute_fpu (
                             // load is exact, no IE/DE/ZE/OE/UE/PE) so no flags
                             // re-register needed here.  Invisible to all outputs.
 
-    localparam ARITH_WAIT_CYCLES = 12; // PR-2c.12: dwell so the ~106 ns sum_pre/
-                                       // flags_pre paths settle (12*11.11ns=133ns);
-                                       // MUST match the SDC multicycle N in ao486.sdc.
+    // iter-259 DIAGNOSTIC (Codex gpt-5.5 lead): the deep combinational arith
+    // result cone (mul/add -> normalize -> round/sticky -> sum_pre -> z_lat)
+    // is sampled after this dwell.  Quake "Bad surface extents" results vary
+    // boot-to-boot in the LOW MANTISSA BITS only (operands proven clean) — the
+    // signature of a marginal result-cone sample.  Bump 12 -> 24 to DOUBLE the
+    // physical settle window (24*17.78ns = 427ns @56.25MHz silicon) and see if
+    // the boot variance / crash disappears.  Dwelling LONGER than the SDC
+    // multicycle N (still 12) is always safe (more margin, STA unchanged); the
+    // invariant is ARITH_WAIT_CYCLES >= SDC N, not equality.
+    localparam ARITH_WAIT_CYCLES = 24; // iter-259: was 12 (PR-2c.12).
 
     reg [4:0]  state;          // PR-2c.T-1: widened for S_TRANSCWAIT (5'd16)
-    reg [3:0]  arith_wait_cnt;  // PR-2c.12 (iter 165): S_ARITHWAIT down-counter
+    reg [4:0]  arith_wait_cnt;  // iter-259: widened 4->5 bits to hold 24 (was 12)
 
     // Latched operands + result.
     reg [79:0] a_lat;       // ST(0) at op start
