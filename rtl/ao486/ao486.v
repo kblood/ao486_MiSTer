@@ -75,7 +75,14 @@ module ao486 (
 	input               io_write_done,
 
 	// FPU activity trace (debug): {transc_retire, any_retire} 1-cycle pulses
-	output       [1:0]  fpu_trace_evt
+	output       [1:0]  fpu_trace_evt,
+	output       [31:0] fpu_trace_eip,
+	output       [31:0] fpu_trace_info,
+	// iter-254: ST(0) floatx80 operand-capture
+	output       [79:0] fpu_trace_st0,
+	output              fpu_trace_exc_evt,
+	output       [31:0] fpu_trace_exc_eip,
+	output       [31:0] fpu_trace_exc_info
 );
 
 //------------------------------------------------------------------------------
@@ -162,10 +169,15 @@ wire [15:0] exc_error_code;
 wire        exc_push_error;
 wire        exc_soft_int;
 wire        exc_soft_int_ib;
+wire [4:0]  exc_trace_src;
 wire        exc_pf_read;
 wire        exc_pf_write;
 wire        exc_pf_code;
 wire        exc_pf_check;
+
+assign fpu_trace_exc_evt  = exc_load && ~(interrupt_done) && ~(exc_soft_int);
+assign fpu_trace_exc_eip  = exc_eip;
+assign fpu_trace_exc_info = { exc_trace_src, exc_push_error, exc_soft_int, exc_soft_int_ib, exc_vector, exc_error_code };
 
 wire [31:2] avm_address_pre;
 assign      avm_address = {avm_address_pre[31:21], avm_address_pre[20] & a20_enable, avm_address_pre[19:2]};
@@ -347,7 +359,8 @@ exception exception_inst(
     .exc_push_error                (exc_push_error),                //output
     .exc_soft_int                  (exc_soft_int),                  //output
     .exc_soft_int_ib               (exc_soft_int_ib),               //output
-    
+    .exc_trace_src                 (exc_trace_src),                 //output [4:0]
+
     .exc_pf_read                   (exc_pf_read),                   //output
     .exc_pf_write                  (exc_pf_write),                  //output
     .exc_pf_code                   (exc_pf_code),                   //output
@@ -774,10 +787,13 @@ pipeline pipeline_inst(
     //io write
     .io_write_do                   (io_write_do),                   //output
     .io_write_address              (io_write_address),              //output [15:0]
-    .io_write_length               (io_write_length),               //output [2:0]
-    .io_write_data                 (io_write_data),                 //output [31:0]
-    .io_write_done                 (io_write_done),                 //input
-    .fpu_trace_evt                 (fpu_trace_evt)                  //output [1:0]
+	.io_write_length               (io_write_length),               //output [2:0]
+	.io_write_data                 (io_write_data),                 //output [31:0]
+	.io_write_done                 (io_write_done),                 //input
+	.fpu_trace_evt                 (fpu_trace_evt),                 //output [1:0]
+	.fpu_trace_eip                 (fpu_trace_eip),                 //output [31:0]
+	.fpu_trace_info                (fpu_trace_info),                //output [31:0]
+	.fpu_trace_st0                 (fpu_trace_st0)                  //output [79:0]
 );
 
 //------------------------------------------------------------------------------

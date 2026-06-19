@@ -344,7 +344,9 @@ module execute(
     // FPU activity trace (debug): {transc_retire, any_retire} 1-cycle pulses
     output      [1:0]   fpu_trace_evt,
     output      [31:0]  fpu_trace_eip,
-    output      [31:0]  fpu_trace_info
+    output      [31:0]  fpu_trace_info,
+    // iter-254: ST(0) floatx80 operand-capture (TOP-muxed regfile slot)
+    output      [79:0]  fpu_trace_st0
 );
 
 //------------------------------------------------------------------------------
@@ -912,6 +914,20 @@ assign      fpu_trace_snap = exe_ready && exe_cmd == `CMD_fpu;
 assign      fpu_trace_evt = {fpu_done_transc, fpu_done};
 assign      fpu_trace_eip = fpu_trace_eip_reg;
 assign      fpu_trace_info = fpu_trace_info_reg;
+
+// iter-254: combinational TOP-mux exporting the current ST(0) floatx80.
+// fpu_sw[13:11] = TOP; fpu_r0..7 are the physical regfile slots (decl'd ~824).
+wire [2:0] fpu_trace_top = fpu_sw[13:11];
+reg [79:0] fpu_trace_st0_mux;
+always @(*) begin
+    case (fpu_trace_top)
+        3'd0: fpu_trace_st0_mux = fpu_r0; 3'd1: fpu_trace_st0_mux = fpu_r1;
+        3'd2: fpu_trace_st0_mux = fpu_r2; 3'd3: fpu_trace_st0_mux = fpu_r3;
+        3'd4: fpu_trace_st0_mux = fpu_r4; 3'd5: fpu_trace_st0_mux = fpu_r5;
+        3'd6: fpu_trace_st0_mux = fpu_r6; default: fpu_trace_st0_mux = fpu_r7;
+    endcase
+end
+assign fpu_trace_st0 = fpu_trace_st0_mux;
 
 always @(posedge clk) begin
     if(rst_n == 1'b0) begin

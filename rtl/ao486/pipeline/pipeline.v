@@ -268,7 +268,9 @@ module pipeline(
     // FPU activity trace (debug): {transc_retire, any_retire} 1-cycle pulses
     output      [1:0]   fpu_trace_evt,
     output      [31:0]  fpu_trace_eip,
-    output      [31:0]  fpu_trace_info
+    output      [31:0]  fpu_trace_info,
+    // iter-254: ST(0) floatx80 operand-capture
+    output      [79:0]  fpu_trace_st0
 );
 
 //------------------------------------------------------------------------------
@@ -1187,7 +1189,8 @@ execute execute_inst(
     .exe_stack_offset              (exe_stack_offset),              //output [31:0]
     .fpu_trace_evt                 (fpu_trace_evt),                 //output [1:0]
     .fpu_trace_eip                 (fpu_trace_eip),                 //output [31:0]
-    .fpu_trace_info                (fpu_trace_info)                 //output [31:0]
+    .fpu_trace_info                (fpu_trace_info),                //output [31:0]
+    .fpu_trace_st0                 (fpu_trace_st0)                  //output [79:0]
 );
 
 //------------------------------------------------------------------------------
