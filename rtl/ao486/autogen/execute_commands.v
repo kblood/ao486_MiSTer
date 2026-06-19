@@ -735,7 +735,28 @@ assign exe_error_code =
     (cond_273 && cond_267 && cond_274)? ( `SELECTOR_FOR_CODE(glob_param_1)) :
     (cond_273 && cond_267 && cond_272)? ( `SELECTOR_FOR_CODE(glob_param_1)) :
     16'd0;
+// iter-252 (Quake "Bad surface extents" ROOT-CAUSE fix): raise #NM(TS/EM) for ALL
+// specifically-decoded x87 compute ops.  On a real 486 every ESC op faults #NM
+// when CR0.TS=1 (EM=0) — the mechanism an OS uses for lazy-FPU context switching
+// (CWSDPMI, Quake's DPMI host).  The legacy ESC stub (cond_156 && cond_157) only
+// covered the un-specialized CMD_fpu/ESC_STEP_0 path; the real arith/load/store/
+// unary/transc ops decode to their own CMD (118..127) and BYPASSED the TS check,
+// so they ran on STALE FPU state mid-context-switch -> corrupted CalcSurfaceExtents
+// dot products.  Gate the whole compute family here.  Every one of these flows
+// through the execute_fpu FSM (op_active = exe_ready && is_op_active) or the FRSTOR
+// sequencer (frstor_in_exe requires ~exe_waiting), both gated by ~exe_waiting, so
+// asserting exe_waiting aborts the op BEFORE any TOP/tag/regfile mutation; after
+// the handler's CLTS clears TS the op re-executes cleanly.  FNSAVE/FNSTENV are
+// CMD_fpu_store_mem(126); FRSTOR/FLDENV are CMD_fpu_load_mem(124) — both covered.
+wire cond_nm_fpu_family =
+    (exe_cmd == `CMD_fpu_arith      || exe_cmd == `CMD_fpu_unary        ||
+     exe_cmd == `CMD_fpu_cmp        || exe_cmd == `CMD_fpu_stack_ctrl   ||
+     exe_cmd == `CMD_fpu_cmov       || exe_cmd == `CMD_fpu_arith_mem    ||
+     exe_cmd == `CMD_fpu_load_mem   || exe_cmd == `CMD_fpu_const        ||
+     exe_cmd == `CMD_fpu_store_mem  || exe_cmd == `CMD_fpu_transcendental) &&
+    (cr0_em || cr0_ts);
 assign exe_waiting =
+    (cond_nm_fpu_family)? (`TRUE) :
     (cond_2 && cond_3)? (`TRUE) :
     (cond_2 && ~cond_3 && cond_4)? (`TRUE) :
     (cond_6 && cond_7)? (`TRUE) :
@@ -1033,6 +1054,7 @@ assign exe_cmpxchg_switch_carry =
     (cond_160)? ( e_cmpxchg_sub[32]) :
     1'd0;
 assign exe_trigger_nm_fault =
+    (cond_nm_fpu_family)? (`TRUE) :          // iter-252: #NM(TS/EM) for x87 compute family (118..127)
     (cond_156 && cond_157)? (`TRUE) :
     1'd0;
 assign exe_arith_index =
