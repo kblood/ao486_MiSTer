@@ -58,7 +58,14 @@ reg [31:0] total_ops;
 reg [31:0] transc_ops;
 
 // iter-254/257: op-count freeze anchor.
-localparam [31:0] FREEZE_COUNT = 32'd924631;
+// iter-258: freeze ONE op earlier (924630) to disambiguate the iter-257
+// finding. iter-257 (freeze 924631) showed mring0 (op #924631) garbage and
+// boot-varying while mring1/2/3 (#924628-630) were bit-stable. If shifting
+// the freeze edge -1 makes ALL 4 slots stable, the bad operand was bound to
+// op #924631 specifically (REAL final-operand delivery corruption). If mring0
+// (now #924630) is garbage/varying again, the anomaly tracks the freeze EDGE
+// (a capture artifact), not the op stream.
+localparam [31:0] FREEZE_COUNT = 32'd924630;
 reg        cap_frozen;
 reg [31:0] cap_count;
 reg        evt0_d1;
