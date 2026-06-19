@@ -270,7 +270,9 @@ module pipeline(
     output      [31:0]  fpu_trace_eip,
     output      [31:0]  fpu_trace_info,
     // iter-254: ST(0) floatx80 operand-capture
-    output      [79:0]  fpu_trace_st0
+    output      [79:0]  fpu_trace_st0,
+    // iter-255: FPU-stage busy exposed for the fault-coincidence trace
+    output              exe_fpu_busy
 );
 
 //------------------------------------------------------------------------------
@@ -887,7 +889,8 @@ wire [463:0] exe_buffer_shifted;
 
 wire        wr_busy;
 wire        exe_ready;
-wire        exe_fpu_busy;   // iter-249: FPU-stage busy, execute -> write IRQ gate
+// iter-249: FPU-stage busy, execute -> write IRQ gate. iter-255: also a pipeline
+// output port (declared in the module header) for the fault-coincidence trace.
 wire [39:0] exe_decoder;
 wire [31:0] exe_eip_final;
 wire        exe_operand_32bit;

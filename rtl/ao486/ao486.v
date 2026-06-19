@@ -82,7 +82,10 @@ module ao486 (
 	output       [79:0] fpu_trace_st0,
 	output              fpu_trace_exc_evt,
 	output       [31:0] fpu_trace_exc_eip,
-	output       [31:0] fpu_trace_exc_info
+	output       [31:0] fpu_trace_exc_info,
+	// iter-255: fault-coincidence trace (exception-entry flush while FPU op mid-FSM)
+	output              fpu_trace_exc_init,
+	output              fpu_trace_exe_fpu_busy
 );
 
 //------------------------------------------------------------------------------
@@ -178,6 +181,13 @@ wire        exc_pf_check;
 assign fpu_trace_exc_evt  = exc_load && ~(interrupt_done) && ~(exc_soft_int);
 assign fpu_trace_exc_eip  = exc_eip;
 assign fpu_trace_exc_info = { exc_trace_src, exc_push_error, exc_soft_int, exc_soft_int_ib, exc_vector, exc_error_code };
+
+// iter-255: fault-coincidence trace — an exception-entry flush concurrent with an
+// in-flight (mid-FSM) FPU op is the uncovered corruption path (the external-IRQ
+// path is gated by iter-249's ~exe_fpu_busy; exc_init is NOT).
+wire exe_fpu_busy;
+assign fpu_trace_exc_init     = exc_init;
+assign fpu_trace_exe_fpu_busy = exe_fpu_busy;
 
 wire [31:2] avm_address_pre;
 assign      avm_address = {avm_address_pre[31:21], avm_address_pre[20] & a20_enable, avm_address_pre[19:2]};
@@ -793,7 +803,8 @@ pipeline pipeline_inst(
 	.fpu_trace_evt                 (fpu_trace_evt),                 //output [1:0]
 	.fpu_trace_eip                 (fpu_trace_eip),                 //output [31:0]
 	.fpu_trace_info                (fpu_trace_info),                //output [31:0]
-	.fpu_trace_st0                 (fpu_trace_st0)                  //output [79:0]
+	.fpu_trace_st0                 (fpu_trace_st0),                 //output [79:0]
+	.exe_fpu_busy                  (exe_fpu_busy)                   //output (iter-255)
 );
 
 //------------------------------------------------------------------------------

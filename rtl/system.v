@@ -171,6 +171,8 @@ wire [79:0] fpu_trace_st0;   // iter-254: ST(0) floatx80 operand-capture
 wire        fpu_trace_exc_evt;
 wire [31:0] fpu_trace_exc_eip;
 wire [31:0] fpu_trace_exc_info;
+wire        fpu_trace_exc_init;      // iter-255: exception-entry flush
+wire        fpu_trace_exe_fpu_busy;  // iter-255: FPU op mid-FSM
 wire        mgmt_fputrace_cs;
 wire [15:0] mgmt_fputrace_readdata;
 
@@ -353,7 +355,9 @@ ao486 ao486
 	.fpu_trace_st0      (fpu_trace_st0),
 	.fpu_trace_exc_evt  (fpu_trace_exc_evt),
 	.fpu_trace_exc_eip  (fpu_trace_exc_eip),
-	.fpu_trace_exc_info (fpu_trace_exc_info)
+	.fpu_trace_exc_info (fpu_trace_exc_info),
+	.fpu_trace_exc_init     (fpu_trace_exc_init),
+	.fpu_trace_exe_fpu_busy (fpu_trace_exe_fpu_busy)
 );
 
 always @(posedge clk_sys) begin
@@ -944,6 +948,8 @@ fpu_trace fpu_trace
 	.exc_evt   (fpu_trace_exc_evt),
 	.exc_eip   (fpu_trace_exc_eip),
 	.exc_info  (fpu_trace_exc_info),
+	.exc_init     (fpu_trace_exc_init),
+	.exe_fpu_busy (fpu_trace_exe_fpu_busy),
 	.word_idx  (mgmt_address[3:0]),
 	.readdata  (mgmt_fputrace_readdata)
 );
