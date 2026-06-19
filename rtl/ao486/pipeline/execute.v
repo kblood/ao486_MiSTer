@@ -346,7 +346,10 @@ module execute(
     output      [31:0]  fpu_trace_eip,
     output      [31:0]  fpu_trace_info,
     // iter-254: ST(0) floatx80 operand-capture (TOP-muxed regfile slot)
-    output      [79:0]  fpu_trace_st0
+    output      [79:0]  fpu_trace_st0,
+    // iter-257: delivered float32 mem operand + dot-product mem-op flag
+    output      [31:0]  fpu_trace_mem_data,
+    output              fpu_trace_mem_arith
 );
 
 //------------------------------------------------------------------------------
@@ -928,6 +931,14 @@ always @(*) begin
     endcase
 end
 assign fpu_trace_st0 = fpu_trace_st0_mux;
+
+// iter-257: the float32 mem operand DELIVERED to the FPU (exe_fpu_mem_data is
+// the e_load snapshot of read_data, wired to execute_fpu.exe_mem_data at ~1111)
+// + a flag marking the dot-product mem ops (FMUL/FADD dword[mem] =
+// CMD_fpu_arith_mem, FLD dword[mem] = CMD_fpu_load_mem).  fldcw (CMD_fpu) is
+// excluded so the ring captures true operands, not control-word loads.
+assign fpu_trace_mem_data  = exe_fpu_mem_data[31:0];
+assign fpu_trace_mem_arith = (exe_cmd == `CMD_fpu_arith_mem) || (exe_cmd == `CMD_fpu_load_mem);
 
 always @(posedge clk) begin
     if(rst_n == 1'b0) begin

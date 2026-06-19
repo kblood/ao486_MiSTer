@@ -85,7 +85,10 @@ module ao486 (
 	output       [31:0] fpu_trace_exc_info,
 	// iter-255: fault-coincidence trace (exception-entry flush while FPU op mid-FSM)
 	output              fpu_trace_exc_init,
-	output              fpu_trace_exe_fpu_busy
+	output              fpu_trace_exe_fpu_busy,
+	// iter-257: delivered float32 mem operand + dot-product mem-op flag
+	output       [31:0] fpu_trace_mem_data,
+	output              fpu_trace_mem_arith
 );
 
 //------------------------------------------------------------------------------
@@ -804,7 +807,9 @@ pipeline pipeline_inst(
 	.fpu_trace_eip                 (fpu_trace_eip),                 //output [31:0]
 	.fpu_trace_info                (fpu_trace_info),                //output [31:0]
 	.fpu_trace_st0                 (fpu_trace_st0),                 //output [79:0]
-	.exe_fpu_busy                  (exe_fpu_busy)                   //output (iter-255)
+	.exe_fpu_busy                  (exe_fpu_busy),                  //output (iter-255)
+	.fpu_trace_mem_data            (fpu_trace_mem_data),            //output [31:0] iter-257
+	.fpu_trace_mem_arith           (fpu_trace_mem_arith)            //output        iter-257
 );
 
 //------------------------------------------------------------------------------

@@ -173,6 +173,8 @@ wire [31:0] fpu_trace_exc_eip;
 wire [31:0] fpu_trace_exc_info;
 wire        fpu_trace_exc_init;      // iter-255: exception-entry flush
 wire        fpu_trace_exe_fpu_busy;  // iter-255: FPU op mid-FSM
+wire [31:0] fpu_trace_mem_data;      // iter-257: delivered float32 mem operand
+wire        fpu_trace_mem_arith;     // iter-257: dot-product mem-op flag
 wire        mgmt_fputrace_cs;
 wire [15:0] mgmt_fputrace_readdata;
 
@@ -357,7 +359,9 @@ ao486 ao486
 	.fpu_trace_exc_eip  (fpu_trace_exc_eip),
 	.fpu_trace_exc_info (fpu_trace_exc_info),
 	.fpu_trace_exc_init     (fpu_trace_exc_init),
-	.fpu_trace_exe_fpu_busy (fpu_trace_exe_fpu_busy)
+	.fpu_trace_exe_fpu_busy (fpu_trace_exe_fpu_busy),
+	.fpu_trace_mem_data     (fpu_trace_mem_data),
+	.fpu_trace_mem_arith    (fpu_trace_mem_arith)
 );
 
 always @(posedge clk_sys) begin
@@ -950,6 +954,8 @@ fpu_trace fpu_trace
 	.exc_info  (fpu_trace_exc_info),
 	.exc_init     (fpu_trace_exc_init),
 	.exe_fpu_busy (fpu_trace_exe_fpu_busy),
+	.mem_data  (fpu_trace_mem_data),
+	.mem_arith (fpu_trace_mem_arith),
 	.word_idx  (mgmt_address[3:0]),
 	.readdata  (mgmt_fputrace_readdata)
 );
