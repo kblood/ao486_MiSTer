@@ -335,7 +335,8 @@ exception exception_inst(
     .rd_is_front                   (rd_is_front),                   //input
     .exe_is_front                  (exe_is_front),                  //input
     .wr_is_front                   (wr_is_front),                   //input
-    
+    .exe_fpu_busy                  (exe_fpu_busy),                  //input  iter-285: gate active_dec/active_rd
+
     //interrupt
     .interrupt_vector              (interrupt_vector),              //input [7:0]
     .interrupt_done                (interrupt_done),                //output

@@ -99,7 +99,10 @@ module exception(
     input               rd_is_front,
     input               exe_is_front,
     input               wr_is_front,
-    
+
+    // iter-285: in-flight x87 op in execute (see active_dec/active_rd gating below)
+    input               exe_fpu_busy,
+
     //interrupt
     input       [7:0]   interrupt_vector,
     output reg          interrupt_done,
@@ -205,11 +208,20 @@ assign exception_init = exc_vector_full[8];
 
 assign exc_init   = exception_init || wr_interrupt_possible || interrupt_done || wr_debug_init;
 
+// iter-285: defer recognition of a DECODE/READ-stage fault (an instruction YOUNGER
+// than whatever is in execute) until any in-flight x87 op in execute drains.  Without
+// this, a synchronous fault (e.g. the #UD/V86-#GP/#PF of a later instruction) asserts
+// exc_init and flushes the pipeline while an older fmul/fadd is still mid-FSM, aborting
+// it without committing -> corrupt x87 stack (Quake "Bad surface extents", reproduced
+// in cpu/ TB exc_ud_inject UDPOS=mul NGAP=0).  This is the synchronous-exception analogue
+// of iter-249's ~exe_fpu_busy gate on wr_interrupt_possible_prepare; older op retires
+// first = correct precise-exception ordering.  active_exe/active_wr are NOT gated (the
+// former is the executing op's own fault; gating it would deadlock an x87 self-fault).
 assign active_dec = (dec_gp_fault || dec_ud_fault || dec_pf_fault) &&
-                    rd_dec_is_front && ~(exc_init);
+                    rd_dec_is_front && ~(exc_init) && ~(exe_fpu_busy);
 assign active_rd  = (rd_seg_gp_fault || rd_descriptor_gp_fault || rd_seg_ss_fault || rd_io_allow_fault ||
                      rd_ss_esp_from_tss_fault || read_ac_fault || read_page_fault) &&
-                    rd_is_front  && ~(exc_init);
+                    rd_is_front  && ~(exc_init) && ~(exe_fpu_busy);
 assign active_exe = (exe_div_exception || exe_trigger_gp_fault || exe_trigger_ts_fault || exe_trigger_ss_fault ||
                      exe_trigger_np_fault || exe_trigger_nm_fault || exe_trigger_db_fault || exe_trigger_pf_fault ||
                      exe_bound_fault || exe_load_seg_gp_fault || exe_load_seg_ss_fault || exe_load_seg_np_fault) &&
