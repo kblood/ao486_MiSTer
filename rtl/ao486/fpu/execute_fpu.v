@@ -2645,8 +2645,20 @@ module execute_fpu (
         // u_norm_a_shared is busy normalizing the concurrent arith op_a.
         .norm_in_sign (int_norm_in_sign),
         .norm_in_mag  (int_norm_in_mag),
-        .norm_out_exp (is_int_lat ? norm_int_exp : norm_a_exp),
-        .norm_out_sig (is_int_lat ? norm_int_sig : norm_a_sig),
+        // iter-290: route FILD/FBLD through u_norm_int TOO (always), NOT u_norm_a_shared.
+        // The old `is_int_lat ? norm_int : norm_a` mux kept a physical net from
+        // u_norm_a_shared.sig_out/exp_out into u_int_to_x80, which closed a 3001-node
+        // COMBINATIONAL LOOP with the return path int_to_x80_z -> mem_z -> arith_b ->
+        // op_a -> norm_a_in -> u_norm_a_shared.a (Critical Warning 332081, attributed to
+        // floatx80_normalize.v:54).  That structural loop made Quartus "estimate delays
+        // through the loop" for the WHOLE add/sub/mul path (norm_a_sig feeds u_add/u_sub/
+        // u_mul = the Quake dot product) and is a clock-independent settling hazard.
+        // u_norm_int normalizes the identical input {int_norm_in_sign,15'd0,int_norm_in_mag}
+        // (same module, same data) and is FREE during FILD/FBLD (mutex with int-arith), so
+        // this is bit-identical for FILD/FBLD while removing the forward edge -> loop broken.
+        // The is_int_lat path already used u_norm_int loop-free.
+        .norm_out_exp (norm_int_exp),
+        .norm_out_sig (norm_int_sig),
         .z            (int_to_x80_z)
     );
     assign fbld_x80 = int_to_x80_z;
