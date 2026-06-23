@@ -1090,6 +1090,18 @@ assign frstor_wr_tag   = frstor_restore_tw[frstor_wr_phys*2 +: 2];    // restore
 wire exe_fpu_is_int = (exe_cmd == `CMD_fpu_arith_mem) &&
                       (exe_decoder[7:0] == 8'hDA || exe_decoder[7:0] == 8'hDE);
 
+// PR-2b.5DC (iter-307): the NON-POPPING DC register-form arith ops
+// (0xDC mod=11: FADD/FMUL/FSUBR/FSUB/FDIVR/FDIV ST(i),ST(0)) decode to
+// CMD_fpu_arith reusing the DE pop-form CMDEX values (the 4-bit cmdex
+// namespace is full), so execute_fpu cannot tell DC (no pop) from DE
+// (pop) by cmd/cmdex alone.  Flag the DC variant from the opcode byte so
+// execute_fpu suppresses the is_arith_de pop.  CMD_fpu_arith + opcode
+// 0xDC selects EXACTLY the six reg-forms — DC mem-forms are
+// CMD_fpu_arith_mem.  Fixes the Quake "8e8" root cause (Q_atof's
+// `fdiv st(1),st(0)` was a silent no-op).
+wire exe_fpu_arith_nopop = (exe_cmd == `CMD_fpu_arith) &&
+                           (exe_decoder[7:0] == 8'hDC);
+
 execute_fpu u_execute_fpu (
     .clk                  (clk),
     .rst_n                (rst_n),
@@ -1124,6 +1136,7 @@ execute_fpu u_execute_fpu (
     .exe_mem_fmt          (2'b00),
     .exe_mem_data_valid   (1'b0),
     .exe_is_int           (exe_fpu_is_int),    // PR-2b.5Y iter 236: DA/DE int-arith mem operand
+    .exe_arith_nopop      (exe_fpu_arith_nopop), // PR-2b.5DC iter 307: DC reg-form arith = no pop
 
     // CSR snapshot from fpu_core
     .cw                   (fpu_cw),

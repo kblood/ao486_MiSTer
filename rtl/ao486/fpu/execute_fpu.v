@@ -162,6 +162,13 @@ module execute_fpu (
     // DE/_M64 slot).  Derived in execute.v from the DA/DE opcode byte; the op
     // selection + reverse + compare routing reuse the existing FADD/FMUL/... path.
     input               exe_is_int,
+    // PR-2b.5DC (iter-307): 1 = this CMD_fpu_arith op is a NON-POPPING DC
+    // register form (0xDC mod=11 FADD/FMUL/FSUBR/FSUB/FDIVR/FDIV ST(i),ST(0)).
+    // It shares the DE pop-form cmdex (so is_arith_de fires and all operand
+    // routing / reverse / dst_is_sti are reused) but must NOT pop the stack.
+    // Gated into pop_after_now below.  Derived from the opcode byte in
+    // execute.v (the cmdex 4-bit namespace was full, so DC reuses DE's).
+    input               exe_arith_nopop,
 
     // CSR snapshot
     input       [15:0]  cw,
@@ -876,7 +883,10 @@ module execute_fpu (
     // PR-2b.5e (iter 118): is_fst_m32/is_fst_m64 are INTENTIONALLY ABSENT here —
     // FST is the no-pop store, so ST(0) must survive.  They still ride every
     // other FSTP lane (store_data, store_ready, rf_wr_en suppress, flags_lat=0).
-    wire pop_after_now  = is_arith_de | is_fstp_sti | is_cmp_pop_now |
+    // PR-2b.5DC (iter-307): is_arith_de fires for BOTH the DE pop-forms and
+    // the new DC non-pop reg-forms (they share cmd/cmdex).  Suppress the pop
+    // for the DC variant so ST(i) is written but TOP/ST(0) are retained.
+    wire pop_after_now  = (is_arith_de & ~exe_arith_nopop) | is_fstp_sti | is_cmp_pop_now |
                           is_fstp_m80 |                           // PR-2b.5a iter 113
                           is_fstp_m32 | is_fstp_m64 |             // PR-2b.5c/5d iter 116/117
                           is_fist_pop_now |                       // PR-2b.5w iter 141 (FISTP only)

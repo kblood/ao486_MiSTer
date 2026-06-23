@@ -225,12 +225,28 @@ wire cond_153 = dec_ready_modregrm_one   && decoder[7:0] == 8'hD8 && decoder[15:
 //   DE F8+i = FDIVP  ST(i), ST(0)  (reg=111, /7) - dst <- ST(i) / ST(0)
 // Same dispatcher as the D8 family, with two extra control bits added
 // in execute_fpu.v: dst_is_sti_lat and pop_after_lat.
-wire cond_154 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDE && decoder[15:14] == 2'b11 && decoder[13:11] == 3'd0;
-wire cond_155 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDE && decoder[15:14] == 2'b11 && decoder[13:11] == 3'd1;
-wire cond_156 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDE && decoder[15:14] == 2'b11 && decoder[13:11] == 3'd4;
-wire cond_157 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDE && decoder[15:14] == 2'b11 && decoder[13:11] == 3'd5;
-wire cond_158 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDE && decoder[15:14] == 2'b11 && decoder[13:11] == 3'd6;
-wire cond_159 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDE && decoder[15:14] == 2'b11 && decoder[13:11] == 3'd7;
+//
+// PR-2b.5DC (iter-307): the NON-POPPING DC register forms share these SIX
+// conds — 0xDC mod=11 reg r has IDENTICAL operand routing / op / destination
+// (ST(i)) as 0xDE mod=11 reg r, differing ONLY in that DC does NOT pop:
+//   DC C0+i = FADD  ST(i), ST(0)   (reg=000, /0)  -> CMDEX_FADDP_STi_ST0,  no pop
+//   DC C8+i = FMUL  ST(i), ST(0)   (reg=001, /1)  -> CMDEX_FMULP_STi_ST0,  no pop
+//   DC E0+i = FSUBR ST(i), ST(0)   (reg=100, /4)  -> CMDEX_FSUBRP_STi_ST0, no pop
+//   DC E8+i = FSUB  ST(i), ST(0)   (reg=101, /5)  -> CMDEX_FSUBP_STi_ST0,  no pop
+//   DC F0+i = FDIVR ST(i), ST(0)   (reg=110, /6)  -> CMDEX_FDIVRP_STi_ST0, no pop
+//   DC F8+i = FDIV  ST(i), ST(0)   (reg=111, /7)  -> CMDEX_FDIVP_STi_ST0,  no pop
+// These were COMPLETELY UNDECODED before (silent no-op on AO486) — the
+// Quake "8e8" root cause: DJGPP's Q_atof emits `fdiv st(1),st(0)` (DC F9)
+// for decimal scaling.  CMD_fpu_arith's 4-bit cmdex namespace is FULL, so we
+// reuse the DE pop-form cmdex and suppress the pop in execute_fpu via a
+// decoded "DC arith reg-form" bit derived from the 0xDC opcode byte (see
+// execute.v exe_fpu_arith_nopop + execute_fpu.v pop_after_now gate).
+wire cond_154 = dec_ready_modregrm_one   && (decoder[7:0] == 8'hDE || decoder[7:0] == 8'hDC) && decoder[15:14] == 2'b11 && decoder[13:11] == 3'd0;
+wire cond_155 = dec_ready_modregrm_one   && (decoder[7:0] == 8'hDE || decoder[7:0] == 8'hDC) && decoder[15:14] == 2'b11 && decoder[13:11] == 3'd1;
+wire cond_156 = dec_ready_modregrm_one   && (decoder[7:0] == 8'hDE || decoder[7:0] == 8'hDC) && decoder[15:14] == 2'b11 && decoder[13:11] == 3'd4;
+wire cond_157 = dec_ready_modregrm_one   && (decoder[7:0] == 8'hDE || decoder[7:0] == 8'hDC) && decoder[15:14] == 2'b11 && decoder[13:11] == 3'd5;
+wire cond_158 = dec_ready_modregrm_one   && (decoder[7:0] == 8'hDE || decoder[7:0] == 8'hDC) && decoder[15:14] == 2'b11 && decoder[13:11] == 3'd6;
+wire cond_159 = dec_ready_modregrm_one   && (decoder[7:0] == 8'hDE || decoder[7:0] == 8'hDC) && decoder[15:14] == 2'b11 && decoder[13:11] == 3'd7;
 
 // PR-2b.3k: FXCH ST(i) = D9 C8+i.  Opcode 0xD9 + modrm with mod=11
 // (reg-form) and reg=001 (/1).  rm carries the destination ST(i) index.
