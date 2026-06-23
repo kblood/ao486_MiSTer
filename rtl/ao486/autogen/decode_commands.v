@@ -261,13 +261,21 @@ wire cond_160 = dec_ready_modregrm_one   && decoder[7:0] == 8'hD9 && decoder[15:
 // execute_fpu.v owns the FSM and the TOP write.
 wire cond_161 = dec_ready_modregrm_one   && decoder[7:0] == 8'hD9 && decoder[15:14] == 2'b11 && decoder[13:11] == 3'd0;
 
-// PR-2b.3m: FST ST(i) = D9 D0+i.  Opcode 0xD9 + modrm with mod=11
+// PR-2b.3m: FST ST(i) = DD D0+i.  Opcode 0xDD + modrm with mod=11
 // (reg-form) and reg=010 (/2).  rm carries the destination ST(i) index.
 // Pure-control "store" op (no math): ST(i) := ST(0) (data+tag); TOP
 // unchanged.  Routed through CMD_fpu_arith / CMDEX_FST_STi;
 // execute_fpu.v owns the FSM (reuses dst_is_sti_lat for the abs_stsrc
 // destination + is_fst_lat for the data/tag-source override).
-wire cond_162 = dec_ready_modregrm_one   && decoder[7:0] == 8'hD9 && decoder[15:14] == 2'b11 && decoder[13:11] == 3'd2;
+// PR-2b.5FST (iter 310): the original cond matched 0xD9 (= FNOP/reserved
+// reg-form space), so the REAL FST ST(i) at DD D0+i fell through cond_67
+// to a SILENT NO-OP (decode-completeness audit, same class as the iter-307
+// DC-regform gap).  FST ST(i) is the missing member of the DD reg-form
+// family (FFREE=DD/0 cond_174, FSTP=DD/3 cond_163, FUCOM/FUCOMP=DD/4,5).
+// Re-point to 0xDD; the CMDEX_FST_STi execute path is unchanged + already
+// proven.  FNOP (D9 D0, cond_175) no longer overlaps so its `& ~cond_162`
+// gate is now a harmless always-true.
+wire cond_162 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDD && decoder[15:14] == 2'b11 && decoder[13:11] == 3'd2;
 
 // PR-2b.3m: FSTP ST(i) = DD D8+i.  Opcode 0xDD + modrm with mod=11
 // (reg-form) and reg=011 (/3).  rm carries the destination ST(i) index.
