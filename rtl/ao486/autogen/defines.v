@@ -731,6 +731,14 @@
 `define CMDEX_FDECSTP         4'd2
 `define CMDEX_FINCSTP         4'd3
 
+// PR-2b.5FFREEP (iter 310) — FFREEP ST(i) = DF C0+i.  Undocumented-but-
+// universally-implemented "free + pop": tag-stomp ST(i) to Empty (data
+// preserved, exactly like FFREE) THEN pop the stack (clear old ST(0) tag,
+// TOP++).  Reuses is_ffree's S_RETIRE tag-clear (via is_ffree_any) + the
+// generic pop_after_lat -> S_POP mechanism.  Was an undecoded SILENT NO-OP
+// (decode-completeness audit, sibling of the iter-307 DC gap + iter-310 FST).
+`define CMDEX_FFREEP          4'd4
+
 // PR-2b.3t (iter 51) — FCMOVcc family (P6 conditional move on EFLAGS).
 //   DA C0+i .. C7+i  FCMOVB   ST(0), ST(i)   if CF=1
 //   DA C8+i .. CF+i  FCMOVE   ST(0), ST(i)   if ZF=1

@@ -642,6 +642,14 @@ module execute_fpu (
     // targets ST(0).
     wire is_ffree         = (exe_cmd  == `CMD_fpu_stack_ctrl) &&
                             (exe_cmdex == `CMDEX_FFREE);
+    // PR-2b.5FFREEP (iter 310): FFREEP ST(i) = DF C0+i — "free + pop".  Identical
+    // tag-clear to FFREE (Empty @ ST(i), data preserved) THEN a pop.  is_ffree_any
+    // routes it through every is_ffree control path (op_active, control_op,
+    // dst_is_sti, and the is_ffree_lat-gated S_RETIRE data/tag write); the pop is
+    // armed by adding is_ffreep to pop_after_now (generic S_RETIRE->S_POP).
+    wire is_ffreep        = (exe_cmd  == `CMD_fpu_stack_ctrl) &&
+                            (exe_cmdex == `CMDEX_FFREEP);
+    wire is_ffree_any     = is_ffree | is_ffreep;
     // PR-2b.3s (iter 50): three more CMD_fpu_stack_ctrl ops.
     //   FNOP    (D9 D0) — pure no-op (walks FSM, no side effects at retire).
     //   FDECSTP (D9 F6) — TOP -= 1 at retire; no regfile / tag / flags.
@@ -809,7 +817,7 @@ module execute_fpu (
                             is_fprem_any |                            // PR-2b.5r iter 135
                             is_fsqrt |                                // PR-2b.5t iter 137
                             is_transc |                               // PR-2c.T iter 192: x87 transcendental group (F2XM1..FSINCOS) — WITHOUT this the op never leaves S_IDLE and silently no-ops; the unit TBs drive the engine directly so they never exercised this dispatch gate (latent since T-0)
-                            is_ffree | is_fnop | is_fdecstp | is_fincstp |
+                            is_ffree_any | is_fnop | is_fdecstp | is_fincstp |
                             is_fcmov_now;
     // Control-op predicate: ops whose result is a regfile-data move,
     // not a softfloat compute.  Used in S_COMPUTE to force flags_lat=0
@@ -818,7 +826,7 @@ module execute_fpu (
     // FCMOVcc share this predicate.
     wire is_control_op_now = is_fxch_sti | is_fld_sti | is_fst_family |
                              is_fconst |                              // PR-2b.4n iter 112
-                             is_unary_now | is_ffree |
+                             is_unary_now | is_ffree_any |
                              is_fnop | is_fdecstp | is_fincstp |
                              is_fcmov_now;
 
@@ -875,7 +883,7 @@ module execute_fpu (
     // store.  FST keeps pop_after_lat=0 (no pop).
     // PR-2b.3r: FFREE writes to ST(i) too (tag-only Empty + b_lat data
     // preserve), so it joins dst_is_sti_now.
-    wire dst_is_sti_now = is_arith_de | is_fst_family | is_ffree | is_transc_log; // PR-2c.T-2
+    wire dst_is_sti_now = is_arith_de | is_fst_family | is_ffree_any | is_transc_log; // PR-2c.T-2 + iter310 FFREEP
     // PR-2b.3o: FCOMP / FUCOMP arm a pop using the existing pop_after_lat
     // mechanism (one cycle in S_POP that bumps TOP and clears the old
     // ST(0) tag).  Unlike arith DE-pops, the cmp path also has cc_we
@@ -887,6 +895,8 @@ module execute_fpu (
     // the new DC non-pop reg-forms (they share cmd/cmdex).  Suppress the pop
     // for the DC variant so ST(i) is written but TOP/ST(0) are retained.
     wire pop_after_now  = (is_arith_de & ~exe_arith_nopop) | is_fstp_sti | is_cmp_pop_now |
+                          is_ffreep |                             // PR-2b.5FFREEP iter 310: FFREEP = FFREE + pop
+
                           is_fstp_m80 |                           // PR-2b.5a iter 113
                           is_fstp_m32 | is_fstp_m64 |             // PR-2b.5c/5d iter 116/117
                           is_fist_pop_now |                       // PR-2b.5w iter 141 (FISTP only)
@@ -1616,7 +1626,7 @@ module execute_fpu (
                         is_fucom_lat   <= is_cmp_unord_now;
                         is_cmpi_lat    <= is_cmpi_now;
                         is_ftst_lat    <= is_ftst;
-                        is_ffree_lat   <= is_ffree;
+                        is_ffree_lat   <= is_ffree_any;   // iter310: FFREEP shares FFREE's tag-clear
                         is_fnop_lat    <= is_fnop;
                         is_fdecstp_lat <= is_fdecstp;
                         is_fincstp_lat <= is_fincstp;

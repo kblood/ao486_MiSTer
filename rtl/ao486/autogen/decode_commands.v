@@ -532,6 +532,13 @@ wire cond_263 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDA && decoder[15:
 wire cond_264 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDE && decoder[15:14] != 2'b11 && decoder[13:11] == 3'd6; // FIDIV  m16int
 wire cond_265 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDA && decoder[15:14] != 2'b11 && decoder[13:11] == 3'd7; // FIDIVR m32int
 wire cond_266 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDE && decoder[15:14] != 2'b11 && decoder[13:11] == 3'd7; // FIDIVR m16int
+// PR-2b.5FFREEP (iter 310): FFREEP ST(i) = DF C0+i (opcode 0xDF, mod=11, reg=0).
+// Undocumented-but-universal "free + pop".  Was an undecoded SILENT NO-OP
+// (decode-completeness audit, sibling of the iter-307 DC gap + iter-310 FST).
+// Disjoint from all other DF conds: FNSTSW AX (cond_146) is DF E0 (reg=4),
+// FILD m16 (cond_229) is DF reg=0 but mod!=11.  Routes to CMD_fpu_stack_ctrl
+// / CMDEX_FFREEP — execute_fpu reuses is_ffree's tag-clear + pop_after_lat.
+wire cond_267 = dec_ready_modregrm_one   && decoder[7:0] == 8'hDF && decoder[15:14] == 2'b11 && decoder[13:11] == 3'd0; // FFREEP ST(i)
 //======================================================== saves
 //======================================================== always
 //======================================================== sets
@@ -546,7 +553,7 @@ assign consume_mem_offset =
 // rewritten as a single balanced ONE-HOT select.  SOLE overlap D9 D0
 // (cond_162 FST_STi vs cond_175 FNOP) keeps original priority via & ~cond_162.
 // cond_67 (reg-form ESC catch-all) stays BELOW the group, unchanged.
-wire fpu_cmd_hit = cond_144 | cond_145 | cond_146 | cond_147 | cond_222 | cond_148 | cond_149 | cond_150 | cond_151 | cond_152 | cond_153 | cond_154 | cond_155 | cond_156 | cond_157 | cond_158 | cond_159 | cond_160 | cond_161 | cond_162 | cond_163 | cond_164 | cond_221 | cond_223 | cond_224 | cond_225 | cond_226 | cond_227 | cond_238 | cond_239 | cond_240 | cond_241 | cond_242 | cond_243 | cond_244 | cond_245 | cond_165 | cond_166 | cond_167 | cond_168 | cond_169 | cond_170 | cond_171 | cond_172 | cond_173 | cond_174 | cond_175 | cond_176 | cond_177 | cond_178 | cond_179 | cond_180 | cond_181 | cond_182 | cond_183 | cond_184 | cond_185 | cond_186 | cond_187 | cond_188 | cond_189 | cond_190 | cond_191 | cond_192 | cond_193 | cond_194 | cond_195 | cond_196 | cond_197 | cond_198 | cond_199 | cond_200 | cond_201 | cond_202 | cond_203 | cond_204 | cond_205 | cond_206 | cond_207 | cond_220 | cond_228 | cond_229 | cond_230 | cond_236 | cond_208 | cond_209 | cond_210 | cond_211 | cond_212 | cond_213 | cond_214 | cond_215 | cond_216 | cond_217 | cond_218 | cond_219 | cond_231 | cond_232 | cond_233 | cond_234 | cond_235 | cond_237 | cond_247 | cond_246 | cond_249 | cond_248 | cond_250 | cond_251 | cond_252 | cond_253 | cond_254 | cond_255 | cond_256 | cond_257 | cond_258 | cond_259 | cond_260 | cond_261 | cond_262 | cond_263 | cond_264 | cond_265 | cond_266;
+wire fpu_cmd_hit = cond_144 | cond_145 | cond_146 | cond_147 | cond_222 | cond_148 | cond_149 | cond_150 | cond_151 | cond_152 | cond_153 | cond_154 | cond_155 | cond_156 | cond_157 | cond_158 | cond_159 | cond_160 | cond_161 | cond_162 | cond_163 | cond_164 | cond_221 | cond_223 | cond_224 | cond_225 | cond_226 | cond_227 | cond_238 | cond_239 | cond_240 | cond_241 | cond_242 | cond_243 | cond_244 | cond_245 | cond_165 | cond_166 | cond_167 | cond_168 | cond_169 | cond_170 | cond_171 | cond_172 | cond_173 | cond_174 | cond_175 | cond_176 | cond_177 | cond_178 | cond_179 | cond_180 | cond_181 | cond_182 | cond_183 | cond_184 | cond_185 | cond_186 | cond_187 | cond_188 | cond_189 | cond_190 | cond_191 | cond_192 | cond_193 | cond_194 | cond_195 | cond_196 | cond_197 | cond_198 | cond_199 | cond_200 | cond_201 | cond_202 | cond_203 | cond_204 | cond_205 | cond_206 | cond_207 | cond_220 | cond_228 | cond_229 | cond_230 | cond_236 | cond_208 | cond_209 | cond_210 | cond_211 | cond_212 | cond_213 | cond_214 | cond_215 | cond_216 | cond_217 | cond_218 | cond_219 | cond_231 | cond_232 | cond_233 | cond_234 | cond_235 | cond_237 | cond_247 | cond_246 | cond_249 | cond_248 | cond_250 | cond_251 | cond_252 | cond_253 | cond_254 | cond_255 | cond_256 | cond_257 | cond_258 | cond_259 | cond_260 | cond_261 | cond_262 | cond_263 | cond_264 | cond_265 | cond_266 | cond_267;
 wire [6:0] fpu_cmd_val =
     ({7{cond_144}} & (`CMD_fpu))
   |     ({7{cond_145}} & (`CMD_fpu))
@@ -599,6 +606,7 @@ wire [6:0] fpu_cmd_val =
   |     ({7{cond_172}} & (`CMD_fpu_cmp))
   |     ({7{cond_173}} & (`CMD_fpu_cmp))
   |     ({7{cond_174}} & (`CMD_fpu_stack_ctrl))
+  |     ({7{cond_267}} & (`CMD_fpu_stack_ctrl))   // PR-2b.5FFREEP iter 310: FFREEP ST(i)
   |     ({7{cond_175 & ~cond_162}} & (`CMD_fpu_stack_ctrl))
   |     ({7{cond_176}} & (`CMD_fpu_stack_ctrl))
   |     ({7{cond_177}} & (`CMD_fpu_stack_ctrl))
@@ -1192,7 +1200,7 @@ assign dec_is_8bit =
 // rewritten as a single balanced ONE-HOT select.  SOLE overlap D9 D0
 // (cond_162 FST_STi vs cond_175 FNOP) keeps original priority via & ~cond_162.
 // cond_67 (reg-form ESC catch-all) stays BELOW the group, unchanged.
-wire fpu_cmdex_hit = cond_144 | cond_145 | cond_146 | cond_147 | cond_222 | cond_148 | cond_149 | cond_150 | cond_151 | cond_152 | cond_153 | cond_154 | cond_155 | cond_156 | cond_157 | cond_158 | cond_159 | cond_160 | cond_161 | cond_162 | cond_163 | cond_164 | cond_221 | cond_223 | cond_224 | cond_225 | cond_226 | cond_227 | cond_238 | cond_239 | cond_240 | cond_241 | cond_242 | cond_243 | cond_244 | cond_245 | cond_165 | cond_166 | cond_167 | cond_168 | cond_169 | cond_170 | cond_171 | cond_172 | cond_173 | cond_174 | cond_175 | cond_176 | cond_177 | cond_178 | cond_179 | cond_180 | cond_181 | cond_182 | cond_183 | cond_184 | cond_185 | cond_186 | cond_187 | cond_188 | cond_189 | cond_190 | cond_191 | cond_192 | cond_193 | cond_194 | cond_195 | cond_196 | cond_197 | cond_198 | cond_199 | cond_200 | cond_201 | cond_202 | cond_203 | cond_204 | cond_205 | cond_206 | cond_207 | cond_220 | cond_228 | cond_229 | cond_230 | cond_236 | cond_208 | cond_209 | cond_210 | cond_211 | cond_212 | cond_213 | cond_214 | cond_215 | cond_216 | cond_217 | cond_218 | cond_219 | cond_231 | cond_232 | cond_233 | cond_234 | cond_235 | cond_237 | cond_247 | cond_246 | cond_249 | cond_248 | cond_250 | cond_251 | cond_252 | cond_253 | cond_254 | cond_255 | cond_256 | cond_257 | cond_258 | cond_259 | cond_260 | cond_261 | cond_262 | cond_263 | cond_264 | cond_265 | cond_266;
+wire fpu_cmdex_hit = cond_144 | cond_145 | cond_146 | cond_147 | cond_222 | cond_148 | cond_149 | cond_150 | cond_151 | cond_152 | cond_153 | cond_154 | cond_155 | cond_156 | cond_157 | cond_158 | cond_159 | cond_160 | cond_161 | cond_162 | cond_163 | cond_164 | cond_221 | cond_223 | cond_224 | cond_225 | cond_226 | cond_227 | cond_238 | cond_239 | cond_240 | cond_241 | cond_242 | cond_243 | cond_244 | cond_245 | cond_165 | cond_166 | cond_167 | cond_168 | cond_169 | cond_170 | cond_171 | cond_172 | cond_173 | cond_174 | cond_175 | cond_176 | cond_177 | cond_178 | cond_179 | cond_180 | cond_181 | cond_182 | cond_183 | cond_184 | cond_185 | cond_186 | cond_187 | cond_188 | cond_189 | cond_190 | cond_191 | cond_192 | cond_193 | cond_194 | cond_195 | cond_196 | cond_197 | cond_198 | cond_199 | cond_200 | cond_201 | cond_202 | cond_203 | cond_204 | cond_205 | cond_206 | cond_207 | cond_220 | cond_228 | cond_229 | cond_230 | cond_236 | cond_208 | cond_209 | cond_210 | cond_211 | cond_212 | cond_213 | cond_214 | cond_215 | cond_216 | cond_217 | cond_218 | cond_219 | cond_231 | cond_232 | cond_233 | cond_234 | cond_235 | cond_237 | cond_247 | cond_246 | cond_249 | cond_248 | cond_250 | cond_251 | cond_252 | cond_253 | cond_254 | cond_255 | cond_256 | cond_257 | cond_258 | cond_259 | cond_260 | cond_261 | cond_262 | cond_263 | cond_264 | cond_265 | cond_266 | cond_267;
 wire [3:0] fpu_cmdex_val =
     ({4{cond_144}} & (`CMDEX_FN_INIT))
   |     ({4{cond_145}} & (`CMDEX_FN_CLEX))
@@ -1245,6 +1253,7 @@ wire [3:0] fpu_cmdex_val =
   |     ({4{cond_172}} & (`CMDEX_FCOMPP))
   |     ({4{cond_173}} & (`CMDEX_FUCOMPP))
   |     ({4{cond_174}} & (`CMDEX_FFREE))
+  |     ({4{cond_267}} & (`CMDEX_FFREEP))   // PR-2b.5FFREEP iter 310
   |     ({4{cond_175 & ~cond_162}} & (`CMDEX_FNOP))
   |     ({4{cond_176}} & (`CMDEX_FDECSTP))
   |     ({4{cond_177}} & (`CMDEX_FINCSTP))
