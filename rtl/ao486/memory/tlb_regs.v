@@ -306,40 +306,24 @@ assign tlb29_sel = translate_do && translate_linear[31:12] == tlb29[19:0] && tlb
 assign tlb30_sel = translate_do && translate_linear[31:12] == tlb30[19:0] && tlb30[`TLB_BIT_VALID];
 assign tlb31_sel = translate_do && translate_linear[31:12] == tlb31[19:0] && tlb31[`TLB_BIT_VALID];
 
+// iter-317 CAM-TREE: the tlbN_sel are GUARANTEED one-hot (each valid entry holds
+// a unique linear[31:12] tag -- a re-translate of a present page hits its existing
+// entry and never re-fills, and flushes clear entries), so the original 32-deep
+// priority-ternary cascade is combinationally identical to a masked balanced-OR.
+// The OR form lets Quartus build a ~5-level balanced reduction instead of a
+// ~32-level priority chain -> shorter logic cone on the critical TLB->L2 path.
+// ZERO latency change, ZERO behaviour change (Quake's constant paging is the
+// functional witness). If two valid tags ever collided the OR would merge them,
+// but the fill path makes that unreachable.
 assign selected =
-    (tlb0_sel)?   tlb0 :
-    (tlb1_sel)?   tlb1 :
-    (tlb2_sel)?   tlb2 :
-    (tlb3_sel)?   tlb3 :
-    (tlb4_sel)?   tlb4 :
-    (tlb5_sel)?   tlb5 :
-    (tlb6_sel)?   tlb6 :
-    (tlb7_sel)?   tlb7 :
-    (tlb8_sel)?   tlb8 :
-    (tlb9_sel)?   tlb9 :
-    (tlb10_sel)?  tlb10 :
-    (tlb11_sel)?  tlb11 :
-    (tlb12_sel)?  tlb12 :
-    (tlb13_sel)?  tlb13 :
-    (tlb14_sel)?  tlb14 :
-    (tlb15_sel)?  tlb15 :
-    (tlb16_sel)?  tlb16 :
-    (tlb17_sel)?  tlb17 :
-    (tlb18_sel)?  tlb18 :
-    (tlb19_sel)?  tlb19 :
-    (tlb20_sel)?  tlb20 :
-    (tlb21_sel)?  tlb21 :
-    (tlb22_sel)?  tlb22 :
-    (tlb23_sel)?  tlb23 :
-    (tlb24_sel)?  tlb24 :
-    (tlb25_sel)?  tlb25 :
-    (tlb26_sel)?  tlb26 :
-    (tlb27_sel)?  tlb27 :
-    (tlb28_sel)?  tlb28 :
-    (tlb29_sel)?  tlb29 :
-    (tlb30_sel)?  tlb30 :
-    (tlb31_sel)?  tlb31 :
-                  46'd0;
+    ({46{tlb0_sel}}  & tlb0)  | ({46{tlb1_sel}}  & tlb1)  | ({46{tlb2_sel}}  & tlb2)  | ({46{tlb3_sel}}  & tlb3)  |
+    ({46{tlb4_sel}}  & tlb4)  | ({46{tlb5_sel}}  & tlb5)  | ({46{tlb6_sel}}  & tlb6)  | ({46{tlb7_sel}}  & tlb7)  |
+    ({46{tlb8_sel}}  & tlb8)  | ({46{tlb9_sel}}  & tlb9)  | ({46{tlb10_sel}} & tlb10) | ({46{tlb11_sel}} & tlb11) |
+    ({46{tlb12_sel}} & tlb12) | ({46{tlb13_sel}} & tlb13) | ({46{tlb14_sel}} & tlb14) | ({46{tlb15_sel}} & tlb15) |
+    ({46{tlb16_sel}} & tlb16) | ({46{tlb17_sel}} & tlb17) | ({46{tlb18_sel}} & tlb18) | ({46{tlb19_sel}} & tlb19) |
+    ({46{tlb20_sel}} & tlb20) | ({46{tlb21_sel}} & tlb21) | ({46{tlb22_sel}} & tlb22) | ({46{tlb23_sel}} & tlb23) |
+    ({46{tlb24_sel}} & tlb24) | ({46{tlb25_sel}} & tlb25) | ({46{tlb26_sel}} & tlb26) | ({46{tlb27_sel}} & tlb27) |
+    ({46{tlb28_sel}} & tlb28) | ({46{tlb29_sel}} & tlb29) | ({46{tlb30_sel}} & tlb30) | ({46{tlb31_sel}} & tlb31);
 
 assign tlb0_ena  = `TRUE;
 assign tlb1_ena  = tlb0_ena  && tlb0 [`TLB_BIT_VALID];
