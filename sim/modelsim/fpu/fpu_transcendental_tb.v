@@ -46,7 +46,7 @@ module fpu_transcendental_tb;
 
     // engine <-> shared-arith request/response
     wire [79:0] arith_a, arith_b;
-    wire        arith_is_mul;
+    wire [1:0]  arith_op;        // PR-2c.T-2: 2-bit KIND request (F2XM1 uses ADD/MUL)
     wire        done;
     wire [79:0] z;
     wire [5:0]  flags;
@@ -54,7 +54,7 @@ module fpu_transcendental_tb;
     // ---- replicate execute_fpu's op_a/op_b + eff_kind for the engine -------
     wire [79:0] op_a = arith_a;
     wire [79:0] op_b = arith_b;
-    wire [1:0]  eff_kind = arith_is_mul ? KIND_MUL : KIND_ADD;
+    wire [1:0]  eff_kind = arith_op;
 
     // shared normalizers
     wire               na_sign, nb_sign;
@@ -127,9 +127,10 @@ module fpu_transcendental_tb;
     wire [79:0] arith_z  = (eff_kind == KIND_MUL) ? mul_z : addsub_z;
 
     fpu_transcendental u_dut (
-        .clk(clk), .rst(rst), .start(start), .cmdex(cmdex), .a(a),
-        .arith_a(arith_a), .arith_b(arith_b), .arith_is_mul(arith_is_mul),
-        .arith_z(arith_z), .done(done), .z(z), .flags(flags));
+        .clk(clk), .rst(rst), .start(start), .cmdex(cmdex), .a(a), .b(80'd0),
+        .arith_a(arith_a), .arith_b(arith_b), .arith_op(arith_op),
+        .arith_z(arith_z), .div_start(), .div_z(80'd0), .div_done(1'b0),
+        .done(done), .z(z), .flags(flags));
 
     // ---- vectors -----------------------------------------------------------
     localparam NV = 15;

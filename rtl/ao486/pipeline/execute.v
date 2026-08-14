@@ -349,7 +349,9 @@ module execute(
     output      [79:0]  fpu_trace_st0,
     // iter-257: delivered float32 mem operand + dot-product mem-op flag
     output      [31:0]  fpu_trace_mem_data,
-    output              fpu_trace_mem_arith
+    output              fpu_trace_mem_arith,
+    // iter-261b: settled arith datapath snapshot (a_lat/sum_pre/control), lightened
+    output      [71:0]  fpu_trace_arith_snap
 );
 
 //------------------------------------------------------------------------------
@@ -921,16 +923,14 @@ assign      fpu_trace_info = fpu_trace_info_reg;
 // iter-254: combinational TOP-mux exporting the current ST(0) floatx80.
 // fpu_sw[13:11] = TOP; fpu_r0..7 are the physical regfile slots (decl'd ~824).
 wire [2:0] fpu_trace_top = fpu_sw[13:11];
-reg [79:0] fpu_trace_st0_mux;
-always @(*) begin
-    case (fpu_trace_top)
-        3'd0: fpu_trace_st0_mux = fpu_r0; 3'd1: fpu_trace_st0_mux = fpu_r1;
-        3'd2: fpu_trace_st0_mux = fpu_r2; 3'd3: fpu_trace_st0_mux = fpu_r3;
-        3'd4: fpu_trace_st0_mux = fpu_r4; 3'd5: fpu_trace_st0_mux = fpu_r5;
-        3'd6: fpu_trace_st0_mux = fpu_r6; default: fpu_trace_st0_mux = fpu_r7;
-    endcase
-end
-assign fpu_trace_st0 = fpu_trace_st0_mux;
+// iter-290: the ST(0) 8:1 80-bit regfile-read trace mux is TEMPORARILY NEUTERED (tied 0).
+// The loop-fix netlist packs ~6-12 LABs OVER the 4191-LAB wall (non-monotone fitter: removing
+// the 3001-node comb-loop made packing WORSE).  This 8:1x80 mux is ~16-24 LABs of pure trace
+// logic that the BINARY iter-290 test (does total_ops climb past op 924631) does NOT need --
+// only fpu_trace word-2 total_ops.  Freeing it gives SEED 4 the ALM headroom to place AND route.
+// Restore (git) for any future ST0 capture.  fpu_trace_st0_mux is no longer referenced (the
+// iter-289 ring that read it is also neutered above).
+assign fpu_trace_st0 = 80'd0;
 
 // iter-257: the float32 mem operand DELIVERED to the FPU (exe_fpu_mem_data is
 // the e_load snapshot of read_data, wired to execute_fpu.exe_mem_data at ~1111)
@@ -939,6 +939,10 @@ assign fpu_trace_st0 = fpu_trace_st0_mux;
 // excluded so the ring captures true operands, not control-word loads.
 assign fpu_trace_mem_data  = exe_fpu_mem_data[31:0];
 assign fpu_trace_mem_arith = (exe_cmd == `CMD_fpu_arith_mem) || (exe_cmd == `CMD_fpu_load_mem);
+
+// iter-262: execute.v-BOUNDARY paired input/output capture (driven AFTER the
+// execute_fpu instance, where fpu_rf_wr_* are declared — see ~line 1176 block).
+// The threaded fpu_trace_arith_snap bus is driven from fpu_arith_snap_reg there.
 
 always @(posedge clk) begin
     if(rst_n == 1'b0) begin
@@ -1178,6 +1182,149 @@ execute_fpu u_execute_fpu (
     .rf_rd_data           (fpu_rf_rd_data),
     .rf_rd_tag            (fpu_rf_rd_tag)
 );
+
+//------------------------------------------------------------------------------
+// iter-262: execute.v-BOUNDARY paired input/output capture (NO execute_fpu edit).
+// Codex bcxvc4l5b recommendation: an external one-op shadow, frozen on the
+// writeback pulse, to PAIR the crash dot-product op's INPUTS with its OUTPUT.
+//
+// iter-262b TIMING-SAFE REWRITE.  iter-262 wedged the core at boot (total_ops=1,
+// iter-259 discriminator confirmed env OK) because it tapped fpu_rf_wr_data — the
+// execute_fpu ARITH RESULT output, the endpoint of the closed -106 ns FPU timing
+// wall (mem_data->z_lat); a 72-bit register's fanout there re-broke that critical
+// path at 56.25 MHz.  iter-256/257 booted fine because they tapped ONLY slack-
+// comfortable nets: fpu_trace_st0_mux (the regfile-READ 8:1 mux) and exe_fpu_mem_data
+// (an input-side memory latch).  So here we read BOTH the input AND the result from
+// the SAME safe regfile-read mux, one cycle apart around the synchronous writeback —
+// never from execute_fpu's combinational result/top/idx/tag outputs:
+//   acc_in (= pre-op ST0) : fpu_trace_st0_mux on the wr_en cycle.  The regfile + TOP
+//                           writes are SYNCHRONOUS, so the muxed ST0 still reads the
+//                           OLD value this cycle = this op's input accumulator.
+//   result (= post-op ST0): fpu_trace_st0_mux ONE CYCLE LATER, after the write lands
+//                           and TOP advances.  For FMUL[mem] (no pop) the result is
+//                           in ST0; for FADDP (pop) the new ST0 is the slot that just
+//                           received the sum — either way post-op ST0 = dot-product
+//                           running result, read from the safe regfile mux.
+// Trigger = fpu_rf_wr_en (a 1-bit control, negligible fanout add).  fldcw has no
+// writeback so it's excluded; the snapshot fpu_trace freezes at op-count 924631 is
+// the terminal dot-product arith op.  op_b (stable f32 mem) rides the iter-257 path.
+//   DECISIVE across 2 boots:
+//     acc_in + op_b stable, result VARIES -> COMPUTE-race (clean inputs, dirty output)
+//                                            => internal execute_fpu FSM/latch state race
+//     acc_in VARIES                       -> inherited upstream via ST0 (freeze earlier)
+// snap[71:0] = { 8'd0, acc_in[31:0], result[31:0] }
+// iter-274.1: writeback-strobed first-divergence RING FEED, packed into this
+// already-threaded fpu_trace_arith_snap bus (NO new ports).  Codex bjiw9nu0i:
+//   * strobe on (fpu_busy && fpu_rf_wr_en) = the regfile WRITEBACK, NOT fpu_done.
+//     iter-274.0 strobed fpu_done and sampled ST(TOP), which reads 0 for most ops
+//     (the dead, mostly-zero ring) -- fpu_done is not the result-landed event.
+//   * capture the RESULT from fpu_r[ LATCHED rf_wr_idx_muxed ], read ONE CYCLE after
+//     the synchronous write lands -- NOT delayed ST(TOP) (FADDP advances TOP in S_POP
+//     AFTER the S_RETIRE result write, so a delayed ST(TOP) can still read the OLD top),
+//     and NOT fpu_rf_wr_data (its 80-bit fanout re-broke the -106ns mem_data->z_lat
+//     path, iter-262).  fpu_r* are registered; a fresh 8:1 mux -> registered snap is the
+//     same slack-safe tap class as fpu_trace_st0_mux (iter-256/257 boot-GREEN).
+//   * mem operand fold latched on the write-enable cycle from the safe exe_fpu_mem_data.
+// Per-entry signature {res_fold16, mem_fold16}; bit[32] toggles once per writeback so
+// fpu_trace can edge-detect new entries.  Streamed + frozen at op 924631 in fpu_trace.
+// iter-275.1: SUPERSEDES the iter-274.1 writeback-fold ring with a per-LOAD FULL-FIDELITY
+// trace.  iter-274 (6 boots) localized the boot-varying nondeterminism to the MEMORY OPERAND
+// delivered to the dot product (operand fold co-varied 1:1 with the result fold), but the
+// writeback strobe mis-attributes reg-only ops (FADDP's mem_fold was a stale prior load) and
+// a 16-bit XOR fold can't tell a raw geometry CONSTANT (case A: raw L2/SDRAM/CDC read
+// corruption) from an FST-reloaded computed spill (case B: upstream divergence).  Codex
+// (codex_iter275_out.txt) prescribes an FPU-LOAD trace strobed on the load, capturing the
+// FULL operand value AND its linear ADDRESS so a 6-boot diff reads the actual differing
+// float32 and whether it lives at a fixed BSP-data address (=> A) or a stack spill (=> B).
+//
+// e_load = rd_ready (execute.v:483); exe_cmd/exe_linear/exe_fpu_mem_data are all latched ON
+// e_load (lines 549/521/529), so ONE CYCLE LATER they hold THIS load's command/address/value.
+// Strobe fpu_ld_d1 = e_load delayed one cycle, gated to the dot-product mem-operand loads
+// (CMD_fpu_arith_mem=FMUL/FADD m32, CMD_fpu_load_mem=FLD m32).  All three reads are registered
+// input-side latches (the iter-256/257 boot-GREEN slack-safe tap class; NO execute_fpu
+// combinational outputs, NO fpu_rf_wr_data critical net).  Packed into the already-threaded
+// fpu_trace_arith_snap[71:0] bus (zero new ports):
+//   snap[31:0]  = exe_fpu_mem_data[31:0]  (delivered float32 operand, FULL)
+//   snap[63:32] = exe_linear[31:0]        (operand linear address)
+//   snap[64]    = toggle (flips once per captured load; fpu_trace edge-detects new entries)
+// iter-275.2: the e_load strobe (iter-275.1) fired too sparsely (ring mostly empty, only ~3
+// real addrs). Revert to the PROVEN-DENSE iter-274 WRITEBACK strobe (fpu_busy && fpu_rf_wr_en,
+// which filled 58-60/64 and captured the co-varying operand), but latch the FULL 32-bit
+// operand value AND full linear address at the wr_en cycle (where exe_cmd/exe_fpu_mem_data/
+// exe_linear still hold THIS retiring op's values -- they only change on the next e_load, and
+// an in-flight FPU op takes no e_load), and advance the ring ONLY on mem-operand writebacks
+// (CMD_fpu_arith_mem=FMUL/FADD m32, CMD_fpu_load_mem=FLD m32) so every ring entry is a real
+// dot-product load.  FADDP (reg-reg) writebacks carry a stale prior operand, so they are
+// EXCLUDED from the ring (Codex's iter-274 attribution confound).  snap[31:0]=value32,
+// snap[63:32]=addr32, snap[64]=toggle (fpu_trace edge-detects).  Same slack-safe input-latch
+// taps (exe_fpu_mem_data, exe_linear); NO execute_fpu combinational outputs.
+// iter-276 CORRECTED capture (retires the iter-274/275.2 writeback-strobe CONFOUND).
+// ----------------------------------------------------------------------------------
+// Root cause of the iter-275.2 anomaly (value/addr anti-correlated, all-deterministic):
+// the writeback strobe (fpu_busy && fpu_rf_wr_en) is TIME-DECOUPLED from the operand taps
+// exe_fpu_mem_data/exe_linear, which are loaded at e_load (line 521/529) potentially MANY
+// cycles before the strobe -- so I latched a STALE, mismatched snapshot (exactly Codex's
+// "FADDP reg-only writeback = stale prior load" confound; iter-274's mem-fold was the same).
+//
+// FIX: ring the operand DIRECTLY at mem-op DISPATCH -- the exact e_load cycle the float32
+// is delivered to the FPU -- reading the TIME-ALIGNED SOURCE signals rd_read_data/rd_linear
+// (valid during e_load; they are what lines 521/529 latch into exe_*). No writeback
+// dependency, no in-flight tracking, no exe_* staleness possible. rd_read_data[31:0] is the
+// m32 operand (read.v aligns m32 to the low 32; line 526 "m32 uses low 32").  Gated to the
+// dot-product mem loads (CMD_fpu_arith_mem=FMUL/FADD m32, CMD_fpu_load_mem=FLD m32).
+//   snap[31:0]  = rd_read_data[31:0]  (delivered float32 operand, FULL, time-aligned)
+//   snap[63:32] = rd_linear[31:0]     (operand linear address -> case A fixed BSP const vs
+//                                       case B stack/heap FST-reload spill)
+//   snap[64]    = toggle (flips once per delivered load; fpu_trace edge-detects new entries)
+// rd_read_data/rd_linear are slack-safe read-stage wires (the same class read.v already
+// drives into the e_load latches); NO execute_fpu combinational outputs, NO fpu_rf_wr_data.
+// VALIDATED in the cpu/ TB (quake_fe7410_exact face#1467 dot product) before any silicon
+// build: the ringed {addr,val} must match the known operands (FLD[0xC100]=0x44A00000,
+// FMUL[0xC000]=0x3F800000, ...).  The $display probes below are sim-only (Quartus ignores).
+// iter-286 RESULT ring -- SUPERSEDES the iter-276 OPERAND ring to answer the
+// miscompute-vs-wrong-input question on silicon.  iter-282 already proved the dot-product
+// operands AND their addresses are clean+deterministic across boots, so the address field
+// is no longer the interesting variable; iter-267 flagged the floatx80 ST0 RESULT at the
+// crash as boot-VARYING (~2%, exponent stable, mantissa varies) -- but that was captured
+// with a CONFOUNDED strobe and never re-validated after the iter-276 methodology cleanup.
+// Re-measure it cleanly: ring the POST-OP ST0 RESULT one cycle after each FPU writeback,
+// read from the SAME slack-safe regfile-read 8:1 mux (fpu_trace_st0_mux) the iter-256/257
+// boot-GREEN taps used -- NEVER fpu_rf_wr_data (its 80-bit fanout re-broke the -106ns
+// mem_data->z_lat path, iter-262).  Strobe = (fpu_busy && fpu_rf_wr_en) = the regfile
+// WRITEBACK-landed event (iter-274.1; fpu_done is NOT it).  +1 cycle => the synchronous
+// regfile + TOP writes have landed, so fpu_trace_st0_mux reads the post-op ST0 (for FADDP,
+// TOP has advanced so the mux reads the popped-to running sum).  fldcw/fistp (no regfile
+// writeback) are naturally excluded.  64-bit fold = { sign+exp[15:0], mantissa[63:16] }:
+// keeps sign, the full 15-bit exponent (gross magnitude), and the top 48 mantissa bits
+// (where a ~2% variation lives), dropping only the low 16 mantissa bits.  Streamed UNCHANGED
+// through fpu_trace's words 5..8 (no fpu_trace.v / pipeline.v / ao486.v / system.v edits);
+// the offline decoder reinterprets {addr32,value32} as {expsign16:mant[63:48], mant[47:16]}.
+// iter-289 x87 STACK-STATE ring -- SUPERSEDES the iter-286 RESULT fold to test the
+// long-run TOP DESYNC hypothesis (the confirmed Quake "Bad surface extents" miscompute is
+// deterministic + clock-independent (iter-287) with no un-reset datapath state (iter-286b)
+// and bit-exact arithmetic primitives, so the prime remaining suspect is an accumulated x87
+// stack-pointer desync over the ~900k-op run).  Per writeback we ring (read +1 cycle after
+// the writeback's synchronous TOP/regfile update lands -- the SAME +1 phase iter-286 used):
+//   [15:13] post-op TOP   = fpu_trace_top  (= fpu_sw[13:11]; already declared at ~925)
+//   [12:6]  ST0 exp[6:0]  = fpu_trace_st0_mux[70:64] (magnitude, aligns ops to surfaces)
+//   [5:0]   ST0 mant[63:58]= fpu_trace_st0_mux[63:58] (top 6 mantissa bits, extra magnitude)
+// ROUTABILITY NOTE (iter-289a): the first cut also ringed fpu_rf_wr_idx/fpu_rf_wr_tag + 2
+// holding regs -- that ADDED fanout from execute_fpu and tipped the ~95%-ALM design into a
+// ROUTE failure (Critical Warning 188026; SEED 4 + aggressive-routability already on).  This
+// revision reads ONLY fpu_trace_top + fpu_trace_st0_mux -- the EXACT source signals iter-286
+// routed cleanly -- so the fanout profile matches the known-good build.  TOP trajectory alone
+// is the desync test (wr_idx/tag were only corroboration).  NEVER fpu_rf_wr_data (-106ns trap).
+// DECODE: in one 64-op frozen window the dot product of each surface is a repeating TOP
+// push/pop; compare the CRASHING surface's TOP pattern to the PRIOR (correct) surface in the
+// SAME window -- a drift (TOP not returning to baseline) localizes the desync.  16 bits total.
+// iter-290: the iter-289 stack-capture ring is TEMPORARILY NEUTERED (tied to 0) for this
+// build.  The loop-fix build FIT-FAILED on routing congestion (Cwarn 188026) at 95% ALM --
+// removing the 3001-node loop shifted placement into a congested config (seed-sensitive route
+// fail, the known reseed lesson).  The iter-290 test is BINARY (does total_ops climb past op
+// 924631), which needs only fpu_trace word-2 total_ops, NOT this capture -- so free its ~75 FFs
+// + the fpu_trace_st0_mux taps to relieve routing.  Restore the ring (git) for any future
+// stack capture.  NB: fpu_trace_st0_mux itself stays live (feeds fpu_trace_st0 at line 935).
+assign fpu_trace_arith_snap = 72'd0;
 
 //------------------------------------------------------------------------------
 

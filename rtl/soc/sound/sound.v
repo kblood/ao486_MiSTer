@@ -107,6 +107,21 @@ end
 
 //------------------------------------------------------------------------------ dsp
 
+`ifdef ADLIB_ONLY
+// iter-313 "simple Adlib": the Sound Blaster DSP (digital sample playback + DMA,
+// the 1042-LOC sound_dsp engine) is dropped to free LABs so the OPL3/Adlib FM
+// core fits alongside the FULL x87 FPU. OPL3 FM music (Adlib + SB-FM) is KEPT
+// below; what's lost is SB digital sound effects/speech and SB-DSP detection
+// (Adlib games via port 388h still work via the OPL timers; SB-probing games
+// get no DSP handshake and fall back to Adlib or no sound). Fully reversible:
+// remove the ADLIB_ONLY macro to restore the full Sound Blaster DSP.
+wire  [7:0] data_from_dsp = 8'hFF;
+wire [15:0] dsp_value_l = 16'd0, dsp_value_r = 16'd0;
+wire        irq8 = 1'b0, irq16 = 1'b0;
+assign dma_req8     = 1'b0;
+assign dma_req16    = 1'b0;
+assign dma_writedata = 16'd0;
+`else
 wire  [7:0] data_from_dsp;
 wire [15:0] dsp_value_l, dsp_value_r;
 wire        irq8, irq16;
@@ -146,6 +161,7 @@ sound_dsp sound_dsp_inst
 	.sample_value_l    (dsp_value_l),
 	.sample_value_r    (dsp_value_r)
 );
+`endif
 
 wire   irq    = irq8 | irq16;
 assign irq_5  = irq & irq_5_en;
@@ -164,6 +180,49 @@ wire opl_cs = (           address[2:1] == 0 && sb_cs)  //220-221,228-229
 wire opl_wr = write && !cms_wr;
 wire opl_rd = read;
 
+`ifdef ADLIB_JTOPL
+// iter-313 "simple Adlib": replace the Greg-Taylor OPL3 (~898 ALM in-context)
+// with jotego's leaner JTOPL2 = YM3812/OPL2 (~533 ALM standalone), freeing
+// contiguous LABs so FM audio fits alongside the FULL x87 FPU.  JTOPL is GPLv3
+// (rtl/soc/sound/jtopl/, separate dir, headers intact).  OPL2 is the original
+// Adlib chip and is backward-compatible for Adlib games; the OPL3-only 4-op /
+// second-register-bank / stereo features are not provided (fm_mode still gates
+// the 222h/223h port decode, but JTOPL2 only sees address[0]).  Mono OPL2 ->
+// both L and R.  Fully reversible: drop ADLIB_JTOPL to restore the OPL3 above.
+//
+// JTOPL2 wants clk + a clock-enable (cen) at the YM3812 master rate
+// (3.579545 MHz, the AdLib NTSC-colourburst crystal).  Derive an accurate
+// average-rate cen from the live clk_rate with the same NCO idiom as ce_1us.
+reg ce_opl;
+always @(posedge clk) begin
+	reg [27:0] sum = 0;
+	ce_opl = 0;
+	sum = sum + 28'd3579545;
+	if(sum >= clk_rate) begin
+		sum = sum - clk_rate;
+		ce_opl = 1;
+	end
+end
+
+wire signed [15:0] opl_snd;
+jtopl2 opl
+(
+	.rst(~rst_n),
+	.clk(clk),
+	.cen(ce_opl),
+	.din(writedata),
+	.addr(address[0]),
+	.cs_n(!opl_cs),
+	.wr_n(!opl_wr),
+	.dout(opl_dout),
+	.irq_n(),
+	.snd(opl_snd),
+	.sample()
+);
+
+assign sample_opl_l = opl_snd;
+assign sample_opl_r = opl_snd;
+`else
 opl3 opl
 (
 	.clk(clk_audio),
@@ -182,6 +241,7 @@ opl3 opl
 	.led(),
 	.irq_n()
 );
+`endif
 
 //------------------------------------------------------------------------------ c/ms
 

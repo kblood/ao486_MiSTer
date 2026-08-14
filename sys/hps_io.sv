@@ -101,6 +101,12 @@ module hps_io #(parameter CONF_STR, CONF_STR_BRAM=0, PS2DIV=0, WIDE=0, VDNUM=1, 
 	output reg [24:0] ps2_mouse = 0,
 	output reg [15:0] ps2_mouse_ext = 0, // 15:8 - reserved(additional buttons), 7:0 - wheel movements
 
+	// 2nd mouse (UIO 0x07): signed deltas + buttons; mouse2_stb toggles per update
+	output reg  [7:0] mouse2_dx  = 0,
+	output reg  [7:0] mouse2_dy  = 0,
+	output reg  [7:0] mouse2_btn = 0,
+	output reg        mouse2_stb = 0,
+
 	output      [1:0] buttons,
 	output            forced_scandoubler,
 	output            direct_video,
@@ -297,6 +303,7 @@ always@(posedge clk_sys) begin : uio_block
 
 	if(~io_enable) begin
 		if(cmd == 4 && !ps2skip) ps2_mouse[24] <= ~ps2_mouse[24];
+		if(cmd == 7) mouse2_stb <= ~mouse2_stb;
 		if(cmd == 5 && !ps2skip) begin
 			ps2_key <= {~ps2_key[10], pressed, extended, ps2_key_raw[7:0]};
 			if(ps2_key_raw == 'hE012E07C) ps2_key[9:0] <= 'h37C; // prnscr pressed
@@ -375,6 +382,17 @@ always@(posedge clk_sys) begin : uio_block
 									1: ps2_mouse_ext[7:0]  <= {io_din[14], io_din[14:8]};
 									2: ps2_mouse_ext[11:8] <= io_din[11:8];
 									3: ps2_mouse_ext[15:12]<= io_din[11:8];
+								endcase
+							end
+						end
+
+				// store incoming 2nd-mouse bytes (UIO 0x07): dx, dy, buttons
+				'h07: begin
+							if(!byte_cnt[MAX_W:2]) begin
+								case(byte_cnt[1:0])
+									1: mouse2_dx  <= io_din[7:0];
+									2: mouse2_dy  <= io_din[7:0];
+									3: mouse2_btn <= io_din[7:0];
 								endcase
 							end
 						end

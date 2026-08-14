@@ -98,6 +98,10 @@ module fpu_transcendental (
                      CMDEX_FPTAN = 4'd2, CMDEX_FSINCOS = 4'd7;
 
     // Settle dwell per shared-arith op (>= ARITH_WAIT_CYCLES / sdc -setup N).
+    // iter-266 NOTE: bumping this 12->24 (to restore WAIT >= ARITH_WAIT_CYCLES after
+    // iter-259 raised the arith path) was BUILT+TESTED on silicon and did NOT stop
+    // the Quake "Bad surface extents" crash (still froze @924631 both boots,
+    // transc_ops=3331 unchanged). Transc-settle is EXONERATED — do NOT re-try this.
     localparam [4:0] WAIT = 5'd12;
 
     // ----- unified transcendental coefficient ROM (iter-192 area dedup) ------

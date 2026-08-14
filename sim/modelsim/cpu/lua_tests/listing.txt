@@ -1,106 +1,47 @@
-mov ESI, 0x1000
-mov dword [ESI+0x70], 0xDEDEDEDE
-mov dword [ESI+0x74], 0xDEDEDEDE
-mov dword [ESI+0x78], 0xDEDEDEDE
-mov dword [ESI+0x7C], 0xDEDEDEDE
-mov dword [ESI+0x80], 0xDEDEDEDE
-mov dword [ESI+0x84], 0xDEDEDEDE
-mov dword [ESI+0x88], 0xDEDEDEDE
-mov dword [ESI+0x8C], 0xDEDEDEDE
-mov dword [ESI+0x90], 0xDEDEDEDE
-mov dword [ESI+0x94], 0xDEDEDEDE
-mov dword [ESI+0x98], 0xDEDEDEDE
-mov dword [ESI+0x9C], 0xDEDEDEDE
-mov dword [ESI+0xA0], 0xDEDEDEDE
-mov dword [ESI+0xA4], 0xDEDEDEDE
-mov dword [ESI+0xA8], 0xDEDEDEDE
-mov dword [ESI+0xAC], 0xDEDEDEDE
-mov dword [ESI+0xB0], 0xDEDEDEDE
-mov dword [ESI+0xB4], 0xDEDEDEDE
-mov dword [ESI+0x10], 0x00000000
-mov dword [ESI+0x14], 0x40140000
-mov dword [ESI+0x40], 0x00000000
-mov dword [ESI+0x44], 0x40080000
-mov dword [ESI+0x18], 0x00000000
-mov dword [ESI+0x1C], 0x40140000
-mov dword [ESI+0x48], 0x00000000
-mov dword [ESI+0x4C], 0x40080000
-mov dword [ESI+0x20], 0x00000000
-mov dword [ESI+0x24], 0x40220000
-mov dword [ESI+0x50], 0x00000000
-mov dword [ESI+0x54], 0x40000000
-mov dword [ESI+0x28], 0x00000000
-mov dword [ESI+0x2C], 0x401C0000
-mov dword [ESI+0x58], 0x00000000
-mov dword [ESI+0x5C], 0x40000000
-mov dword [ESI+0x30], 0x00000000
-mov dword [ESI+0x34], 0x40180000
-mov dword [ESI+0x60], 0x00000000
-mov dword [ESI+0x64], 0x40000000
-mov dword [ESI+0x38], 0x00000000
-mov dword [ESI+0x3C], 0x44500000
-mov dword [ESI+0x68], 0x00000000
-mov dword [ESI+0x6C], 0x3FF00000
+mov esp, 0x7000
+mov dword [0x900], 0x41200000
+mov dword [0x904], 0x42A00000
 fninit
-fld qword [ESI+0x40]
-fld qword [ESI+0x10]
-fprem
-fnstsw ax
-and eax, 0x4700
-mov [ESI+0xA0], eax
-fstp qword [ESI+0x70]
+fld dword [0x904]
+fld dword [0x900]
+fdiv st1, st0
+fst dword [0x8000]
+fxch st1
+fst dword [0x8004]
+mov eax, [0x8000]
+mov ebx, [0x8004]
 fninit
-fld qword [ESI+0x48]
-fld qword [ESI+0x18]
-fprem1
-fnstsw ax
-and eax, 0x4700
-mov [ESI+0xA4], eax
-fstp qword [ESI+0x78]
+fld dword [0x904]
+fld dword [0x900]
+fadd st1, st0
+fxch st1
+fstp dword [0x8008]
+mov ecx, [0x8008]
 fninit
-fld qword [ESI+0x50]
-fld qword [ESI+0x20]
-fprem
-fnstsw ax
-and eax, 0x4700
-mov [ESI+0xA8], eax
-fstp qword [ESI+0x80]
+fld dword [0x904]
+fld dword [0x900]
+fmul st1, st0
+fxch st1
+fstp dword [0x800C]
+mov edx, [0x800C]
 fninit
-fld qword [ESI+0x58]
-fld qword [ESI+0x28]
-fprem
-fnstsw ax
-and eax, 0x4700
-mov [ESI+0xAC], eax
-fstp qword [ESI+0x88]
+fld dword [0x904]
+fld dword [0x900]
+fsub st1, st0
+fxch st1
+fstp dword [0x8010]
+mov esi, [0x8010]
 fninit
-fld qword [ESI+0x60]
-fld qword [ESI+0x30]
-fprem
-fnstsw ax
-and eax, 0x4700
-mov [ESI+0xB0], eax
-fstp qword [ESI+0x90]
-fninit
-fld qword [ESI+0x68]
-fld qword [ESI+0x38]
-fprem
-fnstsw ax
-and eax, 0x4700
-mov [ESI+0xB4], eax
-fstp qword [ESI+0x98]
-mov eax, [ESI+0x74]
-add eax, [ESI+0xA0]
-mov ebx, [ESI+0x7C]
-add ebx, [ESI+0xA4]
-mov ecx, [ESI+0x84]
-add ecx, [ESI+0xA8]
-mov edx, [ESI+0x8C]
-add edx, [ESI+0xAC]
-mov edi, [ESI+0x94]
-add edi, [ESI+0xB0]
-mov ebp, [ESI+0x9C]
-add ebp, [ESI+0xB4]
+fld dword [0x904]
+fld dword [0x900]
+fdivp st1, st0
+fstp dword [0x8014]
+mov edi, [0x8014]
+mov ebp, 0x0000600D
+cmp ebx, 0x41000000
+je done
+mov ebp, 0x00BADBAD
+done:
 mov dword [0x1F0], 0xCAFEBABE
-infinite_loop:
-jmp infinite_loop
+spin:
+jmp spin

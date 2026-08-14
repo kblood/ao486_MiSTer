@@ -1697,6 +1697,21 @@ assign vga_ce = ce_video_reg & (
 
 //------------------------------------------------------------------------------
 
+// --- Native ET4000 256-color SVGA detection (NT4 et4000.sys / DOS SVGA) -------
+// A stock ET4000 driver selects packed 256-color SVGA via the *standard* GDC
+// reg-5 256-color shift mode (graph_shift_mode==2) at a >mode-13h resolution.
+// It never sets the MiSTer-proprietary attrib_reg16[7] "bypass palette" bit that
+// the depth decode below keys fb_en on, so its 640x480x256 desktop lands on the
+// legacy 256KB-BRAM planar path and renders BLACK. Detect that case here and
+// (in vga_flags) route it to the DDR-backed linear framebuffer (fb_en, 8bpp).
+//   mode 13h:        graph_shift_mode==2, vga_width ~= 40 chars (320px)  -> legacy
+//   ET4000 SVGA-256: graph_shift_mode==2, vga_width >= 64 chars (512px+) -> fb
+// Guarded to never override an already-recognized (proprietary) 16/24bpp mode.
+wire native_svga_256 = (graph_shift_mode == 2'd2)        // GDC reg5 256-color packed shift
+                     && (vga_width >= 9'd64)              // wider than mode 13h (40 chars)
+                     && (attrib_reg16[5:4] != 2'd2)       // not VBE 16bpp
+                     && !(crtc_reg37[7] && crtc_reg37[5]); // not VBE 24bpp
+
 always @(posedge clk_sys) begin
 	vga_rd_seg     <= seg_rd;
 	vga_wr_seg     <= seg_wr;
@@ -1707,8 +1722,9 @@ always @(posedge clk_sys) begin
 	vga_height     <= hide_overscan ? ((crtc_vertical_display_size <= crtc_vertical_blanking_start) ? crtc_vertical_display_size + 1'd1 : crtc_vertical_blanking_start + 1'd1)
 	                                : crtc_vertical_blanking_start + 1'd1 + vert_overscan_top;
 	vga_flags      <= { vertical_doublescan,                        // vga_flags[3]   = vertical doublescan
-	                    attrib_pelclock_div2,                       // vga_flags[2]   = 256-color
+	                    attrib_pelclock_div2 && ~native_svga_256,   // vga_flags[2]   = 256-color (cleared for native ET4000 SVGA-256 so it takes the fb path)
 	                                                                // vga_flags[1:0] = color bit depth
+	                    native_svga_256 ?                  2'b01 :  // native ET4000 256-color SVGA -> 8bpp DDR linear framebuffer
 	                    ~attrib_reg16[7] ?                 2'b00 :  // NOT Bypass internal palette (disables fb_en)
 	                    (attrib_reg16[5:4] == 2) ?         2'b10 :  // 16bpp
 	                    (crtc_reg37[7] && crtc_reg37[5]) ? 2'b11 :  // 24bpp

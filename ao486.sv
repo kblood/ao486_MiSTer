@@ -209,7 +209,7 @@ led fdd_led(clk_sys, |mgmt_req[7:6], LED_USER);
 `include "build_id.v"
 localparam CONF_STR =
 {
-	"AO486;UART115200:4000000(Turbo 115200),MIDI;",
+	"AO486FPU;UART115200:4000000(Turbo 115200),MIDI;",
 	"S0,IMGIMAVFD,Floppy A:;",
 	"S1,IMGIMAVFD,Floppy B:;",
 	"O12,Write Protect,None,A:,B:,A: & B:;",
@@ -324,6 +324,12 @@ wire [21:0] gamma_bus;
 wire  [7:0] uart1_mode;
 wire [31:0] uart1_speed;
 
+// 2nd mouse (COM3 serial mouse) deltas from hps_io UIO 0x07
+wire  [7:0] mouse2_dx;
+wire  [7:0] mouse2_dy;
+wire  [7:0] mouse2_btn;
+wire        mouse2_stb;
+
 // iter-196: CONF_STR_BRAM 0->1 moves the config-string out of the LUT-mux
 // (~200-500 ALM) into an inferred M10K ROM (confstr_rom, hps_io.sv:240). Uses
 // M10K headroom (~80% util) to relieve the ALM/routing wall. Revert: set to 0.
@@ -342,6 +348,11 @@ hps_io #(.CONF_STR(CONF_STR), .CONF_STR_BRAM(1), .PS2DIV(2000), .PS2WE(1), .WIDE
 	.ps2_mouse_data_out(ps2_mouse_data_out),
 	.ps2_mouse_clk_in(ps2_mouse_clk_in),
 	.ps2_mouse_data_in(ps2_mouse_data_in),
+
+	.mouse2_dx(mouse2_dx),
+	.mouse2_dy(mouse2_dy),
+	.mouse2_btn(mouse2_btn),
+	.mouse2_stb(mouse2_stb),
 
 	.buttons(buttons),
 	.status(status),
@@ -474,7 +485,7 @@ always @(posedge clk_sys) begin
 		// CPU & Cache config
 		clk_req <= {status[7], syscfg[7] ? syscfg[1:0] : status[6:5]};
 		l1 <= syscfg[7] ? syscfg[4] : status[15];
-		l2 <= syscfg[7] ? syscfg[5] : status[16];
+		l2 <= syscfg[7] ? syscfg[5] : status[16];   // iter-275 L2-disable experiment REVERTED (L2 exonerated: crash bit-identical with L2 off)
 		end
 	endcase
 end
@@ -921,6 +932,11 @@ system system
 	.uart2_dsr_n          (uart2_dsr),
 	.uart2_rts_n          (uart2_rts),
 	.uart2_dtr_n          (uart2_dtr),
+
+	.mouse2_dx            (mouse2_dx),
+	.mouse2_dy            (mouse2_dy),
+	.mouse2_btn           (mouse2_btn[2:0]),
+	.mouse2_stb           (mouse2_stb),
 
 	.mpu_rx               (mpu_rx),
 	.mpu_tx               (mpu_tx),

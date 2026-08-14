@@ -60,8 +60,15 @@ set_global_assignment -name ROUTER_LCELL_INSERTION_AND_LOGIC_DUPLICATION ON
 # decoder->microcode wall (-13.2 ns @56.25). Affordable now (89% ALM, congestion low).
 set_global_assignment -name PHYSICAL_SYNTHESIS_COMBO_LOGIC ON
 set_global_assignment -name PHYSICAL_SYNTHESIS_EFFORT EXTRA
-set_global_assignment -name PHYSICAL_SYNTHESIS_REGISTER_DUPLICATION ON
-set_global_assignment -name PHYSICAL_SYNTHESIS_REGISTER_RETIMING ON
+# iter-290: the 3001-node FPU comb-loop was a RETIMING BARRIER (Quartus can't retime across a
+# combinational loop).  Removing it (loop-fix) unleashed register duplication+retiming across the
+# huge FPU cone -> +~1600 ALMs -> 41,543/41,910 (99%) -> 4197 LABs > 4191 wall (170012).  Turn the
+# area-growing duplication/retiming OFF: the loop removal itself IMPROVES timing (no more "estimate
+# delays through loop"), and silicon tolerates the pessimistic-corner STA at 56.25 MHz (iter-287),
+# so the timing these knobs bought is no longer needed.  Recovers the ALMs to fit.  (also ROUTER_
+# REGISTER_DUPLICATION OFF below.)  Revert to ON if a future build needs the timing push.
+set_global_assignment -name PHYSICAL_SYNTHESIS_REGISTER_DUPLICATION OFF
+set_global_assignment -name PHYSICAL_SYNTHESIS_REGISTER_RETIMING OFF
 set_global_assignment -name OPTIMIZATION_TECHNIQUE SPEED
 set_global_assignment -name MUX_RESTRUCTURE ON
 set_global_assignment -name REMOVE_REDUNDANT_LOGIC_CELLS ON
@@ -80,7 +87,9 @@ set_global_assignment -name PHYSICAL_SYNTHESIS_ASYNCHRONOUS_SIGNAL_PIPELINING OF
 # is at int_to_floatx80 ShiftLeft cones, not register-packing-sensitive paths.
 set_global_assignment -name ALM_REGISTER_PACKING_EFFORT MEDIUM
 set_global_assignment -name OPTIMIZE_POWER_DURING_SYNTHESIS OFF
-set_global_assignment -name ROUTER_REGISTER_DUPLICATION ON
+# iter-290: OFF (paired with the physical-synthesis duplication/retiming OFF above) to recover
+# the ~1600 ALMs the loop removal's unleashed retiming added.  Revert to ON for the timing push.
+set_global_assignment -name ROUTER_REGISTER_DUPLICATION OFF
 # iter-193 NOTE: tried NEVER to pack tighter for the last 5 LABs — BACKFIRED
 # (4196->4211, ALMs rose 41482->41647: physical synthesis spread more to
 # compensate). Reverted to ALWAYS (the 4196 best). High-density fitter knobs are
@@ -91,6 +100,12 @@ set_global_assignment -name FITTER_AGGRESSIVE_ROUTABILITY_OPTIMIZATION ALWAYS
 # X22-X32/Y46-Y57). Aggressive routability is already ALWAYS (line 54), so the
 # remaining Quartus-recommended remedy is a fresh fitter seed. Keeps full FPU +
 # full 128KB L2; if this still congests, next escalation is L2 -> 64KB.
+# iter-290 (2026-06-22): the loop-fix netlist (3001-node FPU comb-loop removed) shifted
+# placement.  SEED 4 + iter-289 ring PRESENT -> routing congestion (Cwarn 188026).  SEED 5 +
+# ring NEUTERED -> LAB density overflow (170012: 4203 > 4191).  So: back to SEED 4 (which PLACES
+# fine -- no density issue) but now WITH the iter-289 stack ring NEUTERED in execute.v (frees
+# ~75 FFs + the fpu_trace_st0_mux taps of routing) -- the untried combo that should relieve the
+# SEED-4 routing congestion without the SEED-5 density penalty.
 set_global_assignment -name SEED 4
 
 # PR-2c.15 (iter 165d): keep register retiming ON globally (line 38 — an upstream MiSTer
@@ -108,16 +123,16 @@ set_global_assignment -name SEED 4
 # flops (NOT the regfile/csr RAM, which inferred fine and passed), clocked only after the
 # S_ARITHWAIT / wait states, so preserving them costs nothing and lets the SDC multicycle
 # exceptions survive.  Retiming stays ON everywhere else (l2_cache, tlb, etc).
-set_instance_assignment -name PRESERVE_REGISTER ON -to "*u_execute_fpu|b_lat*"
-set_instance_assignment -name PRESERVE_REGISTER ON -to "*u_execute_fpu|z_lat*"
-set_instance_assignment -name PRESERVE_REGISTER ON -to "*u_execute_fpu|flags_lat*"
-set_instance_assignment -name PRESERVE_REGISTER ON -to "*write_inst|wr_fpu_store_data*"
-set_instance_assignment -name PRESERVE_REGISTER ON -to "*write_inst|wr_fpu_eflags_value*"
+set_instance_assignment -name PRESERVE_REGISTER ON -to *u_execute_fpu|b_lat*
+set_instance_assignment -name PRESERVE_REGISTER ON -to *u_execute_fpu|z_lat*
+set_instance_assignment -name PRESERVE_REGISTER ON -to *u_execute_fpu|flags_lat*
+set_instance_assignment -name PRESERVE_REGISTER ON -to *write_inst|wr_fpu_store_data*
+set_instance_assignment -name PRESERVE_REGISTER ON -to *write_inst|wr_fpu_eflags_value*
 # PR-2c.17 (iter 165g): the divider's registered divisor/numerator (fed by the deep
 # floatx80_normalize cone, captured once in D_SETTLE and multicycled -setup 3) — keep
 # the fitter from retiming them back into the cone and re-splitting the relaxed path.
-set_instance_assignment -name PRESERVE_REGISTER ON -to "*u_div|num_reg*"
-set_instance_assignment -name PRESERVE_REGISTER ON -to "*u_div|den_reg*"
+set_instance_assignment -name PRESERVE_REGISTER ON -to *u_div|num_reg*
+set_instance_assignment -name PRESERVE_REGISTER ON -to *u_div|den_reg*
 
 set_global_assignment -name VERILOG_MACRO "MISTER_FB=1"
 
@@ -339,6 +354,7 @@ set_global_assignment -name QIP_FILE rtl/pll2.qip
 set_global_assignment -name QIP_FILE rtl/ao486/ao486.qip
 set_global_assignment -name QIP_FILE rtl/cache/cache.qip
 set_global_assignment -name QIP_FILE rtl/soc/uart/uart.qip
+set_global_assignment -name VERILOG_FILE rtl/soc/uart/serial_mouse.v
 set_global_assignment -name QIP_FILE rtl/soc/sound/sound.qip
 set_global_assignment -name QIP_FILE rtl/common/common.qip
 set_global_assignment -name VERILOG_FILE rtl/soc/iobus.v

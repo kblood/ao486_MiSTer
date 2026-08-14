@@ -61,7 +61,26 @@ architecture arch of etb is
    signal tx_enable   : std_logic := '0';
    
    signal cpuopt_enable : std_logic := '0';
-   
+
+   -- iter-248: interrupt-injection harness (Quake fmul->faddp retire-RAW probe).
+   -- Inert for every existing test: write.v only takes an external IRQ at an
+   -- instruction boundary when IF=1, and no other smoke test executes `sti`, so
+   -- irq_do toggling here is never acted upon unless a test opts in.
+   signal irq_do   : std_logic := '0';
+   signal irq_vec  : std_logic_vector(7 downto 0) := x"FC";
+   signal irq_done : std_logic;
+
+   -- iter-271: opt-in CPU-side memory-latency injector (Quake fmul->faddp retire-
+   -- window probe).  inj_en is raised by a guest write of a NONZERO value to byte
+   -- address 0xE10 (see the memory write handler); default '0' keeps inj_busy de-
+   -- asserted so avm_waitrequest is unchanged and EVERY EXISTING TEST IS UNAFFECTED.
+   -- When enabled, each new CPU access is held off (avm_waitrequest) for a free-
+   -- running 0..8 cycle count that advances per access, jittering the back-to-back
+   -- FMUL->FADDP retire window the way variable L2/DDR latency does on silicon
+   -- (operands are L2-cached, so injection MUST be CPU-side, not at DDRAM_OUT).
+   signal inj_en   : std_logic := '0';
+   signal inj_busy : std_logic := '0';
+
 
 begin
 
@@ -84,9 +103,9 @@ begin
    -- 8-test trap-spin.  See [[feedback-watchdog-simtime-vs-walltime]].
    process
    begin
-      wait for 1 ms;
+      wait for 4 ms;   -- iter-248: raised 1->4 ms so multi-iteration IRQ-sweep tests can complete
       assert false
-         report "iter-86 sim-time watchdog: 1 ms elapsed without smoke sentinel; likely #MF, hung op, or infinite_loop without 0xCAFEBABE@0x1F0 commit"
+         report "iter-86 sim-time watchdog: 4 ms elapsed without smoke sentinel; likely #MF, hung op, or infinite_loop without 0xCAFEBABE@0x1F0 commit"
          severity failure;
    end process;
 
@@ -118,18 +137,78 @@ begin
    --end process;
    
 
+   -- iter-248 interrupt-injection: periodically RAISE an external IRQ so the
+   -- core takes it at an instruction boundary (write.v gates on IF + boundary).
+   -- Held until interrupt_done acks, then dropped; re-raised on a prime period
+   -- (53) so the in-loop phase drifts across the fmul->faddp retire window over
+   -- many outer-loop iterations.  The guest sets IVT[0xFC]->iret stub and `sti`
+   -- before the loop; the IF gate makes an early raise harmless.
+   irq_inject : process(clk)
+      variable cnt : integer := 0;
+   begin
+      if rising_edge(clk) then
+         if rst_n = '0' then
+            irq_do <= '0';
+            cnt    := 0;
+         else
+            cnt := cnt + 1;
+            if irq_done = '1' then
+               irq_do <= '0';
+            elsif (cnt mod 1009) = 0 then  -- >> interrupt service time so the
+               irq_do <= '1';              -- main FPU loop progresses between IRQs
+            end if;
+         end if;
+      end if;
+   end process;
+
+   -- iter-271: per-access memory-latency jitter on the CPU-facing avm_waitrequest.
+   -- Free-running phase advances 0->8->0 once per CPU access; each access is stalled
+   -- 'phase' clocks before the real L2 busy is honoured.  Gated by inj_en (default 0),
+   -- so de-asserted for EVERY test that does not enable it -> shared TB stays inert.
+   inj_proc : process(clk)
+      variable cnt   : integer := 0;     -- remaining stall clocks for the current access
+      variable phase : integer := 0;     -- next stall length, cycles 0..8 per access
+      variable busyv : std_logic := '0';
+   begin
+      if rising_edge(clk) then
+         if rst_n = '0' then
+            inj_busy <= '0'; cnt := 0; phase := 0; busyv := '0';
+         elsif inj_en = '1' then
+            if (avm_read = '1' or avm_write = '1') then
+               if busyv = '0' and cnt = 0 then
+                  -- start of a new access: load the next jitter length, advance phase
+                  cnt   := phase;
+                  phase := (phase + 1) mod 9;
+                  busyv := '1';
+               end if;
+               if cnt > 0 then
+                  inj_busy <= '1';
+                  cnt := cnt - 1;
+               else
+                  inj_busy <= '0';       -- stall satisfied; command goes through
+               end if;
+            else
+               busyv := '0';             -- request dropped: arm for the next access
+               inj_busy <= '0';
+            end if;
+         else
+            inj_busy <= '0';
+         end if;
+      end if;
+   end process;
+
    iao486 : entity work.ao486
    port map
    (
       clk                        => clk,
       rst_n                      => rst_n,
-      
+
 	   a20_enable                 => '1',
       cache_disable              => '0',
-      
-      interrupt_do               => '0',
-      interrupt_vector           => (7 downto 0 => '0'),
-      interrupt_done             => open,
+
+      interrupt_do               => irq_do,
+      interrupt_vector           => irq_vec,
+      interrupt_done             => irq_done,
       
       avm_address                => avm_address      ,
       avm_writedata              => avm_writedata    ,
@@ -155,12 +234,12 @@ begin
    
    DDRAM_IN_BURSTCNT <= avm_burstcount;
    DDRAM_IN_ADDR     <= avm_address(29 downto 0) & "00";
-   DDRAM_IN_RD       <= avm_read;
+   DDRAM_IN_RD       <= avm_read  and not inj_busy;  -- iter-271: hold cmd off L2 during stall
    DDRAM_IN_DIN      <= avm_writedata;
    DDRAM_IN_BE       <= avm_byteenable;
-   DDRAM_IN_WE       <= avm_write;
-   
-   avm_waitrequest   <= DDRAM_IN_BUSY;
+   DDRAM_IN_WE       <= avm_write and not inj_busy;  -- so L2 can't accept/return early
+
+   avm_waitrequest   <= DDRAM_IN_BUSY or inj_busy;  -- iter-271: inj_busy=0 unless enabled
    avm_readdatavalid <= DDRAM_IN_DOUT_READY;
    avm_readdata      <= DDRAM_IN_DOUT;
    
@@ -385,6 +464,17 @@ begin
                   (DDRAM_OUT_BE(3 downto 0) = "1111") and
                   (DDRAM_OUT_DIN(31 downto 0) = X"CAFEBABE") then
                   assert false report "PR-2b.4k smoke sentinel 0xCAFEBABE@0x1F0 detected; clean exit" severity failure;
+               end if;
+               -- iter-271: guest 32-bit write to byte addr 0xE10 toggles the memory-
+               -- latency jitter injector.  Nonzero => enable (inj_en='1'); zero =>
+               -- disable.  Inert for every test that never writes 0xE10.
+               if (unsigned(DDRAM_OUT_ADDR) = to_unsigned(16#E10#, 28)) and
+                  (DDRAM_OUT_BE(3 downto 0) = "1111") then
+                  if (DDRAM_OUT_DIN(31 downto 0) = X"00000000") then
+                     inj_en <= '0';
+                  else
+                     inj_en <= '1';
+                  end if;
                end if;
             end if;
          end if;

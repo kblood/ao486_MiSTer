@@ -103,7 +103,12 @@ begin
             recordcount := recordcount + 1;
             tc          := tc + 1;
             
-            if (recordcount mod 1000 = 0) then
+            -- iter-223: flush EVERY record (was mod 1000). WEDGE smokes retire
+            -- only ~30-50 instructions before hanging, so a 1000-record flush
+            -- window left the trace 0-byte on any force-kill/crash. Per-record
+            -- close/reopen is negligible for these tiny smokes and makes the
+            -- trace durable -- the last #tc names the op the pipeline hung after.
+            if (recordcount mod 1 = 0) then
                file_close(outfile);
                file_open(f_status, outfile, filename, append_mode);
                recordcount := 0;

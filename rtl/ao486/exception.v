@@ -102,7 +102,7 @@ module exception(
 
     // iter-285: in-flight x87 op in execute (see active_dec/active_rd gating below)
     input               exe_fpu_busy,
-
+    
     //interrupt
     input       [7:0]   interrupt_vector,
     output reg          interrupt_done,
@@ -138,6 +138,7 @@ module exception(
     output reg          exc_push_error,
     output reg          exc_soft_int,
     output reg          exc_soft_int_ib,
+    output reg  [4:0]   exc_trace_src,
     
     output              exc_pf_read,
     output              exc_pf_write,
@@ -274,6 +275,42 @@ always @(posedge clk) begin
     else if(active_dec && dec_pf_fault)             exc_vector_full <= { 1'b1, `EXCEPTION_PF };
     
     else                                            exc_vector_full <= exc_vector_full_to_reg; //set if(exception_init || wr_debug_init || interrupt_done)
+end
+
+always @(posedge clk) begin
+    if(rst_n == 1'b0)                                   exc_trace_src <= 5'd0;
+
+    else if(active_wr && wr_new_push_ss_fault)          exc_trace_src <= 5'd1;
+    else if(active_wr && wr_string_es_fault)            exc_trace_src <= 5'd2;
+    else if(active_wr && wr_push_ss_fault)              exc_trace_src <= 5'd3;
+    else if(active_wr && write_ac_fault)                exc_trace_src <= 5'd4;
+    else if(active_wr && write_page_fault)              exc_trace_src <= 5'd5;
+    else if(active_wr && wr_int)                        exc_trace_src <= 5'd6;
+
+    else if(active_exe && exe_div_exception)            exc_trace_src <= 5'd7;
+    else if(active_exe && exe_trigger_gp_fault)         exc_trace_src <= 5'd8;
+    else if(active_exe && exe_trigger_ts_fault)         exc_trace_src <= 5'd9;
+    else if(active_exe && exe_trigger_ss_fault)         exc_trace_src <= 5'd10;
+    else if(active_exe && exe_trigger_np_fault)         exc_trace_src <= 5'd11;
+    else if(active_exe && exe_trigger_nm_fault)         exc_trace_src <= 5'd12;
+    else if(active_exe && exe_trigger_db_fault)         exc_trace_src <= 5'd13;
+    else if(active_exe && exe_trigger_pf_fault)         exc_trace_src <= 5'd14;
+    else if(active_exe && exe_bound_fault)              exc_trace_src <= 5'd15;
+    else if(active_exe && exe_load_seg_gp_fault)        exc_trace_src <= 5'd16;
+    else if(active_exe && exe_load_seg_ss_fault)        exc_trace_src <= 5'd17;
+    else if(active_exe && exe_load_seg_np_fault)        exc_trace_src <= 5'd18;
+
+    else if(active_rd && rd_seg_gp_fault)               exc_trace_src <= 5'd19;
+    else if(active_rd && rd_descriptor_gp_fault)        exc_trace_src <= 5'd20;
+    else if(active_rd && rd_seg_ss_fault)               exc_trace_src <= 5'd21;
+    else if(active_rd && rd_io_allow_fault)             exc_trace_src <= 5'd22;
+    else if(active_rd && rd_ss_esp_from_tss_fault)      exc_trace_src <= 5'd23;
+    else if(active_rd && read_ac_fault)                 exc_trace_src <= 5'd24;
+    else if(active_rd && read_page_fault)               exc_trace_src <= 5'd25;
+
+    else if(active_dec && dec_gp_fault)                 exc_trace_src <= 5'd26;
+    else if(active_dec && dec_ud_fault)                 exc_trace_src <= 5'd27;
+    else if(active_dec && dec_pf_fault)                 exc_trace_src <= 5'd28;
 end
 
 always @(posedge clk) begin

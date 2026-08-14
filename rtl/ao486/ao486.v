@@ -88,7 +88,9 @@ module ao486 (
 	output              fpu_trace_exe_fpu_busy,
 	// iter-257: delivered float32 mem operand + dot-product mem-op flag
 	output       [31:0] fpu_trace_mem_data,
-	output              fpu_trace_mem_arith
+	output              fpu_trace_mem_arith,
+	// iter-261b: settled arith datapath snapshot (lightened)
+	output       [71:0] fpu_trace_arith_snap
 );
 
 //------------------------------------------------------------------------------
@@ -810,7 +812,8 @@ pipeline pipeline_inst(
 	.fpu_trace_st0                 (fpu_trace_st0),                 //output [79:0]
 	.exe_fpu_busy                  (exe_fpu_busy),                  //output (iter-255)
 	.fpu_trace_mem_data            (fpu_trace_mem_data),            //output [31:0] iter-257
-	.fpu_trace_mem_arith           (fpu_trace_mem_arith)            //output        iter-257
+	.fpu_trace_mem_arith           (fpu_trace_mem_arith),           //output        iter-257
+	.fpu_trace_arith_snap          (fpu_trace_arith_snap)           //output [71:0] iter-261b
 );
 
 //------------------------------------------------------------------------------

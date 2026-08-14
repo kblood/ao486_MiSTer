@@ -45,9 +45,19 @@ module l2_cache #(parameter ADDRBITS = 24)
 
 
 // cache settings
-localparam LINES         = 1024;
+// PR-2c.11 (iter 163): ASSOCIATIVITY 4->2 to fit the DE10-nano on BOTH ALM and
+// M10K simultaneously.  Context: once the FPU brought ALMs to ~99%, the fit hit
+// a two-resource squeeze.  Shrinking LINES (1024->256) freed M10K but spilled
+// the tag arrays into logic, pushing ALMs to 104% (43,774) — LINES reduction is
+// ALM-hostile.  Cutting ASSOCIATIVITY instead reduces BOTH resources: it halves
+// the data RAM (4 ways x 1024 x 512 b = 256KB ~208 M10K  ->  2 ways = 128KB
+// ~104 M10K, frees ~104 blocks) AND halves the tag-compare / way-select logic
+// (ALM down).  L2 is a perf enhancement this project added (not base core), so
+// trimming it is the lowest-regret lever — preserves ALL user-facing features
+// (SB/Adlib audio, HDMI video) and is reversible.  128KB 2-way is still useful.
+localparam LINES         = 512;   // iter-166: 256KB->128KB (1024->512) to relieve density + shorten ram cone; WATCH ALM (iter-163: LINES cut can spill tags->logic)
 localparam LINESIZE      = 8;
-localparam ASSOCIATIVITY = 4;	
+localparam ASSOCIATIVITY = 2;
 
 // cache control
 localparam ASSO_BITS     = $clog2(ASSOCIATIVITY);

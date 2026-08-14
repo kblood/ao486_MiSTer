@@ -38,3 +38,11 @@ c5_pin_model_dump.txt
 *.xml
 *_netlist
 *.cdf
+
+# local build/sim scratch (iterative Quartus/ModelSim runs, not project source)
+*.log
+*.err
+*.out
+*.hung_attempt
+transcript
+work/

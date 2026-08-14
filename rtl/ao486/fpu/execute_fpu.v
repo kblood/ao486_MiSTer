@@ -2636,6 +2636,14 @@ module execute_fpu (
     // mem80_hi_lat), the FSM parks in S_BCDLOADWAIT for 18 cycles, then captures
     // b_lat <= fbld_x80 on bcd_load_done.  fbld_val HOLDS after done.  .busy
     // unused (the FSM gates on bcd_load_done).
+`ifdef NO_FBCD
+    // iter-313: FBLD packed-BCD load DROPPED to free ~75 ALM (LAB reclaim so the
+    // OPL3/Adlib FM core fits alongside the full FPU). No C compiler or game
+    // emits FBLD. fbld_val=0 => FBLD pushes 0.0; bcd_load_done=1 so the FSM
+    // completes S_BCDLOADWAIT immediately and NEVER hangs. Reversible: drop NO_FBCD.
+    assign fbld_val      = 64'd0;
+    assign bcd_load_done = 1'b1;
+`else
     bcd_to_int64 u_bcd_to_int64 (
         .clk   (clk),
         .rst   (~rst_n | exe_reset | init),
@@ -2645,6 +2653,7 @@ module execute_fpu (
         .done  (bcd_load_done),
         .busy  ()
     );
+`endif
     wire        fbld_sign = mem80_hi_lat[15];
     wire [63:0] fbld_int  = fbld_sign ? (~fbld_val + 64'd1) : fbld_val;
     // PR-2c.6 (iter 160): single shared int_to_floatx80 for FILD + FBLD.  When
@@ -2690,6 +2699,13 @@ module execute_fpu (
     // (int64_to_bcd) and assemble {sign-byte, 2 hi digits, 16 lo digits}.  The
     // sign byte takes ST(0)'s sign bit so -0 stores as a negative zero.  store_data
     // maps [31:0]@+0 / [63:32]@+4 / [79:64]@+8 in write.v's 3-step (4+4+2) FSM.
+`ifdef NO_FBCD
+    // iter-313: FBSTP's exclusive floatx80_to_int copy (~331 ALM) dropped. The
+    // SHARED u_floatx80_to_int (FIST/FISTP) is untouched. FBSTP stores BCD 0.
+    assign fbstp_save_z = 64'd0;
+    assign fbstp_ie     = 1'b0;
+    assign fbstp_pe     = 1'b0;
+`else
     floatx80_to_int u_fbstp_to_int (
         .a     (a_lat),
         .rc    (cw[11:10]),
@@ -2698,6 +2714,7 @@ module execute_fpu (
         .ie    (fbstp_ie),
         .pe    (fbstp_pe)
     );
+`endif
     wire        fbstp_sign      = a_lat[79];
     wire [63:0] fbstp_mag       = fbstp_save_z[63] ? (~fbstp_save_z + 64'd1) : fbstp_save_z;
     wire        fbstp_range_ovf = (fbstp_mag > 64'd999999999999999999);  // > 10^18 - 1
@@ -2707,6 +2724,12 @@ module execute_fpu (
     // combinational unroll; now ~150 ALUTs for this rare op).  bcd_start pulses for
     // the single S_COMPUTE cycle, then the FSM parks in S_BCDWAIT until bcd_done;
     // fbstp_bcd holds after done.  .busy unused (the FSM gates on bcd_done).
+`ifdef NO_FBCD
+    // iter-313: FBSTP packed-BCD encoder (~93 ALM) dropped. fbstp_bcd=0;
+    // bcd_done=1 so the FSM completes S_BCDWAIT immediately and never hangs.
+    assign fbstp_bcd = 72'd0;
+    assign bcd_done  = 1'b1;
+`else
     int64_to_bcd u_int64_to_bcd (
         .clk   (clk),
         .rst   (~rst_n | exe_reset | init),
@@ -2716,6 +2739,7 @@ module execute_fpu (
         .done  (bcd_done),
         .busy  ()
     );
+`endif
     assign fbstp_store_data = fbstp_ia ? 80'hFFFFC000000000000000
                                        : {fbstp_sign, 7'd0, fbstp_bcd};
     assign fbstp_flags      = {(~fbstp_ia & fbstp_pe), 1'b0, 1'b0, 1'b0, 1'b0, fbstp_ia};
